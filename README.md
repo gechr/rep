@@ -4,6 +4,18 @@
 
 It supports plain string replacement, regex replacement, interactive preview, dry-run summaries, and repeatable `-e/--expression` replacements.
 
+## Install
+
+```shell
+brew install gechr/tap/rep
+```
+
+Or with Cargo:
+
+```shell
+cargo install --git https://github.com/gechr/rep
+```
+
 ## Usage
 
 Basic replacement:
