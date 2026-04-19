@@ -15,7 +15,6 @@ build:
 .PHONY: install
 install:
 	@$(CARGO) install --path .
-	@rep --completions fish > ~/.config/fish/completions/rep.fish
 
 .PHONY: lint
 lint:

@@ -291,7 +291,13 @@ impl InteractivePatcher {
                     );
                 }
                 PatchAction::Accept => {
-                    history.push((contents.clone(), offset, expr_idx, match_index - 1, match_total));
+                    history.push((
+                        contents.clone(),
+                        offset,
+                        expr_idx,
+                        match_index - 1,
+                        match_total,
+                    ));
                     self.save(path, &new_contents)?;
                     offset = to_char_boundary(
                         &new_contents,
@@ -300,14 +306,26 @@ impl InteractivePatcher {
                     contents = read_to_string(path)?;
                 }
                 PatchAction::Reject => {
-                    history.push((contents.clone(), offset, expr_idx, match_index - 1, match_total));
+                    history.push((
+                        contents.clone(),
+                        offset,
+                        expr_idx,
+                        match_index - 1,
+                        match_total,
+                    ));
                     offset = to_char_boundary(
                         &contents,
                         offset + mat_end + if is_zero_length { 1 } else { 0 },
                     );
                 }
                 PatchAction::Edit => {
-                    history.push((contents.clone(), offset, expr_idx, match_index - 1, match_total));
+                    history.push((
+                        contents.clone(),
+                        offset,
+                        expr_idx,
+                        match_index - 1,
+                        match_total,
+                    ));
                     self.save(path, &new_contents)?;
                     run_editor(path, start_line + 1)?;
                     contents = read_to_string(path)?;
@@ -589,7 +607,6 @@ impl InteractivePatcher {
 
         Ok(())
     }
-
 }
 
 #[cfg(test)]

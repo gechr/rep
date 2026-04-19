@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: rep
+
+report_sizes: true
+
+builds:
+  - id: rep
+    builder: rust
+    binary: rep
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+    flags:
+      - --release
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+archives:
+  - name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz

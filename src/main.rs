@@ -491,8 +491,10 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
 fn run_preview(cli: &Cli) -> Result<()> {
     let expressions = compile_expressions(cli)?;
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
-    let expr_refs: Vec<interactive::PreviewExpr<'_>> =
-        expressions.iter().map(CompiledExpression::preview_expr).collect();
+    let expr_refs: Vec<interactive::PreviewExpr<'_>> = expressions
+        .iter()
+        .map(CompiledExpression::preview_expr)
+        .collect();
     let mut fm = interactive::InteractivePatcher::new(false, cli.diff_tool());
     for (path, contents) in
         scan::matching_files_parallel(cli.dirs(), cli.file_set(), cli.hidden, &pre_filter)?

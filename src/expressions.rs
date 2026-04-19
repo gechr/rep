@@ -290,7 +290,7 @@ pub(crate) fn build_pre_filter_matcher(
 pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> {
     let expressions = if cli.uses_expressions() {
         if cli.delete {
-            // In delete mode, `-e` does not split on `=` — the whole argument
+            // In delete mode, `-e` does not split on `=` - the whole argument
             // is the pattern to match for line deletion. This lets patterns
             // like `foo=bar` (containing a literal `=`) be matched verbatim.
             cli.expressions
