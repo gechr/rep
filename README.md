@@ -18,51 +18,48 @@ cargo install --git https://github.com/gechr/rep
 
 ## Usage
 
-Basic replacement:
+<img src="assets/help.png" alt="help" width="650">
+
+## Examples
 
 ```sh
-rep <find> <replace> [path...]
-```
+# Replace "1.2.3" with "4.5.6" in all files
+rep 1.2.3 4.5.6
 
-Multiple replacements:
+# Replace "foo" with "bar" in "*.txt" files
+rep -f txt foo bar
 
-```sh
-rep -e <find>=<replace> [-e <find>=<replace> ...] [path...]
-```
+# Replace "foo" with "bar" in all (hidden) files
+rep --hidden foo bar
 
-### Examples
+# Replace "foo" with "bar" in all (hidden) Dockerfiles
+rep -f '=Dockerfile' --hidden foo bar
 
-```sh
-# Literal replacement
-rep foo bar
+# Replace "foo" with "bar" in all files and preview changes
+rep --preview foo bar
 
-# Interactive preview
-rep --preview foo bar src
+# Replace "1.2.3" and "3.2.1" with "4.5.6" in all files
+rep --regexp '[13]\.2\.[13]' 4.5.6
 
-# Dry-run summary (no writes)
-rep --dry-run foo bar .
+# Swap "foo.bar" with "bar.foo" in all files
+rep --regexp '(foo)\.(bar)' '$2.$1'
 
-# Regex with capture groups
-rep --regexp '(foo)\.(bar)' '$2.$1' src
+# Replace "f.oo" and "F.OO" with "bar"
+rep --ignore-case 'f.oo' bar
 
-# Multiple expressions in one pass
-rep -e foo=bar -e baz=qux src
-
-# Preserve-case rewrite across all 7 variants
+# Smart-replace in all files:
+#  "foo_bar" with "hello_world"
+#  "FooBar"  with "HelloWorld"
+#  "FOO_BAR" with "HELLO_WORLD"
 rep --smart foo_bar hello_world
 
-# Delete every line containing TODO
+# Read from stdin and replace "foo" with "bar"
+echo foo bar | rep foo bar
+rep foo bar < foobar.txt
+
+# Apply multiple replacements in one pass
+rep -e foo=bar -e baz=qux src
+
+# Delete every line containing "TODO"
 rep -d TODO
-
-# Just list files that contain a match
-rep -l foo src
-
-# Filter by file type / glob
-rep -f rs,go foo bar
-rep -f '=Dockerfile' foo bar
-
-# Read from stdin
-echo 'hello world' | rep hello goodbye
 ```
-
-Run `rep --help` for the full option list.
