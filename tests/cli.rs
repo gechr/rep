@@ -251,6 +251,27 @@ fn delete_mode_removes_matching_lines_in_file() {
 }
 
 #[test]
+fn rewrites_file_with_invalid_utf8_preserving_non_utf8_bytes() {
+    // Regression: the scan/apply/write path must stay on bytes end-to-end so
+    // files containing invalid UTF-8 (e.g. latin-1, binary-adjacent text) are
+    // rewritten in place without mangling the non-UTF-8 bytes around the match.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    let input: &[u8] = b"pre\xfffoo\xfepost\n";
+    fs::write(&file, input).unwrap();
+
+    let status = Command::new(REP)
+        .args(["foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let after = fs::read(&file).unwrap();
+    assert_eq!(after, b"pre\xffbar\xfepost\n");
+}
+
+#[test]
 fn delete_mode_with_expression_matches_raw_string_including_equals() {
     // With `-d`, `-e foo=bar` is NOT split on `=`; the whole string is
     // taken literally as the pattern to match for line deletion.

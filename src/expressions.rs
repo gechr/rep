@@ -10,6 +10,7 @@ use anyhow::bail;
 use grep::regex::RegexMatcher;
 use grep::regex::RegexMatcherBuilder;
 use regex::RegexBuilder;
+use regex::bytes::RegexBuilder as BytesRegexBuilder;
 
 use crate::Cli;
 
@@ -22,11 +23,12 @@ pub(crate) struct Expression {
 pub(crate) struct CompiledExpression {
     pub(crate) pattern: String,
     pub(crate) regex: regex::Regex,
+    pub(crate) bytes_regex: regex::bytes::Regex,
     pub(crate) matcher: RegexMatcher,
     pub(crate) replacer: Box<dyn Fn(&regex::Captures) -> String + Send + Sync>,
     /// Dispatch for `apply_compiled_expressions` - lets each mode use a
     /// `Replacer` impl that appends directly into the destination buffer
-    /// instead of allocating a fresh `String` per match.
+    /// instead of allocating a fresh `Vec<u8>` per match.
     pub(crate) bulk: BulkReplacer,
 }
 
@@ -46,24 +48,24 @@ pub(crate) enum BulkReplacer {
 }
 
 struct CountingLiteralReplacer<'a> {
-    rep: &'a str,
+    rep: &'a [u8],
     count: usize,
 }
 
-impl regex::Replacer for CountingLiteralReplacer<'_> {
-    fn replace_append(&mut self, _: &regex::Captures<'_>, dst: &mut String) {
+impl regex::bytes::Replacer for CountingLiteralReplacer<'_> {
+    fn replace_append(&mut self, _: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
         self.count += 1;
-        dst.push_str(self.rep);
+        dst.extend_from_slice(self.rep);
     }
 }
 
 struct CountingRegexReplacer<'a> {
-    subst: &'a str,
+    subst: &'a [u8],
     count: usize,
 }
 
-impl regex::Replacer for CountingRegexReplacer<'_> {
-    fn replace_append(&mut self, caps: &regex::Captures<'_>, dst: &mut String) {
+impl regex::bytes::Replacer for CountingRegexReplacer<'_> {
+    fn replace_append(&mut self, caps: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
         self.count += 1;
         caps.expand(self.subst, dst);
     }
@@ -74,17 +76,21 @@ struct CountingSmartReplacer<'a> {
     count: usize,
 }
 
-impl regex::Replacer for CountingSmartReplacer<'_> {
-    fn replace_append(&mut self, caps: &regex::Captures<'_>, dst: &mut String) {
+impl regex::bytes::Replacer for CountingSmartReplacer<'_> {
+    fn replace_append(&mut self, caps: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
         self.count += 1;
-        let matched = caps
-            .get(0)
-            .expect("full regex match is always present")
-            .as_str();
-        dst.push_str(
+        let matched = caps.get(0).expect("full regex match is always present");
+        // Smart-replace patterns are built from inflector case conversions of
+        // the user's find string. Those are always valid UTF-8, so every
+        // match here is a UTF-8 substring of the haystack — the `from_utf8`
+        // always succeeds. A non-UTF-8 substring could never have matched.
+        let key = std::str::from_utf8(matched.as_bytes())
+            .expect("smart pattern alternatives are always UTF-8");
+        dst.extend_from_slice(
             self.map
-                .get(matched)
-                .expect("smart replacer map must contain every regex alternative"),
+                .get(key)
+                .expect("smart replacer map must contain every regex alternative")
+                .as_bytes(),
         );
     }
 }
@@ -208,6 +214,9 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
         let regex = RegexBuilder::new(&pattern)
             .build()
             .with_context(|| format!("Invalid smart pattern: {}", expr.find))?;
+        let bytes_regex = BytesRegexBuilder::new(&pattern)
+            .build()
+            .with_context(|| format!("Invalid smart pattern: {}", expr.find))?;
         let matcher = RegexMatcherBuilder::new().build(&pattern)?;
         let variant_map = std::sync::Arc::new(variant_map);
         let closure_map = std::sync::Arc::clone(&variant_map);
@@ -224,6 +233,7 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
         Ok(CompiledExpression {
             pattern,
             regex,
+            bytes_regex,
             matcher,
             replacer: Box::new(replacer),
             bulk: BulkReplacer::Smart(variant_map),
@@ -233,6 +243,12 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
         let subst = build_subst_for(cli, &expr.replace);
         let dot_matches_new_line = cli.dotall || cli.multiline;
         let regex = RegexBuilder::new(&pattern)
+            .case_insensitive(cli.ignore_case)
+            .multi_line(true)
+            .dot_matches_new_line(dot_matches_new_line)
+            .build()
+            .with_context(|| format!("Invalid regex: {}", expr.find))?;
+        let bytes_regex = BytesRegexBuilder::new(&pattern)
             .case_insensitive(cli.ignore_case)
             .multi_line(true)
             .dot_matches_new_line(dot_matches_new_line)
@@ -256,6 +272,7 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
         Ok(CompiledExpression {
             pattern,
             regex,
+            bytes_regex,
             matcher,
             replacer: Box::new(replacer),
             bulk,
@@ -322,28 +339,34 @@ pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> 
 }
 
 pub(crate) fn apply_compiled_expressions<'a>(
-    contents: &'a str,
+    contents: &'a [u8],
     expressions: &[CompiledExpression],
-) -> (Cow<'a, str>, usize) {
-    use regex::Replacer as _;
-    let mut current = Cow::Borrowed(contents);
+) -> (Cow<'a, [u8]>, usize) {
+    use regex::bytes::Replacer as _;
+    let mut current: Cow<'a, [u8]> = Cow::Borrowed(contents);
     let mut replacements = 0;
 
     for expr in expressions {
         let (replaced, count) = match &expr.bulk {
             BulkReplacer::Literal(rep) => {
-                let mut rep = CountingLiteralReplacer { rep, count: 0 };
-                let out = expr.regex.replace_all(&current, rep.by_ref());
+                let mut rep = CountingLiteralReplacer {
+                    rep: rep.as_bytes(),
+                    count: 0,
+                };
+                let out = expr.bytes_regex.replace_all(&current, rep.by_ref());
                 (out, rep.count)
             }
             BulkReplacer::Regex(subst) => {
-                let mut rep = CountingRegexReplacer { subst, count: 0 };
-                let out = expr.regex.replace_all(&current, rep.by_ref());
+                let mut rep = CountingRegexReplacer {
+                    subst: subst.as_bytes(),
+                    count: 0,
+                };
+                let out = expr.bytes_regex.replace_all(&current, rep.by_ref());
                 (out, rep.count)
             }
             BulkReplacer::Smart(map) => {
                 let mut rep = CountingSmartReplacer { map, count: 0 };
-                let out = expr.regex.replace_all(&current, rep.by_ref());
+                let out = expr.bytes_regex.replace_all(&current, rep.by_ref());
                 (out, rep.count)
             }
         };
@@ -368,6 +391,18 @@ mod tests {
 
     fn build_subst(cli: &Cli) -> String {
         build_subst_for(cli, cli.replacement())
+    }
+
+    fn apply_str<'a>(
+        contents: &'a str,
+        expressions: &[CompiledExpression],
+    ) -> (Cow<'a, str>, usize) {
+        let (out, n) = apply_compiled_expressions(contents.as_bytes(), expressions);
+        let cow = match out {
+            Cow::Borrowed(b) => Cow::Borrowed(std::str::from_utf8(b).unwrap()),
+            Cow::Owned(o) => Cow::Owned(String::from_utf8(o).unwrap()),
+        };
+        (cow, n)
     }
 
     #[test]
@@ -425,7 +460,7 @@ mod tests {
         let cli = Cli::parse_from(["rep", "-e", "a=b", "-e", "b=c", "src"]);
 
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("a b", &expressions);
+        let (output, count) = apply_str("a b", &expressions);
         assert_eq!(output, "c c");
         assert_eq!(count, 3);
     }
@@ -438,7 +473,7 @@ mod tests {
     fn test_expression_preserves_text_before_match() {
         let cli = Cli::parse_from(["rep", "-e", "a=b"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("#![allow(clippy::all)]", &expressions);
+        let (output, count) = apply_str("#![allow(clippy::all)]", &expressions);
         assert_eq!(output, "#![bllow(clippy::bll)]");
         assert_eq!(count, 2);
     }
@@ -452,7 +487,7 @@ mod tests {
     fn test_apply_compiled_expressions_no_matches() {
         let cli = Cli::parse_from(["rep", "-e", "xyz=abc"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("hello world", &expressions);
+        let (output, count) = apply_str("hello world", &expressions);
         assert_eq!(output, "hello world");
         assert_eq!(count, 0);
     }
@@ -503,7 +538,7 @@ mod tests {
     fn test_smart_replaces_case_variants() {
         let cli = Cli::parse_from(["rep", "foo_bar", "hello_world", "--smart"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, _) = apply_compiled_expressions("FooBar\nfoo_bar\nFOO_BAR\n", &expressions);
+        let (output, _) = apply_str("FooBar\nfoo_bar\nFOO_BAR\n", &expressions);
         assert_eq!(output, "HelloWorld\nhello_world\nHELLO_WORLD\n");
     }
 
@@ -511,7 +546,7 @@ mod tests {
     fn test_expression_with_line_regexp() {
         let cli = Cli::parse_from(["rep", "-x", "-e", "foo=bar"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("foo\nfoobar\nfoo", &expressions);
+        let (output, count) = apply_str("foo\nfoobar\nfoo", &expressions);
         assert_eq!(output, "bar\nfoobar\nbar");
         assert_eq!(count, 2);
     }
@@ -520,7 +555,7 @@ mod tests {
     fn test_expression_with_ignore_case() {
         let cli = Cli::parse_from(["rep", "-i", "-e", "foo=bar"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("Foo FOO foo", &expressions);
+        let (output, count) = apply_str("Foo FOO foo", &expressions);
         assert_eq!(output, "bar bar bar");
         assert_eq!(count, 3);
     }
@@ -529,7 +564,7 @@ mod tests {
     fn test_expression_with_word_boundary() {
         let cli = Cli::parse_from(["rep", "-w", "-e", "foo=bar"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("foo foobar food", &expressions);
+        let (output, count) = apply_str("foo foobar food", &expressions);
         assert_eq!(output, "bar foobar food");
         assert_eq!(count, 1);
     }
@@ -538,7 +573,7 @@ mod tests {
     fn test_word_regexp_preserves_regex_capture_numbers() {
         let cli = Cli::parse_from(["rep", "-r", "-w", "-e", r"(foo)\.(bar)=$2.$1"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("foo.bar foo.baz", &expressions);
+        let (output, count) = apply_str("foo.bar foo.baz", &expressions);
         assert_eq!(output, "bar.foo foo.baz");
         assert_eq!(count, 1);
     }
@@ -547,7 +582,7 @@ mod tests {
     fn test_expression_with_regex_capture_groups() {
         let cli = Cli::parse_from(["rep", "-r", "-e", "(foo)\\.(bar)=$2.$1"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("foo.bar baz", &expressions);
+        let (output, count) = apply_str("foo.bar baz", &expressions);
         assert_eq!(output, "bar.foo baz");
         assert_eq!(count, 1);
     }
@@ -556,7 +591,7 @@ mod tests {
     fn test_multiple_expressions_chain() {
         let cli = Cli::parse_from(["rep", "-e", "red=blue", "-e", "cat=dog"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, _) = apply_compiled_expressions("the red cat", &expressions);
+        let (output, _) = apply_str("the red cat", &expressions);
         assert_eq!(output, "the blue dog");
     }
 
@@ -564,7 +599,7 @@ mod tests {
     fn test_expression_empty_replacement() {
         let cli = Cli::parse_from(["rep", "-e", "foo="]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("foobarfoo", &expressions);
+        let (output, count) = apply_str("foobarfoo", &expressions);
         assert_eq!(output, "bar");
         assert_eq!(count, 2);
     }
@@ -577,7 +612,7 @@ mod tests {
     fn test_literal_mode_preserves_dollar_references() {
         let cli = Cli::parse_from(["rep", "foo", "$1bar"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("foo baz", &expressions);
+        let (output, count) = apply_str("foo baz", &expressions);
         assert_eq!(output, "$1bar baz");
         assert_eq!(count, 1);
     }
@@ -589,7 +624,7 @@ mod tests {
     fn test_apply_compiled_expressions_no_matches_borrows() {
         let cli = Cli::parse_from(["rep", "-e", "xyz=abc"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, _) = apply_compiled_expressions("hello world", &expressions);
+        let (output, _) = apply_str("hello world", &expressions);
         assert!(matches!(output, Cow::Borrowed(_)));
     }
 
@@ -597,7 +632,7 @@ mod tests {
     fn test_dotall_allows_dot_to_match_newline() {
         let cli = Cli::parse_from(["rep", "-r", "--dotall", "a.b", "X"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("a\nb", &expressions);
+        let (output, count) = apply_str("a\nb", &expressions);
         assert_eq!(output, "X");
         assert_eq!(count, 1);
     }
@@ -606,7 +641,7 @@ mod tests {
     fn test_dot_does_not_match_newline_by_default() {
         let cli = Cli::parse_from(["rep", "-r", "a.b", "X"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("a\nb", &expressions);
+        let (output, count) = apply_str("a\nb", &expressions);
         assert_eq!(output, "a\nb");
         assert_eq!(count, 0);
     }
@@ -615,7 +650,7 @@ mod tests {
     fn test_delete_mode_wraps_pattern_and_deletes_whole_line() {
         let cli = Cli::parse_from(["rep", "-d", "foo"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions(
+        let (output, count) = apply_str(
             "keep\nhas foo here\nkeep\nanother foo\ntail\n",
             &expressions,
         );
@@ -627,7 +662,7 @@ mod tests {
     fn test_delete_mode_handles_match_on_final_line_without_trailing_newline() {
         let cli = Cli::parse_from(["rep", "-d", "foo"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("keep\nhas foo", &expressions);
+        let (output, count) = apply_str("keep\nhas foo", &expressions);
         assert_eq!(output, "keep\n");
         assert_eq!(count, 1);
     }
@@ -636,7 +671,7 @@ mod tests {
     fn test_delete_mode_with_line_regexp_only_matches_exact_lines() {
         let cli = Cli::parse_from(["rep", "-d", "-x", "foo"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("foo\nfoobar\nfoo\nbar\n", &expressions);
+        let (output, count) = apply_str("foo\nfoobar\nfoo\nbar\n", &expressions);
         assert_eq!(output, "foobar\nbar\n");
         assert_eq!(count, 2);
     }
@@ -645,7 +680,7 @@ mod tests {
     fn test_delete_mode_with_ignore_case() {
         let cli = Cli::parse_from(["rep", "-d", "-i", "foo"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions("FOO line\nbar\nfoo line\n", &expressions);
+        let (output, count) = apply_str("FOO line\nbar\nfoo line\n", &expressions);
         assert_eq!(output, "bar\n");
         assert_eq!(count, 2);
     }
@@ -656,7 +691,7 @@ mod tests {
         let cli = Cli::parse_from(["rep", "-d", "-e", "foo=bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) =
-            apply_compiled_expressions("keep\nhas foo=bar here\nalso foo\ntail\n", &expressions);
+            apply_str("keep\nhas foo=bar here\nalso foo\ntail\n", &expressions);
         assert_eq!(output, "keep\nalso foo\ntail\n");
         assert_eq!(count, 1);
     }
@@ -665,7 +700,7 @@ mod tests {
     fn test_delete_mode_with_multiple_expressions_deletes_each() {
         let cli = Cli::parse_from(["rep", "-d", "-e", "foo", "-e", "baz=qux"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_compiled_expressions(
+        let (output, count) = apply_str(
             "keep\nhas foo\nmiddle\nline with baz=qux\ntail\n",
             &expressions,
         );

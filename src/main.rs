@@ -465,7 +465,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 if count == 0 {
                     return WalkState::Continue;
                 }
-                let payload = if write && let Err(e) = std::fs::write(path, updated.as_bytes()) {
+                let payload = if write && let Err(e) = std::fs::write(path, &*updated) {
                     Err(anyhow::Error::new(e).context(format!("Unable to write to {path:?}")))
                 } else {
                     Ok((display_path(path), count))
@@ -499,17 +499,29 @@ fn run_preview(cli: &Cli) -> Result<()> {
     for (path, contents) in
         scan::matching_files_parallel(cli.dirs(), cli.file_set(), cli.hidden, &pre_filter)?
     {
+        // Preview mode relies on char-boundary arithmetic in the TUI, so
+        // coerce to a `String` here. Files whose bytes are not valid UTF-8
+        // are skipped — the non-preview apply path operates on bytes and
+        // handles them faithfully; interactive preview can't.
+        let Ok(contents) = String::from_utf8(contents) else {
+            eprintln!(
+                "Warning: {}: skipping (not valid UTF-8; use non-preview mode)",
+                path.display()
+            );
+            continue;
+        };
         fm.present_and_apply_patches_multi(&expr_refs, &path, contents)?;
     }
     Ok(())
 }
 
 fn run_stdin(cli: &Cli) -> Result<()> {
-    use std::io;
+    use std::io::{self, Read as _, Write as _};
     let expressions = compile_expressions(cli)?;
-    let input = io::read_to_string(io::stdin().lock())?;
+    let mut input = Vec::new();
+    io::stdin().lock().read_to_end(&mut input)?;
     let (output, _) = apply_compiled_expressions(&input, &expressions);
-    print!("{output}");
+    io::stdout().lock().write_all(&output)?;
     Ok(())
 }
 

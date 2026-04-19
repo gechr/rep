@@ -5,7 +5,7 @@
 // at the repo root for details.
 
 use std::cmp::min;
-use std::fs::read_to_string;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -76,13 +76,13 @@ pub(crate) fn file_contents_if_matches(
     searcher: &mut Searcher,
     matcher: &RegexMatcher,
     path: &Path,
-) -> Option<String> {
+) -> Option<Vec<u8>> {
     let mut sink = MatchSink::new();
     if let Err(e) = searcher.search_path(matcher, path, &mut sink) {
         eprintln!("Warning: {}: {e}", path.display());
     }
     if sink.did_match {
-        match read_to_string(path) {
+        match fs::read(path) {
             Ok(c) => Some(c),
             Err(e) => {
                 eprintln!("Warning: {}: {e}", path.display());
@@ -117,7 +117,7 @@ pub(crate) fn matching_files_parallel(
     file_set: Option<FileSet>,
     hidden: bool,
     pre_filter: &RegexMatcher,
-) -> Result<mpsc::IntoIter<(PathBuf, String)>> {
+) -> Result<mpsc::IntoIter<(PathBuf, Vec<u8>)>> {
     let walk = walk_builder_with_file_set(dirs, file_set)?
         .hidden(!hidden)
         .threads(min(
