@@ -63,6 +63,17 @@ pub(crate) fn walk_builder_with_file_set(
     Ok(builder)
 }
 
+pub(crate) fn apply_walk_flags(builder: &mut WalkBuilder, hidden: bool, no_ignore: bool) {
+    builder.hidden(!hidden);
+    if no_ignore {
+        builder
+            .ignore(false)
+            .git_ignore(false)
+            .git_exclude(false)
+            .git_global(false);
+    }
+}
+
 pub(crate) fn make_searcher() -> Searcher {
     SearcherBuilder::new()
         .line_number(false)
@@ -116,10 +127,12 @@ pub(crate) fn matching_files_parallel(
     dirs: Vec<&str>,
     file_set: Option<FileSet>,
     hidden: bool,
+    no_ignore: bool,
     pre_filter: &RegexMatcher,
 ) -> Result<mpsc::IntoIter<(PathBuf, Vec<u8>)>> {
-    let walk = walk_builder_with_file_set(dirs, file_set)?
-        .hidden(!hidden)
+    let mut builder = walk_builder_with_file_set(dirs, file_set)?;
+    apply_walk_flags(&mut builder, hidden, no_ignore);
+    let walk = builder
         .threads(min(
             12,
             thread::available_parallelism().map_or(1, |n| n.get()),

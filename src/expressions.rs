@@ -690,8 +690,7 @@ mod tests {
         // `-d -e foo=bar` → the whole `foo=bar` is the pattern; no find/replace split.
         let cli = Cli::parse_from(["rep", "-d", "-e", "foo=bar"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) =
-            apply_str("keep\nhas foo=bar here\nalso foo\ntail\n", &expressions);
+        let (output, count) = apply_str("keep\nhas foo=bar here\nalso foo\ntail\n", &expressions);
         assert_eq!(output, "keep\nalso foo\ntail\n");
         assert_eq!(count, 1);
     }

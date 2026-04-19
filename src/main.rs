@@ -33,6 +33,10 @@ struct Cli {
     #[arg(short = 'H', long = "hidden")]
     hidden: bool,
 
+    /// Ignore .gitignore / .ignore / .git/info/exclude
+    #[arg(long = "no-ignore")]
+    no_ignore: bool,
+
     /// Greedy matching
     #[arg(short = 'G', long = "greedy")]
     greedy: bool,
@@ -366,8 +370,9 @@ fn run_list_files(cli: &Cli) -> Result<()> {
     let expressions = compile_expressions(cli)?;
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
 
-    let walk = scan::walk_builder_with_file_set(cli.dirs(), cli.file_set())?
-        .hidden(!cli.hidden)
+    let mut builder = scan::walk_builder_with_file_set(cli.dirs(), cli.file_set())?;
+    scan::apply_walk_flags(&mut builder, cli.hidden, cli.no_ignore);
+    let walk = builder
         .threads(std::cmp::min(
             12,
             std::thread::available_parallelism().map_or(1, |n| n.get()),
@@ -424,8 +429,9 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     let expressions = Arc::new(compile_expressions(cli)?);
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
 
-    let walk = scan::walk_builder_with_file_set(cli.dirs(), cli.file_set())?
-        .hidden(!cli.hidden)
+    let mut builder = scan::walk_builder_with_file_set(cli.dirs(), cli.file_set())?;
+    scan::apply_walk_flags(&mut builder, cli.hidden, cli.no_ignore);
+    let walk = builder
         .threads(std::cmp::min(
             12,
             std::thread::available_parallelism().map_or(1, |n| n.get()),
@@ -496,9 +502,13 @@ fn run_preview(cli: &Cli) -> Result<()> {
         .map(CompiledExpression::preview_expr)
         .collect();
     let mut fm = interactive::InteractivePatcher::new(false, cli.diff_tool());
-    for (path, contents) in
-        scan::matching_files_parallel(cli.dirs(), cli.file_set(), cli.hidden, &pre_filter)?
-    {
+    for (path, contents) in scan::matching_files_parallel(
+        cli.dirs(),
+        cli.file_set(),
+        cli.hidden,
+        cli.no_ignore,
+        &pre_filter,
+    )? {
         // Preview mode relies on char-boundary arithmetic in the TUI, so
         // coerce to a `String` here. Files whose bytes are not valid UTF-8
         // are skipped — the non-preview apply path operates on bytes and
