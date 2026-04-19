@@ -18,8 +18,7 @@ endif
 		exit 1; \
 	fi
 	@if [ -d .jj ] && [ "$$(jj show @ -T 'if(empty && description == "", "ok", "dirty")')" != "ok" ]; then \
-		echo "error: current jj change must be empty and have no description" >&2; \
-		exit 1; \
+		jj new; \
 	fi
 	@sed -i 's/^version = ".*"/version = "$(VERSION)"/' Cargo.toml
 	@$(CARGO) update -p rep --offline

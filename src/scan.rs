@@ -5,7 +5,6 @@
 // at the repo root for details.
 
 use std::cmp::min;
-use std::fmt;
 use std::fs::read_to_string;
 use std::path::Path;
 use std::path::PathBuf;
@@ -80,13 +79,13 @@ pub(crate) fn file_contents_if_matches(
 ) -> Option<String> {
     let mut sink = MatchSink::new();
     if let Err(e) = searcher.search_path(matcher, path, &mut sink) {
-        eprintln!("{}", display_warning(&e.into()));
+        eprintln!("Warning: {}: {e}", path.display());
     }
     if sink.did_match {
         match read_to_string(path) {
             Ok(c) => Some(c),
             Err(e) => {
-                eprintln!("{}", display_warning(&e.into()));
+                eprintln!("Warning: {}: {e}", path.display());
                 None
             }
         }
@@ -98,7 +97,7 @@ pub(crate) fn file_contents_if_matches(
 pub(crate) fn file_matches(searcher: &mut Searcher, matcher: &RegexMatcher, path: &Path) -> bool {
     let mut sink = MatchSink::new();
     if let Err(e) = searcher.search_path(matcher, path, &mut sink) {
-        eprintln!("{}", display_warning(&e.into()));
+        eprintln!("Warning: {}: {e}", path.display());
     }
     sink.did_match
 }
@@ -158,22 +157,6 @@ pub(crate) fn matching_files_parallel(
         });
     });
     Ok(rx.into_iter())
-}
-
-fn display_warning(error: &Error) -> DisplayWarning<'_> {
-    DisplayWarning { inner: error }
-}
-
-#[derive(Debug)]
-struct DisplayWarning<'a> {
-    inner: &'a Error,
-}
-
-impl fmt::Display for DisplayWarning<'_> {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(fmt, "Warning: {:?}", self.inner)?;
-        Ok(())
-    }
 }
 
 struct MatchSink {
