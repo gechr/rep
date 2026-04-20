@@ -5,6 +5,7 @@
 // at the repo root for details.
 
 use std::cmp::min;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -71,6 +72,8 @@ pub(crate) fn apply_walk_flags(builder: &mut WalkBuilder, hidden: bool, no_ignor
             .git_ignore(false)
             .git_exclude(false)
             .git_global(false);
+    } else {
+        builder.filter_entry(|entry| !is_vcs_path(entry.path()));
     }
 }
 
@@ -116,6 +119,22 @@ pub(crate) fn file_matches(searcher: &mut Searcher, matcher: &RegexMatcher, path
 pub(crate) fn is_candidate_path(path: &Path) -> bool {
     let bytes = path.as_os_str().as_encoded_bytes();
     !bytes.ends_with(b"~") && !bytes.ends_with(b"tags") && !bytes.ends_with(b"TAGS")
+}
+
+fn is_vcs_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str(),
+            name if is_vcs_dir_name(name)
+        )
+    })
+}
+
+fn is_vcs_dir_name(name: &OsStr) -> bool {
+    matches!(
+        name.as_encoded_bytes(),
+        b".git" | b".jj" | b".hg" | b".svn" | b"CVS"
+    )
 }
 
 /// Walk `dirs` in parallel, keep files that pass `is_candidate_path` and
@@ -199,7 +218,7 @@ impl Sink for MatchSink {
 mod tests {
     use std::path::Path;
 
-    use super::is_candidate_path;
+    use super::{is_candidate_path, is_vcs_path};
 
     #[test]
     fn test_is_candidate_path_accepts_regular_source_file() {
@@ -219,5 +238,20 @@ mod tests {
         assert!(!is_candidate_path(Path::new("tags")));
         assert!(!is_candidate_path(Path::new("TAGS")));
         assert!(!is_candidate_path(Path::new("./tags")));
+    }
+
+    #[test]
+    fn test_is_vcs_path_rejects_vcs_directories() {
+        assert!(is_vcs_path(Path::new(".git/config")));
+        assert!(is_vcs_path(Path::new("repo/.jj/working_copy")));
+        assert!(is_vcs_path(Path::new("./nested/.svn/entries")));
+        assert!(is_vcs_path(Path::new("vendor/CVS/Entries")));
+    }
+
+    #[test]
+    fn test_is_vcs_path_accepts_regular_hidden_paths() {
+        assert!(!is_vcs_path(Path::new(".env")));
+        assert!(!is_vcs_path(Path::new(".config/app.toml")));
+        assert!(!is_vcs_path(Path::new("src/.hidden/file.txt")));
     }
 }

@@ -175,6 +175,28 @@ fn file_glob_limits_writes_to_matching_extension() {
 }
 
 #[test]
+fn hidden_mode_skips_gitignored_and_vcs_paths() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join(".visible-hidden.txt"), "foo");
+    write(&dir.path().join(".gitignore"), "ignored.txt\n");
+    write(&dir.path().join("ignored.txt"), "foo");
+
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    write(&dir.path().join(".git/config"), "foo");
+
+    let status = Command::new(REP)
+        .args(["--hidden", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(read(&dir.path().join(".visible-hidden.txt")), "bar");
+    assert_eq!(read(&dir.path().join("ignored.txt")), "foo");
+    assert_eq!(read(&dir.path().join(".git/config")), "foo");
+}
+
+#[test]
 fn smart_mode_replaces_all_seven_case_variants() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");
