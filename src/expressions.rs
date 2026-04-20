@@ -210,14 +210,35 @@ fn parse_expressions(cli: &Cli) -> Result<Vec<Expression>> {
 
 fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression> {
     if cli.smart {
-        let (variant_map, pattern) = build_case_variants(&expr.find, &expr.replace);
+        let (variant_map, variant_pattern) = build_case_variants(&expr.find, &expr.replace);
+        // With `-d --smart`, the case-variant alternation becomes the "inner" of
+        // a line-deleting wrapper, and the replacement is always empty.
+        let pattern = if cli.delete {
+            wrap_delete_pattern(&variant_pattern, false)
+        } else {
+            variant_pattern
+        };
         let regex = RegexBuilder::new(&pattern)
+            .multi_line(cli.delete)
             .build()
             .with_context(|| format!("Invalid smart pattern: {}", expr.find))?;
         let bytes_regex = BytesRegexBuilder::new(&pattern)
+            .multi_line(cli.delete)
             .build()
             .with_context(|| format!("Invalid smart pattern: {}", expr.find))?;
-        let matcher = RegexMatcherBuilder::new().build(&pattern)?;
+        let matcher = RegexMatcherBuilder::new()
+            .multi_line(cli.delete)
+            .build(&pattern)?;
+        if cli.delete {
+            return Ok(CompiledExpression {
+                pattern,
+                regex,
+                bytes_regex,
+                matcher,
+                replacer: Box::new(|_: &regex::Captures| String::new()),
+                bulk: BulkReplacer::Literal(String::new()),
+            });
+        }
         let variant_map = std::sync::Arc::new(variant_map);
         let closure_map = std::sync::Arc::clone(&variant_map);
         let replacer = move |caps: &regex::Captures| -> String {

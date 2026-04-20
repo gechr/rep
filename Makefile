@@ -40,6 +40,10 @@ fmt:
 	@rumdl fmt --quiet
 	@$(CARGO) fmt --all
 
+.PHONY: help
+help:
+	@vhs assets/help.tape
+
 .PHONY: install
 install:
 	@$(CARGO) install --path .

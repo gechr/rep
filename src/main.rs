@@ -78,11 +78,7 @@ struct Cli {
     list_files: bool,
 
     /// Delete lines matching <find>
-    #[arg(
-        short = 'd',
-        long = "delete",
-        conflicts_with_all = ["smart", "list_files"],
-    )]
+    #[arg(short = 'd', long = "delete")]
     delete: bool,
 
     /// Dry run
@@ -260,10 +256,7 @@ impl Cli {
         self.ignore_case |= bool_var("REP_IGNORE_CASE");
         self.regexp |= bool_var("REP_REGEXP");
 
-        // `delete` conflicts with `smart`/`list_files`; don't let env re-introduce them.
-        if !self.delete && !self.list_files {
-            self.smart |= bool_var("REP_SMART");
-        }
+        self.smart |= bool_var("REP_SMART");
         // `preview` conflicts with `dry_run`; don't let env re-enable preview on a dry-run.
         if !self.dry_run {
             self.preview |= bool_var("REP_PREVIEW");
@@ -872,9 +865,17 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_mode_conflicts_with_smart_flag() {
-        let result = Cli::try_parse_from(["rep", "-d", "-S", "foo"]);
-        assert!(result.is_err());
+    fn test_delete_combines_with_smart_flag() {
+        let cli = Cli::parse_from(["rep", "-d", "-S", "foo_bar"]);
+        assert!(cli.delete);
+        assert!(cli.smart);
+    }
+
+    #[test]
+    fn test_delete_combines_with_list_files() {
+        let cli = Cli::parse_from(["rep", "-d", "-l", "foo"]);
+        assert!(cli.delete);
+        assert!(cli.list_files);
     }
 
     #[test]
@@ -921,14 +922,6 @@ mod tests {
         let mut cli = Cli::parse_from(["rep", "-p", "--preview-tool", "diff -u", "foo", "bar"]);
         cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
         assert_eq!(cli.preview_tool.as_deref(), Some("diff -u"));
-    }
-
-    #[test]
-    fn test_env_smart_skipped_when_delete_flag_present() {
-        let env = std::collections::HashMap::from([("REP_SMART", "1")]);
-        let mut cli = Cli::parse_from(["rep", "-d", "foo"]);
-        cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
-        assert!(!cli.smart, "REP_SMART must not re-introduce smart when -d is set");
     }
 
     #[test]

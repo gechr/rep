@@ -251,6 +251,45 @@ fn delete_mode_removes_matching_lines_in_file() {
 }
 
 #[test]
+fn delete_mode_with_smart_removes_all_case_variants() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(
+        &file,
+        "hello_world here\nHelloWorld line\nhelloWorld line\nHELLO_WORLD line\nhello-world line\nkeep me\n",
+    );
+
+    let status = Command::new(REP)
+        .args(["-d", "--smart", "hello_world", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(read(&file), "keep me\n");
+}
+
+#[test]
+fn delete_mode_with_list_files_prints_matching_paths_without_modifying() {
+    let dir = tempdir().unwrap();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    write(&a, "has foo\nother\n");
+    write(&b, "nothing here\n");
+
+    let output = Command::new(REP)
+        .args(["-d", "-l", "foo", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("a.txt"), "stdout: {stdout:?}");
+    assert!(!stdout.contains("b.txt"), "stdout: {stdout:?}");
+    // File must be untouched - `-l` is informational.
+    assert_eq!(read(&a), "has foo\nother\n");
+}
+
+#[test]
 fn rewrites_file_with_invalid_utf8_preserving_non_utf8_bytes() {
     // Regression: the scan/apply/write path must stay on bytes end-to-end so
     // files containing invalid UTF-8 (e.g. latin-1, binary-adjacent text) are
