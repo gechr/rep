@@ -82,7 +82,7 @@ impl regex::bytes::Replacer for CountingSmartReplacer<'_> {
         let matched = caps.get(0).expect("full regex match is always present");
         // Smart-replace patterns are built from inflector case conversions of
         // the user's find string. Those are always valid UTF-8, so every
-        // match here is a UTF-8 substring of the haystack — the `from_utf8`
+        // match here is a UTF-8 substring of the haystack - the `from_utf8`
         // always succeeds. A non-UTF-8 substring could never have matched.
         let key = std::str::from_utf8(matched.as_bytes())
             .expect("smart pattern alternatives are always UTF-8");

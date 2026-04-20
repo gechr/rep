@@ -235,6 +235,45 @@ fn print_help_long() {
 }
 
 impl Cli {
+    /// Fill in defaults from `REP_*` env vars. CLI flags take precedence:
+    /// for booleans, an explicit `--flag` (true) is never overridden; for
+    /// `Option<T>`, env only fills when the flag is absent (`None`).
+    fn apply_env_defaults(&mut self) {
+        self.apply_env_defaults_with(|k| std::env::var(k).ok());
+    }
+
+    /// Testable core of `apply_env_defaults`. Skips env fallback where it would
+    /// violate a clap-level conflict that the user's CLI flags already expressed
+    /// (e.g. `-d` vs `REP_SMART`).
+    fn apply_env_defaults_with(&mut self, get: impl Fn(&str) -> Option<String>) {
+        // Truthy: "1", "true" (case-insensitive). Anything else is false.
+        let bool_var = |k| {
+            get(k)
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+                .unwrap_or(false)
+        };
+        let str_var = |k| get(k).filter(|v| !v.is_empty());
+
+        self.hidden |= bool_var("REP_HIDDEN");
+        self.no_ignore |= bool_var("REP_NO_IGNORE");
+        self.greedy |= bool_var("REP_GREEDY");
+        self.ignore_case |= bool_var("REP_IGNORE_CASE");
+        self.regexp |= bool_var("REP_REGEXP");
+
+        // `delete` conflicts with `smart`/`list_files`; don't let env re-introduce them.
+        if !self.delete && !self.list_files {
+            self.smart |= bool_var("REP_SMART");
+        }
+        // `preview` conflicts with `dry_run`; don't let env re-enable preview on a dry-run.
+        if !self.dry_run {
+            self.preview |= bool_var("REP_PREVIEW");
+        }
+
+        if self.preview_tool.is_none() {
+            self.preview_tool = str_var("REP_PREVIEW_TOOL");
+        }
+    }
+
     fn uses_expressions(&self) -> bool {
         !self.expressions.is_empty()
     }
@@ -511,7 +550,7 @@ fn run_preview(cli: &Cli) -> Result<()> {
     )? {
         // Preview mode relies on char-boundary arithmetic in the TUI, so
         // coerce to a `String` here. Files whose bytes are not valid UTF-8
-        // are skipped — the non-preview apply path operates on bytes and
+        // are skipped - the non-preview apply path operates on bytes and
         // handles them faithfully; interactive preview can't.
         let Ok(contents) = String::from_utf8(contents) else {
             eprintln!(
@@ -629,7 +668,8 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    cli.apply_env_defaults();
 
     if let Some(shell) = cli.completions {
         clap_complete::generate(shell, &mut Cli::command(), "rep", &mut std::io::stdout());
@@ -835,6 +875,68 @@ mod tests {
     fn test_delete_mode_conflicts_with_smart_flag() {
         let result = Cli::try_parse_from(["rep", "-d", "-S", "foo"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_env_defaults_enable_boolean_flags() {
+        let env = std::collections::HashMap::from([
+            ("REP_HIDDEN", "1"),
+            ("REP_NO_IGNORE", "true"),
+            ("REP_SMART", "TRUE"),
+            ("REP_IGNORE_CASE", "1"),
+            ("REP_GREEDY", "1"),
+            ("REP_REGEXP", "1"),
+            ("REP_PREVIEW", "1"),
+            ("REP_PREVIEW_TOOL", "delta --side-by-side"),
+        ]);
+        let mut cli = Cli::parse_from(["rep", "foo", "bar"]);
+        cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
+        assert!(cli.hidden);
+        assert!(cli.no_ignore);
+        assert!(cli.smart);
+        assert!(cli.ignore_case);
+        assert!(cli.greedy);
+        assert!(cli.regexp);
+        assert!(cli.preview);
+        assert_eq!(cli.preview_tool.as_deref(), Some("delta --side-by-side"));
+    }
+
+    #[test]
+    fn test_env_defaults_falsy_values_are_ignored() {
+        let env = std::collections::HashMap::from([
+            ("REP_HIDDEN", "0"),
+            ("REP_SMART", "false"),
+            ("REP_PREVIEW_TOOL", ""),
+        ]);
+        let mut cli = Cli::parse_from(["rep", "foo", "bar"]);
+        cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
+        assert!(!cli.hidden);
+        assert!(!cli.smart);
+        assert!(cli.preview_tool.is_none());
+    }
+
+    #[test]
+    fn test_cli_flag_wins_over_env_for_preview_tool() {
+        let env = std::collections::HashMap::from([("REP_PREVIEW_TOOL", "delta")]);
+        let mut cli = Cli::parse_from(["rep", "-p", "--preview-tool", "diff -u", "foo", "bar"]);
+        cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
+        assert_eq!(cli.preview_tool.as_deref(), Some("diff -u"));
+    }
+
+    #[test]
+    fn test_env_smart_skipped_when_delete_flag_present() {
+        let env = std::collections::HashMap::from([("REP_SMART", "1")]);
+        let mut cli = Cli::parse_from(["rep", "-d", "foo"]);
+        cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
+        assert!(!cli.smart, "REP_SMART must not re-introduce smart when -d is set");
+    }
+
+    #[test]
+    fn test_env_preview_skipped_when_dry_run_flag_present() {
+        let env = std::collections::HashMap::from([("REP_PREVIEW", "1")]);
+        let mut cli = Cli::parse_from(["rep", "-n", "foo", "bar"]);
+        cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
+        assert!(!cli.preview);
     }
 
     #[test]
