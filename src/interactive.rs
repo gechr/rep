@@ -182,14 +182,14 @@ struct PatchPrompt<'a> {
 
 pub(crate) struct InteractivePatcher {
     yes_to_all: bool,
-    diff_tool: Option<String>,
+    preview_tool: Option<String>,
 }
 
 impl InteractivePatcher {
-    pub(crate) fn new(accept_all: bool, diff_tool: Option<String>) -> Self {
+    pub(crate) fn new(accept_all: bool, preview_tool: Option<String>) -> Self {
         Self {
             yes_to_all: accept_all,
-            diff_tool,
+            preview_tool,
         }
     }
 
@@ -392,8 +392,8 @@ impl InteractivePatcher {
             println!("\x1b[1m\x1b[34m{display_path}\x1b[22m:{start_line}-{end_line}\x1b[m");
         }
 
-        let diff_result = if let Some(ref diff_tool) = self.diff_tool {
-            self.run_external_diff(old, new, diff_tool)
+        let diff_result = if let Some(ref preview_tool) = self.preview_tool {
+            self.run_external_diff(old, new, preview_tool)
         } else {
             self.print_diff(&diffs);
             Ok(())
@@ -563,7 +563,7 @@ impl InteractivePatcher {
         println!("{suffix}");
     }
 
-    fn run_external_diff(&self, old: &str, new: &str, diff_tool: &str) -> Result<()> {
+    fn run_external_diff(&self, old: &str, new: &str, preview_tool: &str) -> Result<()> {
         let mut old_file = NamedTempFile::with_prefix("rep-old-")
             .context("Unable to create temporary file for old content")?;
         let mut new_file = NamedTempFile::with_prefix("rep-new-")
@@ -579,10 +579,10 @@ impl InteractivePatcher {
         old_file.flush().context("Unable to flush old temp file")?;
         new_file.flush().context("Unable to flush new temp file")?;
 
-        let args = split_shell_words(diff_tool, "diff tool command")?;
+        let args = split_shell_words(preview_tool, "preview tool command")?;
         let (program, args) = args
             .split_first()
-            .expect("diff tool command is guaranteed non-empty");
+            .expect("preview tool command is guaranteed non-empty");
 
         let mut cmd = Command::new(program);
         cmd.args(args);
@@ -603,7 +603,7 @@ impl InteractivePatcher {
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
-            .with_context(|| format!("Unable to run diff tool: {diff_tool}"))?;
+            .with_context(|| format!("Unable to run preview tool: {preview_tool}"))?;
 
         Ok(())
     }

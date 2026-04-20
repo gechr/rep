@@ -99,8 +99,8 @@ struct Cli {
     preview: bool,
 
     /// Diff tool for preview
-    #[arg(long = "diff-tool", requires = "preview")]
-    diff_tool: Option<String>,
+    #[arg(long = "preview-tool", requires = "preview")]
+    preview_tool: Option<String>,
 
     #[arg(long = "completions", value_name = "SHELL", hide = true)]
     completions: Option<Shell>,
@@ -163,7 +163,7 @@ fn print_help() {
 
   {red}-n{reset}, {red}--dry-run{reset}            Show what would be changed without writing
   {red}-p{reset}, {red}--preview{reset}            Preview the changes before applying them
-      {red}--diff-tool {dim}<cmd>{reset}    External diff tool for preview mode
+      {red}--preview-tool {dim}<cmd>{reset} External diff tool for preview mode
 "
     );
     print!("{text}");
@@ -248,8 +248,8 @@ impl Cli {
         !self.uses_expressions() && (self.delete || self.list_files)
     }
 
-    fn diff_tool(&self) -> Option<String> {
-        if let Some(ref tool) = self.diff_tool {
+    fn preview_tool(&self) -> Option<String> {
+        if let Some(ref tool) = self.preview_tool {
             return Some(tool.clone());
         }
         // Default to delta if available on PATH
@@ -501,7 +501,7 @@ fn run_preview(cli: &Cli) -> Result<()> {
         .iter()
         .map(CompiledExpression::preview_expr)
         .collect();
-    let mut fm = interactive::InteractivePatcher::new(false, cli.diff_tool());
+    let mut fm = interactive::InteractivePatcher::new(false, cli.preview_tool());
     for (path, contents) in scan::matching_files_parallel(
         cli.dirs(),
         cli.file_set(),
@@ -838,8 +838,8 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_tool_requires_preview() {
-        let result = Cli::try_parse_from(["rep", "--diff-tool", "delta", "foo", "bar"]);
+    fn test_preview_tool_requires_preview() {
+        let result = Cli::try_parse_from(["rep", "--preview-tool", "delta", "foo", "bar"]);
         assert!(result.is_err());
     }
 

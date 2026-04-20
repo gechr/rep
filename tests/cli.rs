@@ -153,7 +153,7 @@ fn explicit_help_writes_to_stdout() {
     assert!(output.stderr.is_empty(), "stderr: {:?}", output.stderr);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Usage"));
-    assert!(stdout.contains("--diff-tool"));
+    assert!(stdout.contains("--preview-tool"));
 }
 
 #[test]
