@@ -121,15 +121,28 @@ pub(crate) fn build_case_variants(
         to_train_case,
     ];
 
+    fn normalize_separators(input: &str) -> String {
+        input.replace(['_', '-'], " ")
+    }
+
     let mut map = std::collections::HashMap::new();
     let mut alt_parts = Vec::new();
+    let seeds = [
+        (pattern.to_string(), replacement.to_string()),
+        (
+            normalize_separators(pattern),
+            normalize_separators(replacement),
+        ),
+    ];
 
-    for convert in converters {
-        let from = convert(pattern);
-        let to = convert(replacement);
-        if !from.is_empty() && !map.contains_key(&from) {
-            alt_parts.push(regex::escape(&from));
-            map.insert(from, to);
+    for (pattern_seed, replacement_seed) in seeds {
+        for convert in converters {
+            let from = convert(&pattern_seed);
+            let to = convert(&replacement_seed);
+            if !from.is_empty() && !map.contains_key(&from) {
+                alt_parts.push(regex::escape(&from));
+                map.insert(from, to);
+            }
         }
     }
 
@@ -561,6 +574,15 @@ mod tests {
         let expressions = compile_expressions(&cli).unwrap();
         let (output, _) = apply_str("FooBar\nfoo_bar\nFOO_BAR\n", &expressions);
         assert_eq!(output, "HelloWorld\nhello_world\nHELLO_WORLD\n");
+    }
+
+    #[test]
+    fn test_delete_smart_matches_kebab_variant_inside_larger_token() {
+        let cli = Cli::parse_from(["rep", "-d", "foo_bar", "--smart"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("keep\nprefix-foo-bar-suffix\nkeep\n", &expressions);
+        assert_eq!(output, "keep\nkeep\n");
+        assert_eq!(count, 1);
     }
 
     #[test]
