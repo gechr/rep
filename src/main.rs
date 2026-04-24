@@ -55,7 +55,7 @@ struct Cli {
     dotall: bool,
 
     /// Use regex
-    #[arg(short = 'r', long = "regexp")]
+    #[arg(short = 'r', long = "regex", alias = "regexp")]
     regexp: bool,
 
     /// Preserve-case replacement
@@ -149,7 +149,7 @@ fn print_help() {
   {red}-i{reset}, {red}--ignore-case{reset}         Case-insensitive matching
   {red}-m{reset}, {red}--multiline{reset}           Search across multiple lines
       {red}--dotall{reset}              Allow dot to match newlines
-  {red}-r{reset}, {red}--regexp{reset}              Treat patterns as regular expressions
+  {red}-r{reset}, {red}--regex{reset}               Treat patterns as regular expressions
   {red}-w{reset}, {red}--word-regexp{reset}         Match only whole words
   {red}-x{reset}, {red}--line-regexp{reset}         Match only whole lines
 
@@ -161,6 +161,13 @@ fn print_help() {
   {red}-n{reset}, {red}--dry-run{reset}             Show what would be changed without writing
   {red}-p{reset}, {red}--preview{reset}             Preview the changes before applying them
       {red}--preview-tool {dim}<cmd>{reset}  External diff tool for preview mode
+
+{yellow}{bold}Miscellaneous{reset}
+
+  {red}-V{reset}, {red}--version{reset}             Print version
+
+  {red}-h{reset}                        Print short help
+      {red}--help{reset}                Print long help with examples
 "
     );
     print!("{text}");
@@ -203,10 +210,10 @@ fn print_help_long() {
   {green}${reset} rep --preview foo bar
 
   {grey}# Replace \"1.2.3\" and \"3.2.1\" with \"4.5.6\" in all files{reset}
-  {green}${reset} rep --regexp '[13]\\.2\\.[13]' 4.5.6
+  {green}${reset} rep --regex '[13]\\.2\\.[13]' 4.5.6
 
   {grey}# Swap \"foo.bar\" with \"bar.foo\" in all files{reset}
-  {green}${reset} rep --regexp '(foo)\\.(bar)' '$2.$1'
+  {green}${reset} rep --regex '(foo)\\.(bar)' '$2.$1'
 
   {grey}# Replace \"f.oo\" and \"F.OO\" with \"bar\"{reset}
   {green}${reset} rep --ignore-case 'f.oo' bar

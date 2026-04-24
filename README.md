@@ -18,7 +18,7 @@ cargo install --git https://github.com/gechr/rep
 
 ## Usage
 
-<img src="assets/help.png" alt="help" width="650">
+<img src="assets/help.png" alt="help" width="700">
 
 ## Examples
 
@@ -39,10 +39,10 @@ rep -f '=Dockerfile' --hidden foo bar
 rep --preview foo bar
 
 # Replace "1.2.3" and "3.2.1" with "4.5.6" in all files
-rep --regexp '[13]\.2\.[13]' 4.5.6
+rep --regex '[13]\.2\.[13]' 4.5.6
 
 # Swap "foo.bar" with "bar.foo" in all files
-rep --regexp '(foo)\.(bar)' '$2.$1'
+rep --regex '(foo)\.(bar)' '$2.$1'
 
 # Replace "f.oo" and "F.OO" with "bar"
 rep --ignore-case 'f.oo' bar
