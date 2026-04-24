@@ -10,7 +10,8 @@ use clap::{CommandFactory as _, Parser};
 use clap_complete::Shell;
 
 use crate::expressions::{
-    CompiledExpression, apply_compiled_expressions, build_pre_filter_matcher, compile_expressions,
+    CompiledExpression, EXPR_SEP, apply_compiled_expressions, build_pre_filter_matcher,
+    compile_expressions,
 };
 
 #[derive(Parser)]
@@ -61,8 +62,8 @@ struct Cli {
     #[arg(short = 'S', long = "smart")]
     smart: bool,
 
-    /// Find=replace expression
-    #[arg(short = 'e', long = "expression", value_name = "<find>=<replace>")]
+    /// Find replace expression
+    #[arg(short = 'e', long = "expression", value_name = "<find> <replace>")]
     expressions: Vec<String>,
 
     /// Whole words only
@@ -134,32 +135,32 @@ fn print_help() {
 
 {yellow}{bold}Filter{reset}
 
-  {red}-f{reset}, {red}--files {dim}<glob>{reset}       Smart glob patterns to match files against
-  {red}-H{reset}, {red}--hidden{reset}             Search hidden files and directories
+  {red}-f{reset}, {red}--files {dim}<glob>{reset}        Smart glob patterns to match files against
+  {red}-H{reset}, {red}--hidden{reset}              Search hidden files and directories
 
 {yellow}{bold}Replace{reset}
 
-  {red}-e{reset}, {red}--expression {dim}<expr>{reset}  Replacement {blue}<find>{dim}={reset}{blue}<replace>{reset} expression
-  {red}-S{reset}, {red}--smart{reset}              Replace all case variants of the pattern
+  {red}-e{reset}, {red}--expression {dim}<f> <r>{reset}  Find/replace expression
+  {red}-S{reset}, {red}--smart{reset}               Replace all case variants of the pattern
 
 {yellow}{bold}Regex{reset}
 
-  {red}-G{reset}, {red}--greedy{reset}             Use greedy matching for regular expressions
-  {red}-i{reset}, {red}--ignore-case{reset}        Case-insensitive matching
-  {red}-m{reset}, {red}--multiline{reset}          Search across multiple lines
-      {red}--dotall{reset}             Allow dot to match newlines
-  {red}-r{reset}, {red}--regexp{reset}             Treat patterns as regular expressions
-  {red}-w{reset}, {red}--word-regexp{reset}        Match only whole words
-  {red}-x{reset}, {red}--line-regexp{reset}        Match only whole lines
+  {red}-G{reset}, {red}--greedy{reset}              Use greedy matching for regular expressions
+  {red}-i{reset}, {red}--ignore-case{reset}         Case-insensitive matching
+  {red}-m{reset}, {red}--multiline{reset}           Search across multiple lines
+      {red}--dotall{reset}              Allow dot to match newlines
+  {red}-r{reset}, {red}--regexp{reset}              Treat patterns as regular expressions
+  {red}-w{reset}, {red}--word-regexp{reset}         Match only whole words
+  {red}-x{reset}, {red}--line-regexp{reset}         Match only whole lines
 
 {yellow}{bold}Behavior{reset}
 
-  {red}-d{reset}, {red}--delete{reset}             Delete lines matching {blue}<find>{reset}
-  {red}-l{reset}, {red}--list-files{reset}         Print only file paths that contain matches
+  {red}-d{reset}, {red}--delete{reset}              Delete lines matching {blue}<find>{reset}
+  {red}-l{reset}, {red}--list-files{reset}          Print only file paths that contain matches
 
-  {red}-n{reset}, {red}--dry-run{reset}            Show what would be changed without writing
-  {red}-p{reset}, {red}--preview{reset}            Preview the changes before applying them
-      {red}--preview-tool {dim}<cmd>{reset} External diff tool for preview mode
+  {red}-n{reset}, {red}--dry-run{reset}             Show what would be changed without writing
+  {red}-p{reset}, {red}--preview{reset}             Preview the changes before applying them
+      {red}--preview-tool {dim}<cmd>{reset}  External diff tool for preview mode
 "
     );
     print!("{text}");
@@ -221,7 +222,7 @@ fn print_help_long() {
   {green}${reset} rep foo bar < foobar.txt
 
   {grey}# Apply multiple replacements in one pass{reset}
-  {green}${reset} rep -e foo=bar -e baz=qux src
+  {green}${reset} rep -e foo bar -e baz qux src
 
   {grey}# Delete every line containing \"TODO\"{reset}
   {green}${reset} rep -d TODO
@@ -352,6 +353,36 @@ impl Cli {
     fn replacement(&self) -> &str {
         &self.args[1]
     }
+}
+
+/// Preprocess argv so that `-e <find> <replace>` is compacted into a single
+/// clap value joined by `EXPR_SEP` before clap parses the argument list.
+/// This lets the second arg start with `-` without being treated as a flag.
+pub(crate) fn preprocess_expression_args(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "-e" || arg == "--expression" {
+            out.push(arg);
+            let Some(find) = iter.next() else { continue };
+            let Some(replace) = iter.next() else {
+                out.push(find);
+                continue;
+            };
+            out.push(format!("{find}{EXPR_SEP}{replace}"));
+        } else if let Some(find) = arg.strip_prefix("-e").filter(|s| !s.is_empty()) {
+            // Compact form: -efoo → find="foo", next arg is replace
+            out.push("-e".to_string());
+            let Some(replace) = iter.next() else {
+                out.push(find.to_string());
+                continue;
+            };
+            out.push(format!("{find}{EXPR_SEP}{replace}"));
+        } else {
+            out.push(arg);
+        }
+    }
+    out
 }
 
 fn display_path(path: &std::path::Path) -> String {
@@ -661,7 +692,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut cli = Cli::parse();
+    let mut cli = Cli::parse_from(preprocess_expression_args(std::env::args().collect()));
     cli.apply_env_defaults();
 
     if let Some(shell) = cli.completions {
@@ -742,6 +773,11 @@ fn run() -> Result<()> {
 mod tests {
     use super::*;
 
+    fn parse_cli(args: &[&str]) -> Cli {
+        let processed = preprocess_expression_args(args.iter().map(|s| s.to_string()).collect());
+        Cli::parse_from(processed)
+    }
+
     #[test]
     fn test_parse_file_globs_extension() {
         assert_eq!(parse_file_globs("txt"), vec!["*.txt"]);
@@ -779,7 +815,7 @@ mod tests {
 
     #[test]
     fn test_expression_mode_without_paths_defaults_to_current_dir() {
-        let cli = Cli::parse_from(["rep", "-e", "a=b", "-e", "b=c", "--dry-run"]);
+        let cli = parse_cli(&["rep", "-e", "a", "b", "-e", "b", "c", "--dry-run"]);
 
         assert!(cli.paths().is_empty());
         assert_eq!(cli.dirs(), vec!["."]);
@@ -819,7 +855,7 @@ mod tests {
         // find+replace mode: skip 2 positional args
         assert_eq!(Cli::parse_from(["rep", "a", "b"]).positional_skip(), 2);
         // expression mode: no positional find/replace
-        assert_eq!(Cli::parse_from(["rep", "-e", "a=b"]).positional_skip(), 0);
+        assert_eq!(parse_cli(&["rep", "-e", "a", "b"]).positional_skip(), 0);
         // -l always consumes only the find pattern.
         assert_eq!(Cli::parse_from(["rep", "-l", "a"]).positional_skip(), 1);
         assert_eq!(
@@ -834,7 +870,7 @@ mod tests {
         assert!(Cli::parse_from(["rep", "-l", "a", "b"]).is_find_only());
         assert!(!Cli::parse_from(["rep", "a", "b"]).is_find_only());
         // -l with -e is expression mode, not find-only
-        assert!(!Cli::parse_from(["rep", "-l", "-e", "a=b"]).is_find_only());
+        assert!(!parse_cli(&["rep", "-l", "-e", "a", "b"]).is_find_only());
         // -d is always find-only regardless of trailing positional path count
         assert!(Cli::parse_from(["rep", "-d", "a"]).is_find_only());
         assert!(Cli::parse_from(["rep", "-d", "a", "src"]).is_find_only());

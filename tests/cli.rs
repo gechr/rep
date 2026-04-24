@@ -334,8 +334,8 @@ fn rewrites_file_with_invalid_utf8_preserving_non_utf8_bytes() {
 
 #[test]
 fn delete_mode_with_expression_matches_raw_string_including_equals() {
-    // With `-d`, `-e foo=bar` is NOT split on `=`; the whole string is
-    // taken literally as the pattern to match for line deletion.
+    // With `-d -e <find> <replace>`, the find arg is taken literally; patterns
+    // containing `=` work because find and replace are space-separated args.
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");
     write(
@@ -344,7 +344,7 @@ fn delete_mode_with_expression_matches_raw_string_including_equals() {
     );
 
     let status = Command::new(REP)
-        .args(["-d", "-e", "foo=bar", "."])
+        .args(["-d", "-e", "foo=bar", "", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();

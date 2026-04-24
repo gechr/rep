@@ -14,6 +14,12 @@ use regex::bytes::RegexBuilder as BytesRegexBuilder;
 
 use crate::Cli;
 
+/// Internal separator used by `preprocess_expression_args` to join the two
+/// space-separated `-e <find> <replace>` args into a single clap value.
+/// Null byte is safe because Unix argv strings are null-terminated C strings
+/// and can never contain one.
+pub(crate) const EXPR_SEP: char = '\x00';
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Expression {
     pub(crate) find: String,
@@ -205,8 +211,8 @@ pub(crate) fn build_subst_for(cli: &Cli, replacement: &str) -> String {
 }
 
 fn parse_expression(input: &str) -> Result<Expression> {
-    let Some((find, replace)) = input.split_once('=') else {
-        bail!("Invalid expression {input:?}: expected find=replace");
+    let Some((find, replace)) = input.split_once(EXPR_SEP) else {
+        bail!("Invalid expression: expected `-e <find> <replace>`");
     };
     Ok(Expression {
         find: find.to_string(),
@@ -341,13 +347,15 @@ pub(crate) fn build_pre_filter_matcher(
 pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> {
     let expressions = if cli.uses_expressions() {
         if cli.delete {
-            // In delete mode, `-e` does not split on `=` - the whole argument
-            // is the pattern to match for line deletion. This lets patterns
-            // like `foo=bar` (containing a literal `=`) be matched verbatim.
+            // In delete mode the replace half of `-e <find> <replace>` is
+            // ignored. Extract only the find part (before the \x00 separator).
             cli.expressions
                 .iter()
                 .map(|raw| Expression {
-                    find: raw.clone(),
+                    find: raw
+                        .split_once(EXPR_SEP)
+                        .map_or(raw.as_str(), |(f, _)| f)
+                        .to_string(),
                     replace: String::new(),
                 })
                 .collect()
@@ -368,6 +376,7 @@ pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> 
 
     expressions
         .iter()
+        .filter(|expr| cli.is_regex() || cli.smart || expr.find != expr.replace)
         .map(|expr| compile_expression(cli, expr))
         .collect()
 }
@@ -418,6 +427,12 @@ mod tests {
     use clap::Parser as _;
 
     use super::*;
+
+    fn parse_cli(args: &[&str]) -> Cli {
+        let processed =
+            crate::preprocess_expression_args(args.iter().map(|s| s.to_string()).collect());
+        Cli::parse_from(processed)
+    }
 
     fn build_pattern(cli: &Cli) -> String {
         build_pattern_for(cli, cli.pattern())
@@ -479,9 +494,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_expression_splits_on_first_equals() {
+    fn test_parse_expression_splits_on_null_byte() {
         assert_eq!(
-            parse_expression("a=b=c").unwrap(),
+            parse_expression(&format!("a{EXPR_SEP}b=c")).unwrap(),
             Expression {
                 find: "a".to_string(),
                 replace: "b=c".to_string(),
@@ -491,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_compile_expressions_applies_in_order() {
-        let cli = Cli::parse_from(["rep", "-e", "a=b", "-e", "b=c", "src"]);
+        let cli = parse_cli(&["rep", "-e", "a", "b", "-e", "b", "c", "src"]);
 
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("a b", &expressions);
@@ -505,7 +520,7 @@ mod tests {
     /// window and the actual match position.
     #[test]
     fn test_expression_preserves_text_before_match() {
-        let cli = Cli::parse_from(["rep", "-e", "a=b"]);
+        let cli = parse_cli(&["rep", "-e", "a", "b"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("#![allow(clippy::all)]", &expressions);
         assert_eq!(output, "#![bllow(clippy::bll)]");
@@ -513,13 +528,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_expression_missing_equals() {
-        assert!(parse_expression("no-equals-here").is_err());
+    fn test_parse_expression_missing_null_byte() {
+        assert!(parse_expression("no-null-here").is_err());
     }
 
     #[test]
     fn test_apply_compiled_expressions_no_matches() {
-        let cli = Cli::parse_from(["rep", "-e", "xyz=abc"]);
+        let cli = parse_cli(&["rep", "-e", "xyz", "abc"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("hello world", &expressions);
         assert_eq!(output, "hello world");
@@ -587,7 +602,7 @@ mod tests {
 
     #[test]
     fn test_expression_with_line_regexp() {
-        let cli = Cli::parse_from(["rep", "-x", "-e", "foo=bar"]);
+        let cli = parse_cli(&["rep", "-x", "-e", "foo", "bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("foo\nfoobar\nfoo", &expressions);
         assert_eq!(output, "bar\nfoobar\nbar");
@@ -596,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_expression_with_ignore_case() {
-        let cli = Cli::parse_from(["rep", "-i", "-e", "foo=bar"]);
+        let cli = parse_cli(&["rep", "-i", "-e", "foo", "bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("Foo FOO foo", &expressions);
         assert_eq!(output, "bar bar bar");
@@ -605,7 +620,7 @@ mod tests {
 
     #[test]
     fn test_expression_with_word_boundary() {
-        let cli = Cli::parse_from(["rep", "-w", "-e", "foo=bar"]);
+        let cli = parse_cli(&["rep", "-w", "-e", "foo", "bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("foo foobar food", &expressions);
         assert_eq!(output, "bar foobar food");
@@ -614,7 +629,7 @@ mod tests {
 
     #[test]
     fn test_word_regexp_preserves_regex_capture_numbers() {
-        let cli = Cli::parse_from(["rep", "-r", "-w", "-e", r"(foo)\.(bar)=$2.$1"]);
+        let cli = parse_cli(&["rep", "-r", "-w", "-e", r"(foo)\.(bar)", "$2.$1"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("foo.bar foo.baz", &expressions);
         assert_eq!(output, "bar.foo foo.baz");
@@ -623,7 +638,7 @@ mod tests {
 
     #[test]
     fn test_expression_with_regex_capture_groups() {
-        let cli = Cli::parse_from(["rep", "-r", "-e", "(foo)\\.(bar)=$2.$1"]);
+        let cli = parse_cli(&["rep", "-r", "-e", "(foo)\\.(bar)", "$2.$1"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("foo.bar baz", &expressions);
         assert_eq!(output, "bar.foo baz");
@@ -632,7 +647,7 @@ mod tests {
 
     #[test]
     fn test_multiple_expressions_chain() {
-        let cli = Cli::parse_from(["rep", "-e", "red=blue", "-e", "cat=dog"]);
+        let cli = parse_cli(&["rep", "-e", "red", "blue", "-e", "cat", "dog"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, _) = apply_str("the red cat", &expressions);
         assert_eq!(output, "the blue dog");
@@ -640,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_expression_empty_replacement() {
-        let cli = Cli::parse_from(["rep", "-e", "foo="]);
+        let cli = parse_cli(&["rep", "-e", "foo", ""]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("foobarfoo", &expressions);
         assert_eq!(output, "bar");
@@ -664,8 +679,18 @@ mod tests {
     /// return a `Cow::Borrowed` - no `String` allocation. Pins the zero-alloc
     /// contract so a future refactor can't silently force ownership.
     #[test]
+    fn test_noop_expression_find_eq_replace_is_skipped() {
+        let cli = parse_cli(&["rep", "-e", "foo", "foo"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        assert!(expressions.is_empty());
+        let (output, count) = apply_str("foo bar foo", &expressions);
+        assert_eq!(output, "foo bar foo");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn test_apply_compiled_expressions_no_matches_borrows() {
-        let cli = Cli::parse_from(["rep", "-e", "xyz=abc"]);
+        let cli = parse_cli(&["rep", "-e", "xyz", "abc"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, _) = apply_str("hello world", &expressions);
         assert!(matches!(output, Cow::Borrowed(_)));
@@ -730,8 +755,8 @@ mod tests {
 
     #[test]
     fn test_delete_mode_with_expression_takes_full_string_literally() {
-        // `-d -e foo=bar` → the whole `foo=bar` is the pattern; no find/replace split.
-        let cli = Cli::parse_from(["rep", "-d", "-e", "foo=bar"]);
+        // `-d -e "foo=bar" ""` → find is `foo=bar` (the first arg); replace is ignored.
+        let cli = parse_cli(&["rep", "-d", "-e", "foo=bar", ""]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("keep\nhas foo=bar here\nalso foo\ntail\n", &expressions);
         assert_eq!(output, "keep\nalso foo\ntail\n");
@@ -740,7 +765,7 @@ mod tests {
 
     #[test]
     fn test_delete_mode_with_multiple_expressions_deletes_each() {
-        let cli = Cli::parse_from(["rep", "-d", "-e", "foo", "-e", "baz=qux"]);
+        let cli = parse_cli(&["rep", "-d", "-e", "foo", "", "-e", "baz=qux", ""]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str(
             "keep\nhas foo\nmiddle\nline with baz=qux\ntail\n",

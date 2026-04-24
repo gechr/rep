@@ -58,7 +58,7 @@ echo foo bar | rep foo bar
 rep foo bar < foobar.txt
 
 # Apply multiple replacements in one pass
-rep -e foo=bar -e baz=qux src
+rep -e foo bar -e baz qux src
 
 # Delete every line containing "TODO"
 rep -d TODO
