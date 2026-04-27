@@ -5,6 +5,31 @@ mod scan;
 use std::io::IsTerminal as _;
 use std::path::PathBuf;
 
+/// True when stdin is a pipe or redirected regular file. TTY, `/dev/null`,
+/// and sockets all return false - `is_terminal()` alone can't distinguish a
+/// real pipe from `/dev/null`. Sockets are excluded so IPC test harnesses
+/// don't trigger stdin mode.
+#[cfg(unix)]
+fn stdin_has_input() -> bool {
+    use std::fs::File;
+    use std::mem::ManuallyDrop;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let fd = std::io::stdin().as_raw_fd();
+    // SAFETY: ManuallyDrop keeps fd 0 open after the borrow.
+    let file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    meta.file_type().is_fifo() || meta.is_file()
+}
+
+#[cfg(not(unix))]
+fn stdin_has_input() -> bool {
+    !std::io::stdin().is_terminal()
+}
+
 use anyhow::{Result, bail};
 use clap::{CommandFactory as _, Parser};
 use clap_complete::Shell;
@@ -750,8 +775,7 @@ fn run() -> Result<()> {
         return run_list_files(&cli);
     }
 
-    let is_piped = !std::io::stdin().is_terminal();
-    let is_stdin_mode = has_stdin_arg || (is_piped && paths.is_empty());
+    let is_stdin_mode = has_stdin_arg || (paths.is_empty() && stdin_has_input());
 
     if cli.smart && paths.len() > 1 {
         bail!("Smart mode only supports a single path");
