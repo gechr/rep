@@ -230,23 +230,30 @@ fn parse_expressions(cli: &Cli) -> Result<Vec<Expression>> {
 fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression> {
     if cli.smart {
         let (variant_map, variant_pattern) = build_case_variants(&expr.find, &expr.replace);
-        // With `-d --smart`, the case-variant alternation becomes the "inner" of
-        // a line-deleting wrapper, and the replacement is always empty.
-        let pattern = if cli.delete {
-            wrap_delete_pattern(&variant_pattern, false)
+        let wrapped = if cli.line_regexp {
+            format!("^(?:{variant_pattern})$")
+        } else if cli.word_regexp {
+            format!(r"\b(?:{variant_pattern})\b")
         } else {
             variant_pattern
         };
+        // With `-d --smart`, the case-variant alternation becomes the "inner" of
+        // a line-deleting wrapper, and the replacement is always empty.
+        let pattern = if cli.delete {
+            wrap_delete_pattern(&wrapped, cli.line_regexp)
+        } else {
+            wrapped
+        };
         let regex = RegexBuilder::new(&pattern)
-            .multi_line(cli.delete)
+            .multi_line(true)
             .build()
             .with_context(|| format!("Invalid smart pattern: {}", expr.find))?;
         let bytes_regex = BytesRegexBuilder::new(&pattern)
-            .multi_line(cli.delete)
+            .multi_line(true)
             .build()
             .with_context(|| format!("Invalid smart pattern: {}", expr.find))?;
         let matcher = RegexMatcherBuilder::new()
-            .multi_line(cli.delete)
+            .multi_line(true)
             .build(&pattern)?;
         if cli.delete {
             return Ok(CompiledExpression {
@@ -589,6 +596,24 @@ mod tests {
         let expressions = compile_expressions(&cli).unwrap();
         let (output, _) = apply_str("FooBar\nfoo_bar\nFOO_BAR\n", &expressions);
         assert_eq!(output, "HelloWorld\nhello_world\nHELLO_WORLD\n");
+    }
+
+    #[test]
+    fn test_smart_word_regexp_anchors_case_variants_at_word_boundaries() {
+        let cli = Cli::parse_from(["rep", "-S", "-w", "Repo", "Repository"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("Reports Repo repo REPO", &expressions);
+        assert_eq!(output, "Reports Repository repository REPOSITORY");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_smart_line_regexp_anchors_case_variants_to_whole_lines() {
+        let cli = Cli::parse_from(["rep", "-S", "-x", "Repo", "Repository"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("Repo\nReports\nfoo Repo bar\n", &expressions);
+        assert_eq!(output, "Repository\nReports\nfoo Repo bar\n");
+        assert_eq!(count, 1);
     }
 
     #[test]
