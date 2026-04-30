@@ -1,6 +1,7 @@
 mod expressions;
 mod interactive;
 mod scan;
+mod ui;
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;
@@ -38,6 +39,14 @@ use crate::expressions::{
     CompiledExpression, EXPR_SEP, apply_compiled_expressions, build_pre_filter_matcher,
     compile_expressions,
 };
+use crate::ui::Color;
+use crate::ui::Styles;
+
+struct ReplacementResult {
+    path: String,
+    count: usize,
+    diff: Option<(String, String)>,
+}
 
 #[derive(Parser)]
 #[command(name = "rep", version, disable_help_flag = true)]
@@ -124,29 +133,25 @@ struct Cli {
     #[arg(long = "preview-tool", requires = "preview")]
     preview_tool: Option<String>,
 
+    /// Suppress final summary output
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+
     #[arg(long = "completions", value_name = "SHELL", hide = true)]
     completions: Option<Shell>,
 }
 
 fn print_help() {
-    let is_tty = std::io::stdout().is_terminal();
-
-    let (bold, dim, red, green, yellow, blue, magenta, _white, grey, reset) = if is_tty {
-        (
-            "\x1b[1m",
-            "\x1b[2m",
-            "\x1b[31m",
-            "\x1b[32m",
-            "\x1b[33m",
-            "\x1b[34m",
-            "\x1b[35m",
-            "\x1b[37m",
-            "\x1b[38;5;248m",
-            "\x1b[m",
-        )
-    } else {
-        ("", "", "", "", "", "", "", "", "", "")
-    };
+    let styles = ui::Styles::when(std::io::stdout().is_terminal());
+    let bold = styles.bold();
+    let dim = styles.fg(Color::Dim);
+    let red = styles.fg(Color::Red);
+    let green = styles.fg(Color::Green);
+    let yellow = styles.fg(Color::Yellow);
+    let blue = styles.fg(Color::Blue);
+    let magenta = styles.fg(Color::Magenta);
+    let grey = styles.fg(Color::Grey);
+    let reset = styles.reset();
 
     let text = format!(
         "\
@@ -189,6 +194,7 @@ fn print_help() {
 
 {yellow}{bold}Miscellaneous{reset}
 
+  {red}-q{reset}, {red}--quiet{reset}               Suppress summary output
   {red}-V{reset}, {red}--version{reset}             Print version
 
   {red}-h{reset}                        Print short help
@@ -199,19 +205,12 @@ fn print_help() {
 }
 
 fn print_help_long() {
-    let is_tty = std::io::stdout().is_terminal();
-
-    let (bold, green, yellow, grey, reset) = if is_tty {
-        (
-            "\x1b[1m",
-            "\x1b[32m",
-            "\x1b[33m",
-            "\x1b[38;5;248m",
-            "\x1b[m",
-        )
-    } else {
-        ("", "", "", "", "")
-    };
+    let styles = ui::Styles::when(std::io::stdout().is_terminal());
+    let bold = styles.bold();
+    let green = styles.fg(Color::Green);
+    let yellow = styles.fg(Color::Yellow);
+    let grey = styles.fg(Color::Grey);
+    let reset = styles.reset();
 
     print_help();
 
@@ -533,7 +532,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
         ))
         .build_parallel();
 
-    let (tx, rx) = channel::<Result<(String, usize)>>();
+    let (tx, rx) = channel::<Result<ReplacementResult>>();
     let walk_expressions = Arc::clone(&expressions);
 
     thread::spawn(move || {
@@ -566,10 +565,29 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 if count == 0 {
                     return WalkState::Continue;
                 }
+                let diff = match (
+                    String::from_utf8(contents.clone()),
+                    String::from_utf8(updated.as_ref().to_vec()),
+                ) {
+                    (Ok(old), Ok(new)) => Some((old, new)),
+                    _ => {
+                        if !write {
+                            eprintln!(
+                                "Warning: {}: skipping diff (not valid UTF-8; use non-dry-run mode)",
+                                path.display()
+                            );
+                        }
+                        None
+                    }
+                };
                 let payload = if write && let Err(e) = std::fs::write(path, &*updated) {
                     Err(anyhow::Error::new(e).context(format!("Unable to write to {path:?}")))
                 } else {
-                    Ok((display_path(path), count))
+                    Ok(ReplacementResult {
+                        path: display_path(path),
+                        count,
+                        diff,
+                    })
                 };
                 if tx.send(payload).is_err() {
                     return WalkState::Quit;
@@ -584,8 +602,8 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
         ok_results.push(result?);
     }
 
-    ok_results.sort_by(|a, b| natord::compare(&a.0, &b.0));
-    print_summary(&ok_results, !write);
+    ok_results.sort_by(|a, b| natord::compare(&a.path, &b.path));
+    print_results(&ok_results, !write, cli.quiet);
     Ok(())
 }
 
@@ -682,38 +700,58 @@ fn summary_message(total_files: usize, total_matches: usize, dry: bool) -> Strin
     summary_message_with_formatter(total_files, total_matches, dry, with_commas)
 }
 
-/// Print match summary. `dry` uses yellow "Would perform", otherwise green "Performed".
-fn print_summary(results: &[(String, usize)], dry: bool) {
-    let total_files = results.len();
-    let total_matches: usize = results.iter().map(|(_, c)| c).sum();
-    let stdout_tty = std::io::stdout().is_terminal();
+/// `dry=true` → yellow "Would perform"; `dry=false` → green "Performed".
+/// Write + `quiet` → silence all output. Dry-run + `quiet` → suppress diff only.
+fn print_results(results: &[ReplacementResult], dry: bool, quiet: bool) {
+    if !dry && quiet {
+        return;
+    }
 
-    for (path, count) in results {
-        let count = with_commas(*count);
-        if stdout_tty {
-            println!("{path} \x1b[38;5;248m({count})\x1b[m");
-        } else {
-            println!("{path} ({count})");
+    let total_files = results.len();
+    let total_matches: usize = results.iter().map(|result| result.count).sum();
+    let styles = Styles::when(std::io::stdout().is_terminal());
+
+    for (idx, result) in results.iter().enumerate() {
+        let count = with_commas(result.count);
+        println!(
+            "{}{}{} {}({count}){}",
+            if quiet { "" } else { styles.bold() },
+            result.path,
+            if quiet { "" } else { styles.bold_off() },
+            styles.fg(Color::Grey),
+            styles.reset()
+        );
+
+        if !quiet && let Some((old, new)) = &result.diff {
+            interactive::print_file_line_diff(old, new, styles);
+        }
+
+        if !quiet && idx + 1 < results.len() {
+            println!();
         }
     }
 
     if total_files > 0 {
+        let color = if dry { Color::Yellow } else { Color::Green };
         let msg = summary_message(total_files, total_matches, dry);
-        if stdout_tty {
-            let color = if dry { "\x1b[33m" } else { "\x1b[32m" };
-            println!("\n\x1b[1m{color}{msg}\x1b[m");
-        } else {
-            println!("\n{msg}");
-        }
+        println!(
+            "\n{}{}{}{}",
+            styles.bold(),
+            styles.fg(color),
+            msg,
+            styles.reset()
+        );
     }
 }
 
 fn print_error(err: &anyhow::Error) {
-    if std::io::stderr().is_terminal() {
-        eprintln!("\x1b[1;31merror:\x1b[m {err}");
-    } else {
-        eprintln!("error: {err}");
-    }
+    let styles = Styles::when(std::io::stderr().is_terminal());
+    eprintln!(
+        "{}{}error:{} {err}",
+        styles.bold(),
+        styles.fg(Color::Red),
+        styles.reset()
+    );
 }
 
 fn main() {

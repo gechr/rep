@@ -7,23 +7,8 @@
 use std::io;
 
 use crossterm::ExecutableCommand as _;
-use crossterm::style::SetForegroundColor;
 use crossterm::terminal::Clear;
 use crossterm::terminal::ClearType;
-
-pub(super) enum Color {
-    Red,
-    Green,
-}
-
-impl Color {
-    fn to_crossterm_color(&self) -> crossterm::style::Color {
-        match self {
-            Self::Red => crossterm::style::Color::DarkRed,
-            Self::Green => crossterm::style::Color::DarkGreen,
-        }
-    }
-}
 
 pub(super) fn clear() {
     let mut stdout = io::stdout();
@@ -39,14 +24,6 @@ pub(super) fn hide_cursor() {
 
 pub(super) fn show_cursor() {
     drop(io::stdout().execute(crossterm::cursor::Show));
-}
-
-pub(super) fn fg(color: Color) {
-    drop(io::stdout().execute(SetForegroundColor(color.to_crossterm_color())));
-}
-
-pub(super) fn reset() {
-    drop(io::stdout().execute(SetForegroundColor(crossterm::style::Color::Reset)));
 }
 
 pub(super) fn size() -> Option<(usize, usize)> {

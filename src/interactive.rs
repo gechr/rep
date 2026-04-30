@@ -26,9 +26,8 @@ use tempfile::NamedTempFile;
 
 mod terminal;
 
-use crossterm::style::Stylize as _;
-
-use self::terminal::Color;
+use crate::ui::Color;
+use crate::ui::Styles;
 
 type Result<T> = ::std::result::Result<T, Error>;
 #[derive(Copy, Clone)]
@@ -129,16 +128,210 @@ fn prompt(
     };
     disable_raw_mode().ok();
     if let Ok(c) = result {
+        let styles = Styles::ansi();
         match c {
-            NAV_BACK => print!("{}\r", "←".yellow()),
-            NAV_FORWARD => print!("{}\r", "→".yellow()),
-            'y' | 'A' => println!("{}", c.to_string().green()),
-            'n' | 'q' => println!("{}", c.to_string().red()),
-            'e' => println!("{}", c.to_string().blue()),
+            NAV_BACK => print!("{}\r", styles.paint(Color::Yellow, "←")),
+            NAV_FORWARD => print!("{}\r", styles.paint(Color::Yellow, "→")),
+            'y' | 'A' => println!("{}", styles.paint(Color::Green, c.to_string())),
+            'n' | 'q' => println!("{}", styles.paint(Color::Red, c.to_string())),
+            'e' => println!("{}", styles.paint(Color::Blue, c.to_string())),
             _ => println!("{c}"),
         }
     }
     result
+}
+
+pub(crate) fn print_file_line_diff(old: &str, new: &str, styles: Styles) {
+    let diffs = diff::lines(old, new);
+    let mut old_line_no = 1;
+    let mut new_line_no = 1;
+    let mut i = 0;
+
+    while i < diffs.len() {
+        match &diffs[i] {
+            DiffResult::Both(l, _) => {
+                if l.is_empty() && i + 1 == diffs.len() {
+                    break;
+                }
+                old_line_no += 1;
+                new_line_no += 1;
+                i += 1;
+            }
+            DiffResult::Left(_) | DiffResult::Right(_) => {
+                let mut old_lines = Vec::new();
+                let mut new_lines = Vec::new();
+
+                while i < diffs.len() {
+                    match &diffs[i] {
+                        DiffResult::Left(line) => {
+                            old_lines.push((old_line_no, *line));
+                            old_line_no += 1;
+                            i += 1;
+                        }
+                        DiffResult::Right(line) => {
+                            new_lines.push((new_line_no, *line));
+                            new_line_no += 1;
+                            i += 1;
+                        }
+                        DiffResult::Both(..) => break,
+                    }
+                }
+
+                print_numbered_diff_block(&old_lines, &new_lines, styles);
+            }
+        }
+    }
+}
+
+fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) {
+    let mut i = 0;
+    while i < diffs.len() {
+        match &diffs[i] {
+            DiffResult::Both(l, _) => {
+                if l.is_empty() && i + 1 == diffs.len() {
+                    break;
+                }
+                println!("  {l}");
+                i += 1;
+            }
+            DiffResult::Left(old_line) => {
+                // Check if next is a Right (paired change) for inline highlighting
+                if i + 1 < diffs.len()
+                    && let DiffResult::Right(new_line) = &diffs[i + 1]
+                {
+                    print_inline_diff(old_line, new_line, styles);
+                    i += 2;
+                    continue;
+                }
+                styles.print_fg(Color::Red);
+                println!("- {old_line}");
+                styles.print_reset();
+                i += 1;
+            }
+            DiffResult::Right(r) => {
+                styles.print_fg(Color::Green);
+                println!("+ {r}");
+                styles.print_reset();
+                i += 1;
+            }
+        }
+    }
+}
+
+fn print_numbered_inline_diff(
+    old_line_no: usize,
+    new_line_no: usize,
+    old_line: &str,
+    new_line: &str,
+    styles: Styles,
+) {
+    print_numbered_prefix(old_line_no, '-', Color::Red, styles);
+    print_inline_chars(old_line, new_line, InlineSide::Old, styles);
+    println!();
+
+    print_numbered_prefix(new_line_no, '+', Color::Green, styles);
+
+    print_inline_chars(old_line, new_line, InlineSide::New, styles);
+    println!();
+}
+
+fn print_numbered_diff_block(
+    old_lines: &[(usize, &str)],
+    new_lines: &[(usize, &str)],
+    styles: Styles,
+) {
+    let paired = old_lines.len().min(new_lines.len());
+    for idx in 0..paired {
+        let (old_line_no, old_line) = old_lines[idx];
+        let (new_line_no, new_line) = new_lines[idx];
+        print_numbered_inline_diff(old_line_no, new_line_no, old_line, new_line, styles);
+    }
+
+    for (line_no, line) in &old_lines[paired..] {
+        print_numbered_line(*line_no, '-', line, Color::Red, styles);
+    }
+
+    for (line_no, line) in &new_lines[paired..] {
+        print_numbered_line(*line_no, '+', line, Color::Green, styles);
+    }
+}
+
+fn print_numbered_line(line_no: usize, sign: char, line: &str, diff_color: Color, styles: Styles) {
+    print_numbered_prefix(line_no, sign, diff_color, styles);
+    styles.print_fg(diff_color);
+    print!("{line}");
+    styles.print_reset();
+    println!();
+}
+
+fn print_numbered_prefix(line_no: usize, sign: char, line_color: Color, styles: Styles) {
+    print!(
+        "{}{}{}{}",
+        styles.dim_bg(line_color),
+        styles.fg(line_color),
+        styles.bold(),
+        line_no,
+    );
+    styles.print_reset();
+    if styles.is_plain() {
+        print!("{sign} ");
+    } else {
+        print!(" ");
+    }
+}
+
+fn print_inline_diff(old_line: &str, new_line: &str, styles: Styles) {
+    styles.print_fg(Color::Red);
+    print!("- ");
+    styles.print_reset();
+    print_inline_chars(old_line, new_line, InlineSide::Old, styles);
+    println!();
+
+    styles.print_fg(Color::Green);
+    print!("+ ");
+    styles.print_reset();
+    print_inline_chars(old_line, new_line, InlineSide::New, styles);
+    println!();
+}
+
+#[derive(Clone, Copy)]
+enum InlineSide {
+    Old,
+    New,
+}
+
+fn print_inline_chars(old_line: &str, new_line: &str, side: InlineSide, styles: Styles) {
+    let mut highlighting = false;
+    for item in diff::chars(old_line, new_line) {
+        match (side, item) {
+            (InlineSide::Old, DiffResult::Both(ch, _))
+            | (InlineSide::New, DiffResult::Both(_, ch)) => {
+                if highlighting {
+                    styles.print_reset();
+                    highlighting = false;
+                }
+                print!("{ch}");
+            }
+            (InlineSide::Old, DiffResult::Left(ch)) => {
+                if !highlighting {
+                    print!("{}{}", styles.bold(), styles.fg(Color::Red));
+                    highlighting = true;
+                }
+                print!("{ch}");
+            }
+            (InlineSide::New, DiffResult::Right(ch)) => {
+                if !highlighting {
+                    print!("{}{}", styles.bold(), styles.fg(Color::Green));
+                    highlighting = true;
+                }
+                print!("{ch}");
+            }
+            (InlineSide::Old, DiffResult::Right(_)) | (InlineSide::New, DiffResult::Left(_)) => {}
+        }
+    }
+    if highlighting {
+        styles.print_reset();
+    }
 }
 
 fn to_char_boundary(s: &str, mut index: usize) -> usize {
@@ -395,7 +588,7 @@ impl InteractivePatcher {
         let diff_result = if let Some(ref preview_tool) = self.preview_tool {
             self.run_external_diff(old, new, preview_tool)
         } else {
-            self.print_diff(&diffs);
+            print_diff(&diffs, Styles::ansi());
             Ok(())
         };
 
@@ -409,24 +602,25 @@ impl InteractivePatcher {
         let user_input = prompt(
             &format!(
                 "\n{} {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
-                format!("Accept [{match_index}/{match_total}]?")
-                    .yellow()
-                    .bold(),
-                "y".green().bold(),
-                "es ".white(),
-                "· ".dim(),
-                "n".red(),
-                "o ".white(),
-                "· ".dim(),
-                "e".blue(),
-                "dit ".white(),
-                "· ".dim(),
-                "A".green(),
-                "ll ".white(),
-                "· ".dim(),
-                "q".red(),
-                "uit\n".white(),
-                "❯ ".yellow(),
+                Styles::ansi().bold_paint(
+                    Color::Yellow,
+                    format!("Accept [{match_index}/{match_total}]?")
+                ),
+                Styles::ansi().bold_paint(Color::Green, "y"),
+                Styles::ansi().paint(Color::White, "es "),
+                Styles::ansi().paint(Color::Dim, "· "),
+                Styles::ansi().paint(Color::Red, "n"),
+                Styles::ansi().paint(Color::White, "o "),
+                Styles::ansi().paint(Color::Dim, "· "),
+                Styles::ansi().paint(Color::Blue, "e"),
+                Styles::ansi().paint(Color::White, "dit "),
+                Styles::ansi().paint(Color::Dim, "· "),
+                Styles::ansi().paint(Color::Green, "A"),
+                Styles::ansi().paint(Color::White, "ll "),
+                Styles::ansi().paint(Color::Dim, "· "),
+                Styles::ansi().paint(Color::Red, "q"),
+                Styles::ansi().paint(Color::White, "uit\n"),
+                Styles::ansi().paint(Color::Yellow, "❯ "),
             ),
             "yneAq",
             Some('y'),
@@ -486,81 +680,6 @@ impl InteractivePatcher {
         );
 
         diffs
-    }
-
-    fn print_diff(&mut self, diffs: &[DiffResult<&str>]) {
-        let mut i = 0;
-        while i < diffs.len() {
-            match &diffs[i] {
-                DiffResult::Both(l, _) => {
-                    println!("  {l}");
-                    i += 1;
-                }
-                DiffResult::Left(old_line) => {
-                    // Check if next is a Right (paired change) for inline highlighting
-                    if i + 1 < diffs.len()
-                        && let DiffResult::Right(new_line) = &diffs[i + 1]
-                    {
-                        self.print_inline_diff(old_line, new_line);
-                        i += 2;
-                        continue;
-                    }
-                    terminal::fg(Color::Red);
-                    println!("- {old_line}");
-                    terminal::reset();
-                    i += 1;
-                }
-                DiffResult::Right(r) => {
-                    terminal::fg(Color::Green);
-                    println!("+ {r}");
-                    terminal::reset();
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    fn print_inline_diff(&self, old_line: &str, new_line: &str) {
-        let prefix_bytes = old_line
-            .char_indices()
-            .zip(new_line.char_indices())
-            .take_while(|((_, a), (_, b))| a == b)
-            .last()
-            .map_or(0, |((i, c), _)| i + c.len_utf8());
-
-        let old_rest = &old_line[prefix_bytes..];
-        let new_rest = &new_line[prefix_bytes..];
-
-        let suffix_bytes = old_rest
-            .char_indices()
-            .rev()
-            .zip(new_rest.char_indices().rev())
-            .take_while(|((_, a), (_, b))| a == b)
-            .last()
-            .map_or(0, |((i, _), _)| old_rest.len() - i);
-
-        let old_changed = &old_rest[..old_rest.len() - suffix_bytes];
-        let new_changed = &new_rest[..new_rest.len() - suffix_bytes];
-        let prefix = &old_line[..prefix_bytes];
-        let suffix = &old_line[old_line.len() - suffix_bytes..];
-
-        terminal::fg(Color::Red);
-        print!("- ");
-        terminal::reset();
-        print!("{prefix}");
-        terminal::fg(Color::Red);
-        print!("{old_changed}");
-        terminal::reset();
-        println!("{suffix}");
-
-        terminal::fg(Color::Green);
-        print!("+ ");
-        terminal::reset();
-        print!("{prefix}");
-        terminal::fg(Color::Green);
-        print!("{new_changed}");
-        terminal::reset();
-        println!("{suffix}");
     }
 
     fn run_external_diff(&self, old: &str, new: &str, preview_tool: &str) -> Result<()> {

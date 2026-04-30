@@ -58,6 +58,363 @@ fn dry_run_leaves_file_untouched() {
 }
 
 #[test]
+fn dry_run_prints_per_file_diffs() {
+    let dir = tempdir().unwrap();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    write(&a, "alpha foo\nkeep\nfoo tail\n");
+    write(&b, "foo only\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(read(&a), "alpha foo\nkeep\nfoo tail\n");
+    assert_eq!(read(&b), "foo only\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+a.txt (2)
+1- alpha foo
+1+ alpha bar
+3- foo tail
+3+ bar tail
+
+b.txt (1)
+1- foo only
+1+ bar only
+
+Would perform 3 replacements in 2 files
+"
+    );
+}
+
+#[test]
+fn dry_run_only_highlights_changed_characters_inside_lines() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "    assert!(status.success());\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "a", "b", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+a.txt (2)
+1-     assert!(status.success());
+1+     bssert!(stbtus.success());
+
+Would perform 2 replacements in 1 file
+"
+    );
+}
+
+#[test]
+fn dry_run_pairs_multiline_replacements_by_line() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "one foo\ntwo foo\nthree foo\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+a.txt (3)
+1- one foo
+1+ one bar
+2- two foo
+2+ two bar
+3- three foo
+3+ three bar
+
+Would perform 3 replacements in 1 file
+"
+    );
+}
+
+#[test]
+fn dry_run_preserves_new_line_numbers_for_line_expansion() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "foo", "bar\nbaz", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+a.txt (1)
+1- foo
+1+ bar
+2+ baz
+
+Would perform 1 replacement in 1 file
+"
+    );
+}
+
+#[test]
+fn dry_run_warns_when_diff_is_not_valid_utf8() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    fs::write(&file, b"pre\xfffoo\xfepost\n").unwrap();
+
+    let output = Command::new(REP)
+        .args(["-n", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+a.txt (1)
+
+Would perform 1 replacement in 1 file
+"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("skipping diff (not valid UTF-8"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn dry_run_with_delete_mode_shows_diff_without_modifying() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "keep\nfoo\nkeep\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "-d", "foo", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(read(&file), "keep\nfoo\nkeep\n");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+a.txt (1)
+2- foo
+
+Would perform 1 replacement in 1 file
+"
+    );
+}
+
+#[test]
+fn dry_run_with_regex_mode_shows_diff_without_modifying() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "hello world\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "-r", r"hello (\w+)", "hi $1", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(read(&file), "hello world\n");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+a.txt (1)
+1- hello world
+1+ hi world
+
+Would perform 1 replacement in 1 file
+"
+    );
+}
+
+#[test]
+fn dry_run_with_smart_mode_shows_diff_without_modifying() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo_bar and FooBar\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "--smart", "foo_bar", "baz_qux", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(read(&file), "foo_bar and FooBar\n");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+a.txt (2)
+1- foo_bar and FooBar
+1+ baz_qux and BazQux
+
+Would perform 2 replacements in 1 file
+"
+    );
+}
+
+#[test]
+fn dry_run_two_separate_hunks_show_correct_line_numbers() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\nkeep\nfoo\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+a.txt (2)
+1- foo
+1+ bar
+3- foo
+3+ bar
+
+Would perform 2 replacements in 1 file
+"
+    );
+}
+
+#[test]
+fn dry_run_file_with_zero_matches_does_not_appear_in_output() {
+    let dir = tempdir().unwrap();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    write(&a, "no match here\n");
+    write(&b, "foo\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+b.txt (1)
+1- foo
+1+ bar
+
+Would perform 1 replacement in 1 file
+"
+    );
+}
+
+#[test]
+fn dry_run_quiet_with_zero_matches_produces_no_output() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "no match here\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "-q", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+}
+
+#[test]
+fn quiet_suppresses_all_replace_output() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\n");
+
+    let output = Command::new(REP)
+        .args(["-q", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(read(&file), "bar\n");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+}
+
+#[test]
+fn quiet_suppresses_dry_run_diff() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "-q", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(read(&file), "foo\n");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "a.txt (1)\n\nWould perform 1 replacement in 1 file\n"
+    );
+}
+
+#[test]
 fn list_files_prints_sorted_matching_paths() {
     let dir = tempdir().unwrap();
     // Write out of order to make sure the sort actually fires.
