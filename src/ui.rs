@@ -57,10 +57,6 @@ impl Styles {
         if self.enabled { "\x1b[2m" } else { "" }
     }
 
-    pub(crate) fn bold_off(self) -> &'static str {
-        if self.enabled { "\x1b[22m" } else { "" }
-    }
-
     pub(crate) fn reset(self) -> &'static str {
         if self.enabled { "\x1b[m" } else { "" }
     }

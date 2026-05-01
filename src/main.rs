@@ -45,6 +45,7 @@ use crate::ui::Styles;
 
 struct ReplacementResult {
     path: String,
+    link_path: String,
     count: usize,
     diff: Option<(String, String)>,
 }
@@ -422,6 +423,51 @@ fn display_path(path: &std::path::Path) -> String {
     s.strip_prefix("./").unwrap_or(&s).to_string()
 }
 
+fn hyperlink_path(path: &std::path::Path) -> String {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    abs.to_string_lossy().to_string()
+}
+
+fn osc8(url: &str, text: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+}
+
+fn hyperlink_format(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "cursor" => String::from("cursor://file{path}:{line}"),
+        "vscode" => String::from("vscode://file{path}:{line}"),
+        "vscode-insiders" => String::from("vscode-insiders://file{path}:{line}"),
+        "vscodium" => String::from("vscodium://file{path}:{line}"),
+        _ => value.to_string(),
+    }
+}
+
+fn hyperlink_url(format: &str, path: &str, line: usize) -> String {
+    let url = format.replace("{path}", path);
+    if line > 0 {
+        return url.replace("{line}", &line.to_string());
+    }
+
+    url.replace(":{line}", "")
+        .replace("#{line}", "")
+        .replace("&line={line}", "")
+        .replace("?line={line}", "")
+        .replace("{line}", "")
+}
+
+fn hyperlink(format: Option<&str>, path: &str, line: usize, text: &str) -> String {
+    format.map_or_else(
+        || text.to_string(),
+        |format| osc8(&hyperlink_url(format, path, line), text),
+    )
+}
+
 /// Parse the `-f` smart glob mini-DSL into the iglob patterns consumed
 /// by `scan::walk_builder_with_file_set`.
 ///
@@ -586,6 +632,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 } else {
                     Ok(ReplacementResult {
                         path: display_path(path),
+                        link_path: hyperlink_path(path),
                         count,
                         diff,
                     })
@@ -719,20 +766,34 @@ fn print_results(results: &[ReplacementResult], dry: bool, quiet: bool) {
     let total_files = results.len();
     let total_matches: usize = results.iter().map(|result| result.count).sum();
     let styles = Styles::ansi();
+    let hyperlink_format = std::env::var("REP_HYPERLINK_FORMAT")
+        .ok()
+        .map(|value| hyperlink_format(&value));
 
     for (idx, result) in results.iter().enumerate() {
         let count = with_commas(result.count);
+        let path = hyperlink(
+            hyperlink_format.as_deref(),
+            &result.link_path,
+            0,
+            &result.path,
+        );
         println!(
-            "{}{}{} {}({count}){}",
-            if quiet { "" } else { styles.bold() },
-            result.path,
-            if quiet { "" } else { styles.bold_off() },
+            "{}{} {}({count}){}",
+            if quiet { "" } else { styles.fg(Color::Magenta) },
+            path,
             styles.fg(Color::Grey),
             styles.reset()
         );
 
         if !quiet && let Some((old, new)) = &result.diff {
-            interactive::print_file_line_diff(old, new, styles);
+            interactive::print_file_line_diff(
+                old,
+                new,
+                styles,
+                hyperlink_format.as_deref(),
+                &result.link_path,
+            );
         }
 
         if !quiet && idx + 1 < results.len() {
@@ -928,6 +989,36 @@ mod tests {
             "src/main.rs"
         );
         assert_eq!(display_path(std::path::Path::new("/abs/path")), "/abs/path");
+    }
+
+    #[test]
+    fn test_hyperlink_url_expands_path_and_line() {
+        assert_eq!(
+            hyperlink_url("vscode://file{path}:{line}", "/tmp/a.txt", 42),
+            "vscode://file/tmp/a.txt:42"
+        );
+    }
+
+    #[test]
+    fn test_hyperlink_format_expands_presets() {
+        assert_eq!(hyperlink_format("vscode"), "vscode://file{path}:{line}");
+        assert_eq!(hyperlink_format("cursor"), "cursor://file{path}:{line}");
+        assert_eq!(
+            hyperlink_format("custom://open/{path}:{line}"),
+            "custom://open/{path}:{line}"
+        );
+    }
+
+    #[test]
+    fn test_hyperlink_url_omits_zero_line() {
+        assert_eq!(
+            hyperlink_url("vscode://file{path}:{line}", "/tmp/a.txt", 0),
+            "vscode://file/tmp/a.txt"
+        );
+        assert_eq!(
+            hyperlink_url("idea://open?file={path}&line={line}", "/tmp/a.txt", 0),
+            "idea://open?file=/tmp/a.txt"
+        );
     }
 
     #[test]

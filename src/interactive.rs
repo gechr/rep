@@ -30,6 +30,36 @@ use crate::ui::Color;
 use crate::ui::Styles;
 
 type Result<T> = ::std::result::Result<T, Error>;
+#[derive(Clone, Copy)]
+pub(crate) struct Hyperlinks<'a> {
+    format: Option<&'a str>,
+    path: &'a str,
+}
+
+impl<'a> Hyperlinks<'a> {
+    pub(crate) fn new(format: Option<&'a str>, path: &'a str) -> Self {
+        Self { format, path }
+    }
+
+    fn wrap(self, line: usize, text: impl AsRef<str>) -> String {
+        let text = text.as_ref();
+        let Some(format) = self.format else {
+            return text.to_string();
+        };
+        let url = format.replace("{path}", self.path);
+        let url = if line > 0 {
+            url.replace("{line}", &line.to_string())
+        } else {
+            url.replace(":{line}", "")
+                .replace("#{line}", "")
+                .replace("&line={line}", "")
+                .replace("?line={line}", "")
+                .replace("{line}", "")
+        };
+        format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+    }
+}
+
 #[derive(Copy, Clone)]
 pub(crate) struct PreviewExpr<'a> {
     pub(crate) regex: &'a Regex,
@@ -141,8 +171,15 @@ fn prompt(
     result
 }
 
-pub(crate) fn print_file_line_diff(old: &str, new: &str, styles: Styles) {
+pub(crate) fn print_file_line_diff(
+    old: &str,
+    new: &str,
+    styles: Styles,
+    hyperlink_format: Option<&str>,
+    hyperlink_path: &str,
+) {
     let diffs = diff::lines(old, new);
+    let hyperlinks = Hyperlinks::new(hyperlink_format, hyperlink_path);
     let mut old_line_no = 1;
     let mut new_line_no = 1;
     let mut i = 0;
@@ -186,7 +223,7 @@ pub(crate) fn print_file_line_diff(old: &str, new: &str, styles: Styles) {
     }
 
     for (old_lines, new_lines) in blocks {
-        print_numbered_diff_block(&old_lines, &new_lines, width, styles);
+        print_numbered_diff_block(&old_lines, &new_lines, width, styles, hyperlinks);
     }
 }
 
@@ -232,12 +269,13 @@ fn print_numbered_inline_diff(
     new_line: &str,
     width: usize,
     styles: Styles,
+    hyperlinks: Hyperlinks<'_>,
 ) {
-    print_numbered_prefix(old_line_no, '-', Color::Red, width, styles);
+    print_numbered_prefix(old_line_no, '-', Color::Red, width, styles, hyperlinks);
     print_inline_chars(old_line, new_line, InlineSide::Old, styles);
     println!();
 
-    print_numbered_prefix(new_line_no, '+', Color::Green, width, styles);
+    print_numbered_prefix(new_line_no, '+', Color::Green, width, styles, hyperlinks);
 
     print_inline_chars(old_line, new_line, InlineSide::New, styles);
     println!();
@@ -248,20 +286,29 @@ fn print_numbered_diff_block(
     new_lines: &[(usize, &str)],
     width: usize,
     styles: Styles,
+    hyperlinks: Hyperlinks<'_>,
 ) {
     let paired = old_lines.len().min(new_lines.len());
     for idx in 0..paired {
         let (old_line_no, old_line) = old_lines[idx];
         let (new_line_no, new_line) = new_lines[idx];
-        print_numbered_inline_diff(old_line_no, new_line_no, old_line, new_line, width, styles);
+        print_numbered_inline_diff(
+            old_line_no,
+            new_line_no,
+            old_line,
+            new_line,
+            width,
+            styles,
+            hyperlinks,
+        );
     }
 
     for (line_no, line) in &old_lines[paired..] {
-        print_numbered_line(*line_no, '-', line, Color::Red, width, styles);
+        print_numbered_line(*line_no, '-', line, Color::Red, width, styles, hyperlinks);
     }
 
     for (line_no, line) in &new_lines[paired..] {
-        print_numbered_line(*line_no, '+', line, Color::Green, width, styles);
+        print_numbered_line(*line_no, '+', line, Color::Green, width, styles, hyperlinks);
     }
 }
 
@@ -281,8 +328,9 @@ fn print_numbered_line(
     diff_color: Color,
     width: usize,
     styles: Styles,
+    hyperlinks: Hyperlinks<'_>,
 ) {
-    print_numbered_prefix(line_no, sign, diff_color, width, styles);
+    print_numbered_prefix(line_no, sign, diff_color, width, styles, hyperlinks);
     styles.print_fg(diff_color);
     print!("{line}");
     styles.print_reset();
@@ -295,13 +343,17 @@ fn print_numbered_prefix(
     line_color: Color,
     width: usize,
     styles: Styles,
+    hyperlinks: Hyperlinks<'_>,
 ) {
+    let line_no_text = line_no.to_string();
+    let padding = " ".repeat(width.saturating_sub(line_no_text.len()));
+    let line_no = hyperlinks.wrap(line_no, line_no_text);
     print!(
-        "{}{}{:>width$}",
+        "{}{}{}{}",
         styles.dim(),
         styles.fg(line_color),
+        padding,
         line_no,
-        width = width
     );
     styles.print_reset();
     if styles.is_plain() {
