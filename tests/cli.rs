@@ -81,17 +81,19 @@ fn dry_run_prints_per_file_diffs() {
     assert_eq!(
         stdout,
         "\
-a.txt (2)
-1- alpha foo
-1+ alpha bar
-3- foo tail
-3+ bar tail
-
-b.txt (1)
-1- foo only
-1+ bar only
-
-Would perform 3 replacements in 2 files
+--- a/a.txt
++++ b/a.txt
+@@ -1,3 +1,3 @@
+-alpha foo
++alpha bar
+ keep
+-foo tail
++bar tail
+--- a/b.txt
++++ b/b.txt
+@@ -1 +1 @@
+-foo only
++bar only
 "
     );
 }
@@ -116,11 +118,11 @@ fn dry_run_only_highlights_changed_characters_inside_lines() {
     assert_eq!(
         stdout,
         "\
-a.txt (2)
-1-     assert!(status.success());
-1+     bssert!(stbtus.success());
-
-Would perform 2 replacements in 1 file
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-    assert!(status.success());
++    bssert!(stbtus.success());
 "
     );
 }
@@ -145,15 +147,15 @@ fn dry_run_pairs_multiline_replacements_by_line() {
     assert_eq!(
         stdout,
         "\
-a.txt (3)
-1- one foo
-1+ one bar
-2- two foo
-2+ two bar
-3- three foo
-3+ three bar
-
-Would perform 3 replacements in 1 file
+--- a/a.txt
++++ b/a.txt
+@@ -1,3 +1,3 @@
+-one foo
+-two foo
+-three foo
++one bar
++two bar
++three bar
 "
     );
 }
@@ -177,12 +179,12 @@ fn dry_run_preserves_new_line_numbers_for_line_expansion() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "\
-a.txt (1)
-1- foo
-1+ bar
-2+ baz
-
-Would perform 1 replacement in 1 file
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1,2 @@
+-foo
++bar
++baz
 "
     );
 }
@@ -199,14 +201,7 @@ fn dry_run_warns_when_diff_is_not_valid_utf8() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "\
-a.txt (1)
-
-Would perform 1 replacement in 1 file
-"
-    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("skipping diff (not valid UTF-8"),
         "stderr: {}",
@@ -234,10 +229,12 @@ fn dry_run_with_delete_mode_shows_diff_without_modifying() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "\
-a.txt (1)
-2- foo
-
-Would perform 1 replacement in 1 file
+--- a/a.txt
++++ b/a.txt
+@@ -1,3 +1,2 @@
+ keep
+-foo
+ keep
 "
     );
 }
@@ -262,11 +259,11 @@ fn dry_run_with_regex_mode_shows_diff_without_modifying() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "\
-a.txt (1)
-1- hello world
-1+ hi world
-
-Would perform 1 replacement in 1 file
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-hello world
++hi world
 "
     );
 }
@@ -291,11 +288,11 @@ fn dry_run_with_smart_mode_shows_diff_without_modifying() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "\
-a.txt (2)
-1- foo_bar and FooBar
-1+ baz_qux and BazQux
-
-Would perform 2 replacements in 1 file
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-foo_bar and FooBar
++baz_qux and BazQux
 "
     );
 }
@@ -319,13 +316,14 @@ fn dry_run_two_separate_hunks_show_correct_line_numbers() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "\
-a.txt (2)
-1- foo
-1+ bar
-3- foo
-3+ bar
-
-Would perform 2 replacements in 1 file
+--- a/a.txt
++++ b/a.txt
+@@ -1,3 +1,3 @@
+-foo
++bar
+ keep
+-foo
++bar
 "
     );
 }
@@ -347,11 +345,11 @@ fn dry_run_file_with_zero_matches_does_not_appear_in_output() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "\
-b.txt (1)
-1- foo
-1+ bar
-
-Would perform 1 replacement in 1 file
+--- a/b.txt
++++ b/b.txt
+@@ -1 +1 @@
+-foo
++bar
 "
     );
 }
@@ -408,10 +406,7 @@ fn quiet_suppresses_dry_run_diff() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(read(&file), "foo\n");
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "a.txt (1)\n\nWould perform 1 replacement in 1 file\n"
-    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
 }
 
 #[test]

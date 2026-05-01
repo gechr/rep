@@ -34,6 +34,7 @@ fn stdin_has_input() -> bool {
 use anyhow::{Result, bail};
 use clap::{CommandFactory as _, Parser};
 use clap_complete::Shell;
+use diffy::DiffOptions;
 
 use crate::expressions::{
     CompiledExpression, EXPR_SEP, apply_compiled_expressions, build_pre_filter_matcher,
@@ -707,9 +708,17 @@ fn print_results(results: &[ReplacementResult], dry: bool, quiet: bool) {
         return;
     }
 
+    let stdout_is_terminal = std::io::stdout().is_terminal();
+    if !stdout_is_terminal {
+        if !quiet {
+            print_patch_results(results);
+        }
+        return;
+    }
+
     let total_files = results.len();
     let total_matches: usize = results.iter().map(|result| result.count).sum();
-    let styles = Styles::when(std::io::stdout().is_terminal());
+    let styles = Styles::ansi();
 
     for (idx, result) in results.iter().enumerate() {
         let count = with_commas(result.count);
@@ -741,6 +750,20 @@ fn print_results(results: &[ReplacementResult], dry: bool, quiet: bool) {
             msg,
             styles.reset()
         );
+    }
+}
+
+fn print_patch_results(results: &[ReplacementResult]) {
+    for result in results {
+        let Some((old, new)) = &result.diff else {
+            continue;
+        };
+        let mut options = DiffOptions::new();
+        options
+            .set_original_filename(format!("a/{}", result.path))
+            .set_modified_filename(format!("b/{}", result.path));
+        let patch = options.create_patch(old, new);
+        print!("{patch}");
     }
 }
 
