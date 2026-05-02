@@ -391,8 +391,67 @@ enum InlineSide {
 }
 
 fn print_inline_chars(old_line: &str, new_line: &str, side: InlineSide, styles: Styles) {
+    let old_tokens = tokenize(old_line);
+    let new_tokens = tokenize(new_line);
+    let diffs = diff::slice(&old_tokens, &new_tokens);
+
+    let mut i = 0;
+    while i < diffs.len() {
+        match diffs[i] {
+            DiffResult::Both(old, new) => {
+                let tok = match side {
+                    InlineSide::Old => old,
+                    InlineSide::New => new,
+                };
+                print!("{tok}");
+                i += 1;
+            }
+            DiffResult::Left(_) | DiffResult::Right(_) => {
+                let mut lefts: Vec<&str> = Vec::new();
+                let mut rights: Vec<&str> = Vec::new();
+                while i < diffs.len() {
+                    match diffs[i] {
+                        DiffResult::Left(t) => {
+                            lefts.push(t);
+                            i += 1;
+                        }
+                        DiffResult::Right(t) => {
+                            rights.push(t);
+                            i += 1;
+                        }
+                        DiffResult::Both(..) => break,
+                    }
+                }
+                render_change_block(&lefts, &rights, side, styles);
+            }
+        }
+    }
+}
+
+fn render_change_block(lefts: &[&str], rights: &[&str], side: InlineSide, styles: Styles) {
+    // Only intra-word diff when the two sides line up 1:1; otherwise positional
+    // pairing implies token relationships that are just index accidents.
+    let balanced = lefts.len() == rights.len();
+    let (own_tokens, own_color) = match side {
+        InlineSide::Old => (lefts, Color::Red),
+        InlineSide::New => (rights, Color::Green),
+    };
+    for (k, own_tok) in own_tokens.iter().enumerate() {
+        if balanced && should_intra_word_diff(lefts[k], rights[k]) {
+            render_intra_word(lefts[k], rights[k], side, styles);
+        } else {
+            print!("{}{own_tok}{}", styles.fg(own_color), styles.reset());
+        }
+    }
+}
+
+fn render_intra_word(old_tok: &str, new_tok: &str, side: InlineSide, styles: Styles) {
+    let color = match side {
+        InlineSide::Old => Color::Red,
+        InlineSide::New => Color::Green,
+    };
     let mut highlighting = false;
-    for item in diff::chars(old_line, new_line) {
+    for item in diff::chars(old_tok, new_tok) {
         match (side, item) {
             (InlineSide::Old, DiffResult::Both(ch, _))
             | (InlineSide::New, DiffResult::Both(_, ch)) => {
@@ -402,26 +461,142 @@ fn print_inline_chars(old_line: &str, new_line: &str, side: InlineSide, styles: 
                 }
                 print!("{ch}");
             }
-            (InlineSide::Old, DiffResult::Left(ch)) => {
+            (InlineSide::Old, DiffResult::Left(ch)) | (InlineSide::New, DiffResult::Right(ch)) => {
                 if !highlighting {
-                    print!("{}", styles.fg(Color::Red));
+                    styles.print_fg(color);
                     highlighting = true;
                 }
                 print!("{ch}");
             }
-            (InlineSide::New, DiffResult::Right(ch)) => {
-                if !highlighting {
-                    print!("{}", styles.fg(Color::Green));
-                    highlighting = true;
-                }
-                print!("{ch}");
-            }
-            (InlineSide::Old, DiffResult::Right(_)) | (InlineSide::New, DiffResult::Left(_)) => {}
+            _ => {}
         }
     }
     if highlighting {
         styles.print_reset();
     }
+}
+
+fn should_intra_word_diff(old_tok: &str, new_tok: &str) -> bool {
+    // Cap LCS work for pathological tokens (e.g. a multi-KB minified identifier).
+    const MAX_INTRA_WORD_LEN: usize = 1024;
+    if token_kind(old_tok) != TokenKind::Word || token_kind(new_tok) != TokenKind::Word {
+        return false;
+    }
+    if old_tok.len() > MAX_INTRA_WORD_LEN || new_tok.len() > MAX_INTRA_WORD_LEN {
+        return false;
+    }
+    let min_len = old_tok.chars().count().min(new_tok.chars().count());
+    let threshold = max(2, min_len / 2);
+    lcs_len(old_tok, new_tok) >= threshold
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TokenKind {
+    Whitespace,
+    Word,
+    Symbol,
+}
+
+fn token_kind(tok: &str) -> TokenKind {
+    let Some(c) = tok.chars().next() else {
+        return TokenKind::Symbol;
+    };
+    classify(c)
+}
+
+fn classify(c: char) -> TokenKind {
+    if c.is_whitespace() {
+        TokenKind::Whitespace
+    } else if c.is_alphanumeric() {
+        TokenKind::Word
+    } else {
+        TokenKind::Symbol
+    }
+}
+
+fn tokenize(line: &str) -> Vec<&str> {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let n = chars.len();
+    let byte_at = |k: usize| -> usize { if k < n { chars[k].0 } else { line.len() } };
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let c = chars[i].1;
+        match classify(c) {
+            TokenKind::Symbol => {
+                tokens.push(&line[chars[i].0..byte_at(i + 1)]);
+                i += 1;
+            }
+            TokenKind::Whitespace => {
+                let mut j = i + 1;
+                while j < n && classify(chars[j].1) == TokenKind::Whitespace {
+                    j += 1;
+                }
+                tokens.push(&line[chars[i].0..byte_at(j)]);
+                i = j;
+            }
+            TokenKind::Word => {
+                let mut j = i + 1;
+                while j < n && classify(chars[j].1) == TokenKind::Word {
+                    j += 1;
+                }
+                let mut sub_start = i;
+                let mut k = i + 1;
+                while k < j {
+                    let prev = chars[k - 1].1;
+                    let cur = chars[k].1;
+                    let next = chars.get(k + 1).map(|x| x.1);
+                    if is_subword_boundary(prev, cur, next) {
+                        tokens.push(&line[chars[sub_start].0..chars[k].0]);
+                        sub_start = k;
+                    }
+                    k += 1;
+                }
+                tokens.push(&line[chars[sub_start].0..byte_at(j)]);
+                i = j;
+            }
+        }
+    }
+    tokens
+}
+
+fn is_subword_boundary(prev: char, cur: char, next: Option<char>) -> bool {
+    if prev.is_alphabetic() != cur.is_alphabetic() {
+        return true;
+    }
+    if prev.is_lowercase() && cur.is_uppercase() {
+        return true;
+    }
+    if prev.is_uppercase()
+        && cur.is_uppercase()
+        && let Some(n) = next
+        && n.is_lowercase()
+    {
+        return true;
+    }
+    false
+}
+
+fn lcs_len(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() || b.is_empty() {
+        return 0;
+    }
+    let mut prev = vec![0usize; b.len() + 1];
+    let mut cur = vec![0usize; b.len() + 1];
+    for ac in &a {
+        for (j, bc) in b.iter().enumerate() {
+            cur[j + 1] = if ac == bc {
+                prev[j] + 1
+            } else {
+                prev[j + 1].max(cur[j])
+            };
+        }
+        std::mem::swap(&mut prev, &mut cur);
+        cur.fill(0);
+    }
+    prev[b.len()]
 }
 
 fn to_char_boundary(s: &str, mut index: usize) -> usize {
@@ -820,7 +995,7 @@ impl InteractivePatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{backward_to_char_boundary, to_char_boundary};
+    use super::{backward_to_char_boundary, should_intra_word_diff, to_char_boundary, tokenize};
 
     /// `to_char_boundary` advances forward past any mid-character byte indices,
     /// which `present_and_apply_patches_multi` relies on when bumping the
@@ -845,5 +1020,75 @@ mod tests {
         assert_eq!(backward_to_char_boundary(s, 3), 3);
         assert_eq!(backward_to_char_boundary(s, 4), 3); // mid-rune -> retreats
         assert_eq!(backward_to_char_boundary(s, 5), 5);
+    }
+
+    #[test]
+    fn tokenize_handles_empty_and_whitespace() {
+        assert!(tokenize("").is_empty());
+        assert_eq!(tokenize("   "), vec!["   "]);
+        assert_eq!(tokenize("a"), vec!["a"]);
+    }
+
+    #[test]
+    fn tokenize_splits_punctuation_each_to_its_own_token() {
+        assert_eq!(tokenize(".gitignore"), vec![".", "gitignore"]);
+        assert_eq!(tokenize("a/b"), vec!["a", "/", "b"]);
+        assert_eq!(
+            tokenize(".git/info/exclude"),
+            vec![".", "git", "/", "info", "/", "exclude"],
+        );
+    }
+
+    #[test]
+    fn tokenize_splits_subwords() {
+        assert_eq!(tokenize("getUserName"), vec!["get", "User", "Name"]);
+        assert_eq!(tokenize("HTTPServer"), vec!["HTTP", "Server"]);
+        assert_eq!(tokenize("utf8"), vec!["utf", "8"]);
+        // Trailing-acronym oddity: lookahead splits before "Ps", so HTTPs
+        // tokenizes as ["HTT", "Ps"]. Documented limitation, not a regression.
+        assert_eq!(tokenize("HTTPs"), vec!["HTT", "Ps"]);
+    }
+
+    #[test]
+    fn tokenize_handles_multibyte_word_chars() {
+        // Each token slice must land on a UTF-8 boundary.
+        let toks = tokenize("café-naïve");
+        assert_eq!(toks, vec!["café", "-", "naïve"]);
+    }
+
+    #[test]
+    fn tokenize_keeps_leading_and_trailing_punctuation() {
+        assert_eq!(tokenize("(foo)"), vec!["(", "foo", ")"]);
+        assert_eq!(tokenize("  ,a"), vec!["  ", ",", "a"]);
+    }
+
+    #[test]
+    fn intra_word_diff_gate_rejects_too_short_tokens() {
+        // min_len=2 -> threshold=2, but LCS("Id","Ip")=1 -> no intra-word diff.
+        assert!(!should_intra_word_diff("Id", "Ip"));
+        // Single-char tokens with no shared chars: still no intra-word diff.
+        assert!(!should_intra_word_diff("a", "b"));
+    }
+
+    #[test]
+    fn intra_word_diff_gate_accepts_similar_words() {
+        assert!(should_intra_word_diff("Identifier", "Id"));
+        assert!(should_intra_word_diff("Name", "Names"));
+    }
+
+    #[test]
+    fn intra_word_diff_gate_rejects_non_word_kinds() {
+        // Whitespace and symbols are never intra-word diffed.
+        assert!(!should_intra_word_diff(" ", " "));
+        assert!(!should_intra_word_diff(".", "."));
+        assert!(!should_intra_word_diff("foo", "."));
+    }
+
+    #[test]
+    fn intra_word_diff_gate_rejects_pathologically_long_tokens() {
+        // Length cap defangs O(n*m) on multi-KB single tokens.
+        let long_a = "a".repeat(2048);
+        let long_b = "a".repeat(2048);
+        assert!(!should_intra_word_diff(&long_a, &long_b));
     }
 }
