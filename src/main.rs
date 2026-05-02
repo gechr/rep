@@ -245,7 +245,7 @@ struct Cli {
 const HELP_SECTIONS: &[&str] = &["Filter", "Replace", "Regex", "Behavior", "Miscellaneous"];
 const SECTION_SPACERS: &[&str] = &["list_files", "hyperlink_format", "version"];
 
-/// Clap auto-assigns a value_name to every arg, including bool flags. Gate on
+/// Clap auto-assigns a `value_name` to every arg, including bool flags. Gate on
 /// the action so `--quiet` doesn't render as `--quiet <QUIET>`.
 fn arg_value_name(arg: &clap::Arg) -> Option<&str> {
     matches!(
@@ -255,7 +255,7 @@ fn arg_value_name(arg: &clap::Arg) -> Option<&str> {
     .then(|| {
         arg.get_value_names()
             .and_then(|v| v.first())
-            .map(|s| s.as_str())
+            .map(clap::builder::Str::as_str)
     })
     .flatten()
 }
@@ -268,7 +268,7 @@ fn arg_body_width(arg: &clap::Arg) -> usize {
     flags + val
 }
 
-fn render_arg_body(arg: &clap::Arg, styles: &Styles) -> String {
+fn render_arg_body(arg: &clap::Arg, styles: Styles) -> String {
     use std::fmt::Write as _;
 
     let red = styles.fg(Color::Red);
@@ -287,7 +287,7 @@ fn render_arg_body(arg: &clap::Arg, styles: &Styles) -> String {
     body
 }
 
-fn colorize_help_metavars(help: &str, styles: &Styles) -> String {
+fn colorize_help_metavars(help: &str, styles: Styles) -> String {
     let blue = styles.fg(Color::Blue);
     let reset = styles.reset();
     help.replace("<find>", &format!("{blue}<find>{reset}"))
@@ -357,10 +357,10 @@ fn print_help() {
         println!();
 
         for (_, arg) in &rows {
-            let body = render_arg_body(arg, &styles);
+            let body = render_arg_body(arg, styles);
             let pad = (cell + 2).saturating_sub(arg_body_width(arg)).max(2);
             let help_text = arg.get_help().map(ToString::to_string).unwrap_or_default();
-            let help = colorize_help_metavars(&help_text, &styles);
+            let help = colorize_help_metavars(&help_text, styles);
             println!("  {body}{}{help}", " ".repeat(pad));
 
             if SECTION_SPACERS.contains(&arg.get_id().as_str()) {
@@ -429,7 +429,7 @@ fn print_help_long() {
 }
 
 impl Cli {
-    fn uses_expressions(&self) -> bool {
+    const fn uses_expressions(&self) -> bool {
         !self.expressions.is_empty()
     }
 
@@ -438,7 +438,7 @@ impl Cli {
     /// - `-d`/`--delete`: replacement is forbidden; trailing positionals are paths.
     /// - `-l`/`--list-files` without `-e`: consumes only `<find>`; all remaining
     ///   positionals are search roots.
-    fn is_find_only(&self) -> bool {
+    const fn is_find_only(&self) -> bool {
         !self.uses_expressions() && (self.delete || self.list_files)
     }
 
@@ -459,7 +459,7 @@ impl Cli {
         None
     }
 
-    fn is_regex(&self) -> bool {
+    const fn is_regex(&self) -> bool {
         self.regexp
             || self.dotall
             || self.multiline
@@ -469,7 +469,7 @@ impl Cli {
             || self.line_regexp
     }
 
-    fn positional_skip(&self) -> usize {
+    const fn positional_skip(&self) -> usize {
         if self.uses_expressions() {
             0
         } else if self.is_find_only() {
@@ -484,7 +484,7 @@ impl Cli {
         if args.is_empty() {
             vec!["."]
         } else {
-            args.iter().map(|arg| arg.as_str()).collect()
+            args.iter().map(std::string::String::as_str).collect()
         }
     }
 
@@ -528,7 +528,7 @@ pub(crate) fn preprocess_expression_args(args: Vec<String>) -> Vec<String> {
         .take_while(|a| a.as_str() != "--")
         .any(|a| a == "-d" || a == "--delete");
     let mut out = Vec::with_capacity(args.len());
-    let mut iter = args.into_iter().peekable();
+    let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "-e" || arg == "--expression" {
             out.push(arg);
@@ -570,9 +570,7 @@ fn hyperlink_path(path: &std::path::Path) -> String {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
+        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
     };
     abs.to_string_lossy().to_string()
 }
@@ -702,12 +700,13 @@ fn run_list_files(cli: &Cli) -> Result<()> {
     let expressions = compile_expressions(cli)?;
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
 
-    let mut builder = scan::walk_builder_with_file_set(cli.dirs(), cli.file_set())?;
+    let dirs = cli.dirs();
+    let mut builder = scan::walk_builder_with_file_set(&dirs, cli.file_set())?;
     scan::apply_walk_flags(&mut builder, cli.hidden, cli.no_ignore);
     let walk = builder
         .threads(std::cmp::min(
             12,
-            std::thread::available_parallelism().map_or(1, |n| n.get()),
+            std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
         ))
         .build_parallel();
 
@@ -766,12 +765,13 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     // match Vec push entirely.
     let track_positions = std::io::stdout().is_terminal() && !cli.quiet;
 
-    let mut builder = scan::walk_builder_with_file_set(cli.dirs(), cli.file_set())?;
+    let dirs = cli.dirs();
+    let mut builder = scan::walk_builder_with_file_set(&dirs, cli.file_set())?;
     scan::apply_walk_flags(&mut builder, cli.hidden, cli.no_ignore);
     let walk = builder
         .threads(std::cmp::min(
             12,
-            std::thread::available_parallelism().map_or(1, |n| n.get()),
+            std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
         ))
         .build_parallel();
 
@@ -867,8 +867,9 @@ fn run_preview(cli: &Cli) -> Result<()> {
         .map(CompiledExpression::preview_expr)
         .collect();
     let mut fm = interactive::InteractivePatcher::new(false, cli.preview_tool());
+    let dirs = cli.dirs();
     for (path, contents) in scan::matching_files_parallel(
-        cli.dirs(),
+        &dirs,
         cli.file_set(),
         cli.hidden,
         cli.no_ignore,
@@ -901,8 +902,8 @@ fn run_stdin(cli: &Cli) -> Result<()> {
 }
 
 /// Render `n` using the system locale's thousands separator (e.g. `648098` -> `648,098`
-/// on en_US, `648.098` on de_DE). Locales whose separator is whitespace (fr_FR's NBSP,
-/// sv_SE's regular space, etc.) fall back to `,` because a space inside a count is
+/// on `en_US`, `648.098` on `de_DE`). Locales whose separator is whitespace (`fr_FR`'s NBSP,
+/// `sv_SE`'s regular space, etc.) fall back to `,` because a space inside a count is
 /// ambiguous in CLI output - it reads as a word boundary, not a digit group. Same
 /// fallback when the system locale cannot be read at all.
 fn format_count<F>(n: usize, format: &F) -> String
@@ -1148,7 +1149,8 @@ mod tests {
     use super::*;
 
     fn parse_cli(args: &[&str]) -> Cli {
-        let processed = preprocess_expression_args(args.iter().map(|s| s.to_string()).collect());
+        let processed =
+            preprocess_expression_args(args.iter().map(std::string::ToString::to_string).collect());
         Cli::parse_from(processed)
     }
 

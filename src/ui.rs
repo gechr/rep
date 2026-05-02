@@ -11,7 +11,7 @@ pub(crate) enum Color {
 }
 
 impl Color {
-    fn ansi(self) -> &'static str {
+    const fn ansi(self) -> &'static str {
         match self {
             Self::Blue => "\x1b[34m",
             Self::Dim => "\x1b[2m",
@@ -33,31 +33,31 @@ pub(crate) struct Styles {
 impl Styles {
     pub(crate) const PLAIN: Self = Self { enabled: false };
 
-    pub(crate) fn ansi() -> Self {
+    pub(crate) const fn ansi() -> Self {
         Self { enabled: true }
     }
 
-    pub(crate) fn when(enabled: bool) -> Self {
+    pub(crate) const fn when(enabled: bool) -> Self {
         if enabled { Self::ansi() } else { Self::PLAIN }
     }
 
-    pub(crate) fn is_plain(self) -> bool {
+    pub(crate) const fn is_plain(self) -> bool {
         !self.enabled
     }
 
-    pub(crate) fn fg(self, color: Color) -> &'static str {
+    pub(crate) const fn fg(self, color: Color) -> &'static str {
         if self.enabled { color.ansi() } else { "" }
     }
 
-    pub(crate) fn bold(self) -> &'static str {
+    pub(crate) const fn bold(self) -> &'static str {
         if self.enabled { "\x1b[1m" } else { "" }
     }
 
-    pub(crate) fn dim(self) -> &'static str {
+    pub(crate) const fn dim(self) -> &'static str {
         if self.enabled { "\x1b[2m" } else { "" }
     }
 
-    pub(crate) fn reset(self) -> &'static str {
+    pub(crate) const fn reset(self) -> &'static str {
         if self.enabled { "\x1b[m" } else { "" }
     }
 

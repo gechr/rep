@@ -35,7 +35,7 @@ pub(crate) struct FileSet {
 }
 
 pub(crate) fn walk_builder_with_file_set(
-    dirs: Vec<&str>,
+    dirs: &[&str],
     file_set: Option<FileSet>,
 ) -> Result<WalkBuilder> {
     ensure!(!dirs.is_empty(), "must provide at least one path to walk!");
@@ -147,7 +147,7 @@ fn is_vcs_dir_name(name: &OsStr) -> bool {
 /// iterator yields results as they arrive and terminates when the walk
 /// finishes.
 pub(crate) fn matching_files_parallel(
-    dirs: Vec<&str>,
+    dirs: &[&str],
     file_set: Option<FileSet>,
     hidden: bool,
     no_ignore: bool,
@@ -158,7 +158,7 @@ pub(crate) fn matching_files_parallel(
     let walk = builder
         .threads(min(
             12,
-            thread::available_parallelism().map_or(1, |n| n.get()),
+            thread::available_parallelism().map_or(1, std::num::NonZero::get),
         ))
         .build_parallel();
     let (tx, rx) = channel();
@@ -200,7 +200,7 @@ struct MatchSink {
 }
 
 impl MatchSink {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self { did_match: false }
     }
 }

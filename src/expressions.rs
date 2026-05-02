@@ -101,7 +101,7 @@ impl regex::bytes::Replacer for CountingSmartReplacer<'_> {
         self.count += 1;
         record_position(&mut self.positions, caps);
         let matched = caps.get(0).expect("full regex match is always present");
-        // Smart-replace patterns are built from inflector case conversions of
+        // Smart-replace patterns are built from case conversions of
         // the user's find string. Those are always valid UTF-8, so every
         // match here is a UTF-8 substring of the haystack - the `from_utf8`
         // always succeeds. A non-UTF-8 substring could never have matched.
@@ -117,19 +117,43 @@ impl regex::bytes::Replacer for CountingSmartReplacer<'_> {
 }
 
 /// Build the 7 case variant pairs for preserve-case replacement.
-/// Returns (variant_map, regex_pattern).
+/// Returns (`variant_map`, `regex_pattern`).
 pub(crate) fn build_case_variants(
     pattern: &str,
     replacement: &str,
 ) -> (std::collections::HashMap<String, String>, String) {
-    use inflector::cases::{
-        camelcase::to_camel_case, kebabcase::to_kebab_case, pascalcase::to_pascal_case,
-        screamingsnakecase::to_screaming_snake_case, snakecase::to_snake_case,
-        traincase::to_train_case,
-    };
+    use convert_case::{Case, Casing as _};
 
     fn to_ada_case(input: &str) -> String {
-        to_train_case(input).replace('-', "_")
+        input.to_case(Case::Ada)
+    }
+
+    fn to_camel_case(input: &str) -> String {
+        input.to_case(Case::Camel)
+    }
+
+    fn to_kebab_case(input: &str) -> String {
+        input.to_case(Case::Kebab)
+    }
+
+    fn to_pascal_case(input: &str) -> String {
+        input.to_case(Case::Pascal)
+    }
+
+    fn to_screaming_snake_case(input: &str) -> String {
+        input.to_case(Case::UpperSnake)
+    }
+
+    fn to_snake_case(input: &str) -> String {
+        input.to_case(Case::Snake)
+    }
+
+    fn to_train_case(input: &str) -> String {
+        input.to_case(Case::Train)
+    }
+
+    fn normalize_separators(input: &str) -> String {
+        input.replace(['_', '-'], " ")
     }
 
     let converters: &[fn(&str) -> String] = &[
@@ -141,10 +165,6 @@ pub(crate) fn build_case_variants(
         to_snake_case,
         to_train_case,
     ];
-
-    fn normalize_separators(input: &str) -> String {
-        input.replace(['_', '-'], " ")
-    }
 
     let mut map = std::collections::HashMap::new();
     let mut alt_parts = Vec::new();
@@ -175,10 +195,10 @@ pub(crate) fn build_case_variants(
 }
 
 pub(crate) fn build_pattern_for(cli: &Cli, pattern: &str) -> String {
-    let base = if !cli.is_regex() {
-        regex::escape(pattern)
-    } else {
+    let base = if cli.is_regex() {
         pattern.to_string()
+    } else {
+        regex::escape(pattern)
     };
 
     let wrapped = if cli.line_regexp {
@@ -218,10 +238,10 @@ fn wrap_delete_pattern(inner: &str, line_regexp: bool) -> String {
 }
 
 pub(crate) fn build_subst_for(cli: &Cli, replacement: &str) -> String {
-    if !cli.is_regex() {
-        replacement.replace('$', "$$")
-    } else {
+    if cli.is_regex() {
         replacement.to_string()
+    } else {
+        replacement.replace('$', "$$")
     }
 }
 
@@ -470,7 +490,7 @@ pub(crate) fn apply_compiled_expressions<'a>(
 
 /// Walks `input` once, mapping a sorted slice of byte offsets to the
 /// 1-indexed `(line, column)` of the first match on each line. Single linear
-/// pass, O(input.len() + offsets.len()).
+/// pass, `O(input.len() + offsets.len())`.
 pub(crate) fn byte_offsets_to_line_first_column(
     input: &[u8],
     offsets: &[usize],
@@ -514,8 +534,9 @@ mod tests {
     use super::*;
 
     fn parse_cli(args: &[&str]) -> Cli {
-        let processed =
-            crate::preprocess_expression_args(args.iter().map(|s| s.to_string()).collect());
+        let processed = crate::preprocess_expression_args(
+            args.iter().map(std::string::ToString::to_string).collect(),
+        );
         Cli::parse_from(processed)
     }
 
@@ -648,7 +669,7 @@ mod tests {
         assert_eq!(count, 3);
     }
 
-    /// Regression: the preview-mode replacer was building new_contents as
+    /// Regression: the preview-mode replacer was building `new_contents` as
     /// `contents[..offset] + repl + contents[offset+mat.end()..]`, dropping
     /// `contents[offset..offset+mat.start()]` - the text between the search
     /// window and the actual match position.

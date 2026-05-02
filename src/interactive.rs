@@ -40,7 +40,7 @@ pub(crate) struct Hyperlinks<'a> {
 }
 
 impl<'a> Hyperlinks<'a> {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         format: Option<&'a str>,
         path: &'a str,
         columns: Option<&'a std::collections::HashMap<usize, usize>>,
@@ -75,9 +75,8 @@ pub(crate) struct PreviewExpr<'a> {
 fn index_to_row_col(s: &str, index: usize) -> (usize, usize) {
     let chunk = &s.as_bytes()[..index];
     let line_num = memchr::memchr_iter(b'\n', chunk).count();
-    let last_newline = memchr::memrchr(b'\n', chunk).map_or(-1, |i| i as isize);
-    let col = index as isize - last_newline - 1;
-    (line_num, col as usize)
+    let col = memchr::memrchr(b'\n', chunk).map_or(index, |newline| index - newline - 1);
+    (line_num, col)
 }
 
 fn split_shell_words(command: &str, source_name: &str) -> Result<Vec<String>> {
@@ -611,7 +610,7 @@ fn to_char_boundary(s: &str, mut index: usize) -> usize {
     index
 }
 
-fn backward_to_char_boundary(s: &str, mut index: usize) -> usize {
+const fn backward_to_char_boundary(s: &str, mut index: usize) -> usize {
     while !s.is_char_boundary(index) {
         index -= 1;
     }
@@ -644,14 +643,14 @@ pub(crate) struct InteractivePatcher {
 }
 
 impl InteractivePatcher {
-    pub(crate) fn new(accept_all: bool, preview_tool: Option<String>) -> Self {
+    pub(crate) const fn new(accept_all: bool, preview_tool: Option<String>) -> Self {
         Self {
             yes_to_all: accept_all,
             preview_tool,
         }
     }
 
-    fn save(&self, path: &Path, text: &str) -> Result<()> {
+    fn save(path: &Path, text: &str) -> Result<()> {
         fs::write(path, text).with_context(|| format!("Unable to write to {path:?}"))?;
         Ok(())
     }
@@ -717,7 +716,7 @@ impl InteractivePatcher {
                     &contents,
                     backward_to_char_boundary(
                         &contents,
-                        mat.end() + offset - if is_zero_length { 0 } else { 1 },
+                        mat.end() + offset - usize::from(!is_zero_length),
                     ),
                 );
                 (
@@ -732,7 +731,7 @@ impl InteractivePatcher {
             };
 
             match_index += 1;
-            match self.ask_about_patch(PatchPrompt {
+            match self.ask_about_patch(&PatchPrompt {
                 path,
                 old: &contents,
                 new: &new_contents,
@@ -743,10 +742,8 @@ impl InteractivePatcher {
                 has_history: !history.is_empty(),
             })? {
                 PatchAction::Skip => {
-                    offset = to_char_boundary(
-                        &contents,
-                        offset + mat_end + if is_zero_length { 1 } else { 0 },
-                    );
+                    offset =
+                        to_char_boundary(&contents, offset + mat_end + usize::from(is_zero_length));
                 }
                 PatchAction::Accept => {
                     history.push((
@@ -756,10 +753,10 @@ impl InteractivePatcher {
                         match_index - 1,
                         match_total,
                     ));
-                    self.save(path, &new_contents)?;
+                    Self::save(path, &new_contents)?;
                     offset = to_char_boundary(
                         &new_contents,
-                        offset + mat_start + replacement.len() + if is_zero_length { 1 } else { 0 },
+                        offset + mat_start + replacement.len() + usize::from(is_zero_length),
                     );
                     contents = read_to_string(path)?;
                 }
@@ -771,10 +768,8 @@ impl InteractivePatcher {
                         match_index - 1,
                         match_total,
                     ));
-                    offset = to_char_boundary(
-                        &contents,
-                        offset + mat_end + if is_zero_length { 1 } else { 0 },
-                    );
+                    offset =
+                        to_char_boundary(&contents, offset + mat_end + usize::from(is_zero_length));
                 }
                 PatchAction::Edit => {
                     history.push((
@@ -784,20 +779,20 @@ impl InteractivePatcher {
                         match_index - 1,
                         match_total,
                     ));
-                    self.save(path, &new_contents)?;
+                    Self::save(path, &new_contents)?;
                     run_editor(path, start_line + 1)?;
                     contents = read_to_string(path)?;
                     offset = to_char_boundary(
                         &contents,
-                        offset + mat_start + replacement.len() + if is_zero_length { 1 } else { 0 },
+                        offset + mat_start + replacement.len() + usize::from(is_zero_length),
                     );
                 }
                 PatchAction::AcceptAll => {
                     self.yes_to_all = true;
-                    self.save(path, &new_contents)?;
+                    Self::save(path, &new_contents)?;
                     offset = to_char_boundary(
                         &new_contents,
-                        offset + mat_start + replacement.len() + if is_zero_length { 1 } else { 0 },
+                        offset + mat_start + replacement.len() + usize::from(is_zero_length),
                     );
                     contents = read_to_string(path)?;
                 }
@@ -819,7 +814,7 @@ impl InteractivePatcher {
         Ok(())
     }
 
-    fn ask_about_patch(&mut self, patch: PatchPrompt<'_>) -> Result<PatchAction> {
+    fn ask_about_patch(&self, patch: &PatchPrompt<'_>) -> Result<PatchAction> {
         let PatchPrompt {
             path,
             old,
@@ -830,7 +825,7 @@ impl InteractivePatcher {
             match_total,
             has_history,
         } = patch;
-        let diffs = self.diffs_to_print(old, new);
+        let diffs = Self::diffs_to_print(old, new);
         if diffs.is_empty() {
             return Ok(PatchAction::Skip);
         }
@@ -851,7 +846,7 @@ impl InteractivePatcher {
         }
 
         let diff_result = if let Some(ref preview_tool) = self.preview_tool {
-            self.run_external_diff(old, new, preview_tool)
+            Self::run_external_diff(old, new, preview_tool)
         } else {
             print_diff(&diffs, Styles::ansi());
             Ok(())
@@ -904,11 +899,12 @@ impl InteractivePatcher {
         }
     }
 
-    fn diffs_to_print<'a>(&self, orig: &'a str, edit: &'a str) -> Vec<DiffResult<&'a str>> {
-        let mut diffs = diff::lines(orig, edit);
-        fn is_same(x: &DiffResult<&str>) -> bool {
+    fn diffs_to_print<'a>(orig: &'a str, edit: &'a str) -> Vec<DiffResult<&'a str>> {
+        const fn is_same(x: &DiffResult<&str>) -> bool {
             matches!(x, DiffResult::Both(..))
         }
+
+        let mut diffs = diff::lines(orig, edit);
         let chrome_lines = 8; // file:line header, blank lines, prompt (2 lines), padding
         let lines_to_print = match terminal::size() {
             Some((_w, h)) => h.saturating_sub(chrome_lines),
@@ -947,7 +943,7 @@ impl InteractivePatcher {
         diffs
     }
 
-    fn run_external_diff(&self, old: &str, new: &str, preview_tool: &str) -> Result<()> {
+    fn run_external_diff(old: &str, new: &str, preview_tool: &str) -> Result<()> {
         let mut old_file = NamedTempFile::with_prefix("rep-old-")
             .context("Unable to create temporary file for old content")?;
         let mut new_file = NamedTempFile::with_prefix("rep-new-")
