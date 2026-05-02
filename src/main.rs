@@ -391,13 +391,24 @@ impl Cli {
 /// Preprocess argv so that `-e <find> <replace>` is compacted into a single
 /// clap value joined by `EXPR_SEP` before clap parses the argument list.
 /// This lets the second arg start with `-` without being treated as a flag.
+///
+/// Under `-d`/`--delete` there is no replace half, so `-e` consumes only a
+/// single `<find>` token and any trailing positional is left as a path.
 pub(crate) fn preprocess_expression_args(args: Vec<String>) -> Vec<String> {
+    let delete_mode = args
+        .iter()
+        .take_while(|a| a.as_str() != "--")
+        .any(|a| a == "-d" || a == "--delete");
     let mut out = Vec::with_capacity(args.len());
     let mut iter = args.into_iter().peekable();
     while let Some(arg) = iter.next() {
         if arg == "-e" || arg == "--expression" {
             out.push(arg);
             let Some(find) = iter.next() else { continue };
+            if delete_mode {
+                out.push(find);
+                continue;
+            }
             let Some(replace) = iter.next() else {
                 out.push(find);
                 continue;
@@ -406,6 +417,10 @@ pub(crate) fn preprocess_expression_args(args: Vec<String>) -> Vec<String> {
         } else if let Some(find) = arg.strip_prefix("-e").filter(|s| !s.is_empty()) {
             // Compact form: -efoo → find="foo", next arg is replace
             out.push("-e".to_string());
+            if delete_mode {
+                out.push(find.to_string());
+                continue;
+            }
             let Some(replace) = iter.next() else {
                 out.push(find.to_string());
                 continue;

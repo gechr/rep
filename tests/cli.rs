@@ -704,8 +704,8 @@ fn rewrites_file_with_invalid_utf8_preserving_non_utf8_bytes() {
 
 #[test]
 fn delete_mode_with_expression_matches_raw_string_including_equals() {
-    // With `-d -e <find> <replace>`, the find arg is taken literally; patterns
-    // containing `=` work because find and replace are space-separated args.
+    // With `-d -e <find>`, the find arg is taken literally and there is no
+    // replace half - the trailing positional is a path.
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");
     write(
@@ -714,7 +714,7 @@ fn delete_mode_with_expression_matches_raw_string_including_equals() {
     );
 
     let status = Command::new(REP)
-        .args(["-d", "-e", "foo=bar", "", "."])
+        .args(["-d", "-e", "foo=bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -723,4 +723,24 @@ fn delete_mode_with_expression_matches_raw_string_including_equals() {
         read(&file),
         "keep\nline with just foo\nline with just bar\ntail\n"
     );
+}
+
+#[test]
+fn delete_mode_with_expression_treats_trailing_arg_as_path_not_replace() {
+    let dir = tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    let inside = sub.join("a.txt");
+    let outside = dir.path().join("b.txt");
+    write(&inside, "keep\nfoo line\ntail\n");
+    write(&outside, "keep\nfoo line\ntail\n");
+
+    let status = Command::new(REP)
+        .args(["-d", "-e", "foo", "sub"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(read(&inside), "keep\ntail\n");
+    assert_eq!(read(&outside), "keep\nfoo line\ntail\n");
 }

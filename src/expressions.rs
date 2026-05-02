@@ -800,8 +800,8 @@ mod tests {
 
     #[test]
     fn test_delete_mode_with_expression_takes_full_string_literally() {
-        // `-d -e "foo=bar" ""` → find is `foo=bar` (the first arg); replace is ignored.
-        let cli = parse_cli(&["rep", "-d", "-e", "foo=bar", ""]);
+        // `-d -e "foo=bar"` → find is `foo=bar`; no replace half is consumed.
+        let cli = parse_cli(&["rep", "-d", "-e", "foo=bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("keep\nhas foo=bar here\nalso foo\ntail\n", &expressions);
         assert_eq!(output, "keep\nalso foo\ntail\n");
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_delete_mode_with_multiple_expressions_deletes_each() {
-        let cli = parse_cli(&["rep", "-d", "-e", "foo", "", "-e", "baz=qux", ""]);
+        let cli = parse_cli(&["rep", "-d", "-e", "foo", "-e", "baz=qux"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str(
             "keep\nhas foo\nmiddle\nline with baz=qux\ntail\n",
