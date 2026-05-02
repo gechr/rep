@@ -53,14 +53,25 @@ pub(crate) enum BulkReplacer {
     Smart(std::sync::Arc<std::collections::HashMap<String, String>>),
 }
 
+/// Records the byte offset of each match against the input, when `Some`.
+/// Used by `apply_compiled_expressions` to thread match positions out for
+/// per-line `{column}` substitution in hyperlinks.
+fn record_position(positions: &mut Option<&mut Vec<usize>>, caps: &regex::bytes::Captures<'_>) {
+    if let Some(p) = positions {
+        p.push(caps.get(0).expect("full match present").start());
+    }
+}
+
 struct CountingLiteralReplacer<'a> {
     rep: &'a [u8],
     count: usize,
+    positions: Option<&'a mut Vec<usize>>,
 }
 
 impl regex::bytes::Replacer for CountingLiteralReplacer<'_> {
-    fn replace_append(&mut self, _: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
+    fn replace_append(&mut self, caps: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
         self.count += 1;
+        record_position(&mut self.positions, caps);
         dst.extend_from_slice(self.rep);
     }
 }
@@ -68,11 +79,13 @@ impl regex::bytes::Replacer for CountingLiteralReplacer<'_> {
 struct CountingRegexReplacer<'a> {
     subst: &'a [u8],
     count: usize,
+    positions: Option<&'a mut Vec<usize>>,
 }
 
 impl regex::bytes::Replacer for CountingRegexReplacer<'_> {
     fn replace_append(&mut self, caps: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
         self.count += 1;
+        record_position(&mut self.positions, caps);
         caps.expand(self.subst, dst);
     }
 }
@@ -80,11 +93,13 @@ impl regex::bytes::Replacer for CountingRegexReplacer<'_> {
 struct CountingSmartReplacer<'a> {
     map: &'a std::collections::HashMap<String, String>,
     count: usize,
+    positions: Option<&'a mut Vec<usize>>,
 }
 
 impl regex::bytes::Replacer for CountingSmartReplacer<'_> {
     fn replace_append(&mut self, caps: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
         self.count += 1;
+        record_position(&mut self.positions, caps);
         let matched = caps.get(0).expect("full regex match is always present");
         // Smart-replace patterns are built from inflector case conversions of
         // the user's find string. Those are always valid UTF-8, so every
@@ -388,20 +403,39 @@ pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> 
         .collect()
 }
 
+/// Applies the chain of expressions and returns:
+///   - the rewritten bytes,
+///   - the total replacement count,
+///   - byte offsets of matches in the *original* input from the **first**
+///     expression only (empty when `track_positions` is false, or when the
+///     first expression has no matches).
+///
+/// Position tracking is gated by the caller because it costs one Vec push
+/// per match. Callers that don't render diffs (file writes to disk, piped
+/// output, stdin mode) pass `false` and pay nothing.
+///
+/// Only the first expression's positions are tracked: later expressions
+/// match against the rewritten text, so their offsets wouldn't index into
+/// either the displayed `-` (original) or `+` (final) lines correctly.
 pub(crate) fn apply_compiled_expressions<'a>(
     contents: &'a [u8],
     expressions: &[CompiledExpression],
-) -> (Cow<'a, [u8]>, usize) {
+    track_positions: bool,
+) -> (Cow<'a, [u8]>, usize, Vec<usize>) {
     use regex::bytes::Replacer as _;
     let mut current: Cow<'a, [u8]> = Cow::Borrowed(contents);
     let mut replacements = 0;
+    let mut positions: Vec<usize> = Vec::new();
 
-    for expr in expressions {
+    for (idx, expr) in expressions.iter().enumerate() {
+        let positions_ref = (track_positions && idx == 0).then_some(&mut positions);
+
         let (replaced, count) = match &expr.bulk {
             BulkReplacer::Literal(rep) => {
                 let mut rep = CountingLiteralReplacer {
                     rep: rep.as_bytes(),
                     count: 0,
+                    positions: positions_ref,
                 };
                 let out = expr.bytes_regex.replace_all(&current, rep.by_ref());
                 (out, rep.count)
@@ -410,12 +444,17 @@ pub(crate) fn apply_compiled_expressions<'a>(
                 let mut rep = CountingRegexReplacer {
                     subst: subst.as_bytes(),
                     count: 0,
+                    positions: positions_ref,
                 };
                 let out = expr.bytes_regex.replace_all(&current, rep.by_ref());
                 (out, rep.count)
             }
             BulkReplacer::Smart(map) => {
-                let mut rep = CountingSmartReplacer { map, count: 0 };
+                let mut rep = CountingSmartReplacer {
+                    map,
+                    count: 0,
+                    positions: positions_ref,
+                };
                 let out = expr.bytes_regex.replace_all(&current, rep.by_ref());
                 (out, rep.count)
             }
@@ -426,7 +465,46 @@ pub(crate) fn apply_compiled_expressions<'a>(
         }
     }
 
-    (current, replacements)
+    (current, replacements, positions)
+}
+
+/// Walks `input` once, mapping a sorted slice of byte offsets to the
+/// 1-indexed `(line, column)` of the first match on each line. Single linear
+/// pass, O(input.len() + offsets.len()).
+pub(crate) fn byte_offsets_to_line_first_column(
+    input: &[u8],
+    offsets: &[usize],
+) -> std::collections::HashMap<usize, usize> {
+    use std::collections::HashMap;
+    let mut map: HashMap<usize, usize> = HashMap::new();
+    if offsets.is_empty() {
+        return map;
+    }
+
+    let mut sorted = offsets.to_vec();
+    sorted.sort_unstable();
+    let mut idx = 0;
+    let mut line: usize = 1;
+    let mut line_start: usize = 0;
+
+    while idx < sorted.len() {
+        let off = sorted[idx];
+        // Advance line counter until this offset's line.
+        while line_start <= off && line_start < input.len() {
+            if let Some(nl) = memchr::memchr(b'\n', &input[line_start..])
+                && line_start + nl < off
+            {
+                line += 1;
+                line_start += nl + 1;
+            } else {
+                break;
+            }
+        }
+        let col = off.saturating_sub(line_start) + 1;
+        map.entry(line).or_insert(col);
+        idx += 1;
+    }
+    map
 }
 
 #[cfg(test)]
@@ -449,11 +527,60 @@ mod tests {
         build_subst_for(cli, cli.replacement())
     }
 
+    #[test]
+    fn test_byte_offsets_to_line_first_column_basic() {
+        // input:   "abc\ndefoo\nfoox"
+        //          line 1: abc            (cols 1..3)
+        //          line 2: defoo          (cols 1..5,  newline at byte 9)
+        //          line 3: foox           (cols 1..4)
+        // matches at byte offsets 6 (line 2, col 3) and 10 (line 3, col 1)
+        let input = b"abc\ndefoo\nfoox";
+        let map = byte_offsets_to_line_first_column(input, &[6, 10]);
+        assert_eq!(map.get(&2), Some(&3));
+        assert_eq!(map.get(&3), Some(&1));
+        assert_eq!(map.get(&1), None);
+    }
+
+    #[test]
+    fn test_byte_offsets_to_line_first_column_records_first_only() {
+        // Two matches on the same line: only the earliest column is kept.
+        let input = b"foofoo\n";
+        let map = byte_offsets_to_line_first_column(input, &[3, 0]);
+        assert_eq!(map.get(&1), Some(&1));
+    }
+
+    #[test]
+    fn test_byte_offsets_to_line_first_column_empty_offsets() {
+        let map = byte_offsets_to_line_first_column(b"abc\ndef\n", &[]);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_apply_compiled_expressions_returns_positions_when_tracking_enabled() {
+        let cli = parse_cli(&["rep", "foo", "bar"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        // "foo" appears at byte offsets 0 and 8 in "foo bar\nfoo baz\n".
+        let (_out, count, positions) =
+            apply_compiled_expressions(b"foo bar\nfoo baz\n", &expressions, true);
+        assert_eq!(count, 2);
+        assert_eq!(positions, vec![0, 8]);
+    }
+
+    #[test]
+    fn test_apply_compiled_expressions_skips_positions_when_tracking_disabled() {
+        let cli = parse_cli(&["rep", "foo", "bar"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (_out, count, positions) =
+            apply_compiled_expressions(b"foo bar\nfoo baz\n", &expressions, false);
+        assert_eq!(count, 2);
+        assert!(positions.is_empty());
+    }
+
     fn apply_str<'a>(
         contents: &'a str,
         expressions: &[CompiledExpression],
     ) -> (Cow<'a, str>, usize) {
-        let (out, n) = apply_compiled_expressions(contents.as_bytes(), expressions);
+        let (out, n, _) = apply_compiled_expressions(contents.as_bytes(), expressions, false);
         let cow = match out {
             Cow::Borrowed(b) => Cow::Borrowed(std::str::from_utf8(b).unwrap()),
             Cow::Owned(o) => Cow::Owned(String::from_utf8(o).unwrap()),
@@ -800,7 +927,7 @@ mod tests {
 
     #[test]
     fn test_delete_mode_with_expression_takes_full_string_literally() {
-        // `-d -e "foo=bar"` → find is `foo=bar`; no replace half is consumed.
+        // `-d -e "foo=bar"` -> find is `foo=bar`; no replace half is consumed.
         let cli = parse_cli(&["rep", "-d", "-e", "foo=bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("keep\nhas foo=bar here\nalso foo\ntail\n", &expressions);

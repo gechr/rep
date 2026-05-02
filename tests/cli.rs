@@ -2,7 +2,7 @@
 //!
 //! These complement the unit tests in `src/main.rs` by exercising the
 //! orchestrators in `run_walk_and_apply`, `run_list_files`, and `run_stdin` -
-//! the glue code (walk → pre-filter → apply → write-back → summary) that
+//! the glue code (walk -> pre-filter -> apply -> write-back -> summary) that
 //! string-level unit tests don't reach. The built binary is located via
 //! Cargo's `CARGO_BIN_EXE_rep` env var, so no `assert_cmd`-style dev-dep is
 //! needed.

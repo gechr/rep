@@ -39,7 +39,7 @@ use diffy::DiffOptions;
 
 use crate::expressions::{
     CompiledExpression, EXPR_SEP, apply_compiled_expressions, build_pre_filter_matcher,
-    compile_expressions,
+    byte_offsets_to_line_first_column, compile_expressions,
 };
 use crate::ui::Color;
 use crate::ui::Styles;
@@ -49,6 +49,10 @@ struct ReplacementResult {
     link_path: String,
     count: usize,
     diff: Option<(String, String)>,
+    /// 1-indexed `(line -> first-match column)` for the original file, used to
+    /// fill `{column}` in per-line hyperlinks. Empty when position tracking
+    /// was disabled (non-interactive output).
+    columns: std::collections::HashMap<usize, usize>,
 }
 
 #[derive(Parser)]
@@ -77,7 +81,7 @@ struct Cli {
 
     #[arg(
         long = "no-ignore",
-        help = "Don't respect .gitignore / .ignore / .git/info/exclude",
+        help = "Don't respect ignore files",
         help_heading = "Filter"
     )]
     no_ignore: bool,
@@ -539,7 +543,7 @@ pub(crate) fn preprocess_expression_args(args: Vec<String>) -> Vec<String> {
             };
             out.push(format!("{find}{EXPR_SEP}{replace}"));
         } else if let Some(find) = arg.strip_prefix("-e").filter(|s| !s.is_empty()) {
-            // Compact form: -efoo → find="foo", next arg is replace
+            // Compact form: -efoo -> find="foo", next arg is replace
             out.push("-e".to_string());
             if delete_mode {
                 out.push(find.to_string());
@@ -573,37 +577,85 @@ fn hyperlink_path(path: &std::path::Path) -> String {
     abs.to_string_lossy().to_string()
 }
 
-fn osc8(url: &str, text: &str) -> String {
+pub(crate) fn osc8(url: &str, text: &str) -> String {
     format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
 }
 
-fn hyperlink_format(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "cursor" => String::from("cursor://file{path}:{line}"),
-        "vscode" => String::from("vscode://file{path}:{line}"),
-        "vscode-insiders" => String::from("vscode-insiders://file{path}:{line}"),
-        "vscodium" => String::from("vscodium://file{path}:{line}"),
-        _ => value.to_string(),
+/// Resolves an alias or a literal format string to the format that
+/// `hyperlink_url` consumes. `None` means "hyperlinks disabled" (the user
+/// passed an empty string or the `none` alias).
+fn hyperlink_format(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
     }
+    let resolved = match trimmed.to_ascii_lowercase().as_str() {
+        "none" => return None,
+        "cursor" => "cursor://file{path}:{line}:{column}",
+        "file" | "default" => "file://{host}{path}",
+        "grep+" => "grep+://{path}:{line}",
+        "kitty" => "file://{host}{path}#{line}",
+        "macvim" => "mvim://open?url=file://{path}&line={line}&column={column}",
+        "textmate" => "txmt://open?url=file://{path}&line={line}&column={column}",
+        "vscode" => "vscode://file{path}:{line}:{column}",
+        "vscode-insiders" => "vscode-insiders://file{path}:{line}:{column}",
+        "vscodium" => "vscodium://file{path}:{line}:{column}",
+        _ => return Some(trimmed.to_string()),
+    };
+    Some(resolved.to_string())
 }
 
-fn hyperlink_url(format: &str, path: &str, line: usize) -> String {
-    let url = format.replace("{path}", path);
-    if line > 0 {
-        return url.replace("{line}", &line.to_string());
-    }
+/// System hostname, cached. `None` if it can't be resolved or isn't UTF-8.
+fn hostname() -> Option<&'static str> {
+    static HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| gethostname::gethostname().into_string().ok())
+        .as_deref()
+}
 
-    url.replace(":{line}", "")
-        .replace("#{line}", "")
-        .replace("&line={line}", "")
-        .replace("?line={line}", "")
-        .replace("{line}", "")
+/// Percent-encodes a path per RFC 3986 §2.3 unreserved set, plus `/` and `:`
+/// (preserved as path separators). Bytes >= 128 (UTF-8 continuations) pass
+/// through unencoded.
+fn percent_encode_path(s: &str) -> String {
+    const HEX: &[u8] = b"0123456789ABCDEF";
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'0'..=b'9'
+            | b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'/'
+            | b':'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~'
+            | 128.. => out.push(b),
+            _ => {
+                out.push(b'%');
+                out.push(HEX[(b >> 4) as usize]);
+                out.push(HEX[(b & 0xF) as usize]);
+            }
+        }
+    }
+    String::from_utf8(out)
+        .expect("UTF-8 by construction: input bytes preserved or replaced by ASCII")
+}
+
+pub(crate) fn hyperlink_url(format: &str, path: &str, line: usize, column: usize) -> String {
+    // 0 sentinels mean "no real value known" - default to 1.
+    let line = if line == 0 { 1 } else { line };
+    let column = if column == 0 { 1 } else { column };
+    format
+        .replace("{path}", &percent_encode_path(path))
+        .replace("{host}", hostname().unwrap_or(""))
+        .replace("{line}", &line.to_string())
+        .replace("{column}", &column.to_string())
 }
 
 fn hyperlink(format: Option<&str>, path: &str, line: usize, text: &str) -> String {
     format.map_or_else(
         || text.to_string(),
-        |format| osc8(&hyperlink_url(format, path, line), text),
+        |format| osc8(&hyperlink_url(format, path, line, 0), text),
     )
 }
 
@@ -611,11 +663,11 @@ fn hyperlink(format: Option<&str>, path: &str, line: usize, text: &str) -> Strin
 /// by `scan::walk_builder_with_file_set`.
 ///
 /// Supports comma-separated patterns:
-///   `txt`         → `*.txt`        (extension)
-///   `=Dockerfile` → `Dockerfile`   (exact filename)
-///   `!=Makefile`  → `!Makefile`    (exclude exact filename)
-///   `*.json`      → `*.json`       (glob as-is)
-///   `!rs`         → `!*.rs`        (exclude extension)
+///   `txt`         -> `*.txt`        (extension)
+///   `=Dockerfile` -> `Dockerfile`   (exact filename)
+///   `!=Makefile`  -> `!Makefile`    (exclude exact filename)
+///   `*.json`      -> `*.json`       (glob as-is)
+///   `!rs`         -> `!*.rs`        (exclude extension)
 fn parse_file_globs(input: &str) -> Vec<String> {
     let mut globs = Vec::new();
     for part in input.split(',') {
@@ -709,6 +761,11 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     let expressions = Arc::new(compile_expressions(cli)?);
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
 
+    // Position tracking is paid for only when the diff renderer will use it.
+    // Non-interactive paths (piped output, file-write+quiet) skip the per-
+    // match Vec push entirely.
+    let track_positions = std::io::stdout().is_terminal() && !cli.quiet;
+
     let mut builder = scan::walk_builder_with_file_set(cli.dirs(), cli.file_set())?;
     scan::apply_walk_flags(&mut builder, cli.hidden, cli.no_ignore);
     let walk = builder
@@ -747,10 +804,12 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 else {
                     return WalkState::Continue;
                 };
-                let (updated, count) = apply_compiled_expressions(&contents, &expressions);
+                let (updated, count, positions) =
+                    apply_compiled_expressions(&contents, &expressions, track_positions);
                 if count == 0 {
                     return WalkState::Continue;
                 }
+                let columns = byte_offsets_to_line_first_column(&contents, &positions);
                 let diff = match (
                     String::from_utf8(contents.clone()),
                     String::from_utf8(updated.as_ref().to_vec()),
@@ -774,6 +833,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                         link_path: hyperlink_path(path),
                         count,
                         diff,
+                        columns,
                     })
                 };
                 if tx.send(payload).is_err() {
@@ -835,12 +895,12 @@ fn run_stdin(cli: &Cli) -> Result<()> {
     let expressions = compile_expressions(cli)?;
     let mut input = Vec::new();
     io::stdin().lock().read_to_end(&mut input)?;
-    let (output, _) = apply_compiled_expressions(&input, &expressions);
+    let (output, _, _) = apply_compiled_expressions(&input, &expressions, false);
     io::stdout().lock().write_all(&output)?;
     Ok(())
 }
 
-/// Render `n` using the system locale's thousands separator (e.g. `648098` → `648,098`
+/// Render `n` using the system locale's thousands separator (e.g. `648098` -> `648,098`
 /// on en_US, `648.098` on de_DE). Locales whose separator is whitespace (fr_FR's NBSP,
 /// sv_SE's regular space, etc.) fall back to `,` because a space inside a count is
 /// ambiguous in CLI output - it reads as a word boundary, not a digit group. Same
@@ -892,8 +952,8 @@ fn summary_message(total_files: usize, total_matches: usize, dry: bool) -> Strin
     summary_message_with_formatter(total_files, total_matches, dry, with_commas)
 }
 
-/// `dry=true` → yellow "Would perform"; `dry=false` → green "Performed".
-/// Write + `quiet` → silence all output. Dry-run + `quiet` → suppress diff only.
+/// `dry=true` -> yellow "Would perform"; `dry=false` -> green "Performed".
+/// Write + `quiet` -> silence all output. Dry-run + `quiet` -> suppress diff only.
 fn print_results(
     results: &[ReplacementResult],
     dry: bool,
@@ -915,7 +975,7 @@ fn print_results(
     let total_files = results.len();
     let total_matches: usize = results.iter().map(|result| result.count).sum();
     let styles = Styles::ansi();
-    let hyperlink_format = hyperlink_format_opt.map(hyperlink_format);
+    let hyperlink_format = hyperlink_format_opt.and_then(hyperlink_format);
 
     for (idx, result) in results.iter().enumerate() {
         let count = with_commas(result.count);
@@ -940,6 +1000,7 @@ fn print_results(
                 styles,
                 hyperlink_format.as_deref(),
                 &result.link_path,
+                &result.columns,
             );
         }
 
@@ -1053,7 +1114,7 @@ fn run() -> Result<()> {
             continue;
         }
         if !std::path::Path::new(dir).exists() {
-            bail!("{dir}: no such file or directory");
+            bail!("no such file or directory {dir:?}");
         }
     }
 
@@ -1154,31 +1215,131 @@ mod tests {
     #[test]
     fn test_hyperlink_url_expands_path_and_line() {
         assert_eq!(
-            hyperlink_url("vscode://file{path}:{line}", "/tmp/a.txt", 42),
+            hyperlink_url("vscode://file{path}:{line}", "/tmp/a.txt", 42, 0),
             "vscode://file/tmp/a.txt:42"
         );
     }
 
     #[test]
     fn test_hyperlink_format_expands_presets() {
-        assert_eq!(hyperlink_format("vscode"), "vscode://file{path}:{line}");
-        assert_eq!(hyperlink_format("cursor"), "cursor://file{path}:{line}");
         assert_eq!(
-            hyperlink_format("custom://open/{path}:{line}"),
-            "custom://open/{path}:{line}"
+            hyperlink_format("vscode").as_deref(),
+            Some("vscode://file{path}:{line}:{column}")
+        );
+        assert_eq!(
+            hyperlink_format("vscode-insiders").as_deref(),
+            Some("vscode-insiders://file{path}:{line}:{column}")
+        );
+        assert_eq!(
+            hyperlink_format("vscodium").as_deref(),
+            Some("vscodium://file{path}:{line}:{column}")
+        );
+        assert_eq!(
+            hyperlink_format("cursor").as_deref(),
+            Some("cursor://file{path}:{line}:{column}")
+        );
+        assert_eq!(
+            hyperlink_format("file").as_deref(),
+            Some("file://{host}{path}")
+        );
+        assert_eq!(
+            hyperlink_format("default").as_deref(),
+            Some("file://{host}{path}")
+        );
+        assert_eq!(
+            hyperlink_format("grep+").as_deref(),
+            Some("grep+://{path}:{line}")
+        );
+        assert_eq!(
+            hyperlink_format("kitty").as_deref(),
+            Some("file://{host}{path}#{line}")
+        );
+        assert_eq!(
+            hyperlink_format("macvim").as_deref(),
+            Some("mvim://open?url=file://{path}&line={line}&column={column}")
+        );
+        assert_eq!(
+            hyperlink_format("textmate").as_deref(),
+            Some("txmt://open?url=file://{path}&line={line}&column={column}")
+        );
+        assert_eq!(
+            hyperlink_format("custom://open/{path}:{line}").as_deref(),
+            Some("custom://open/{path}:{line}")
         );
     }
 
     #[test]
-    fn test_hyperlink_url_omits_zero_line() {
+    fn test_hyperlink_url_defaults_column_to_one() {
         assert_eq!(
-            hyperlink_url("vscode://file{path}:{line}", "/tmp/a.txt", 0),
-            "vscode://file/tmp/a.txt"
+            hyperlink_url("vscode://file{path}:{line}:{column}", "/tmp/a.txt", 7, 0),
+            "vscode://file/tmp/a.txt:7:1"
         );
+    }
+
+    #[test]
+    fn test_hyperlink_url_substitutes_real_column_when_provided() {
         assert_eq!(
-            hyperlink_url("idea://open?file={path}&line={line}", "/tmp/a.txt", 0),
-            "idea://open?file=/tmp/a.txt"
+            hyperlink_url("vscode://file{path}:{line}:{column}", "/tmp/a.txt", 42, 13),
+            "vscode://file/tmp/a.txt:42:13"
         );
+    }
+
+    #[test]
+    fn test_hyperlink_url_substitutes_column_for_per_line_links() {
+        // Regression: per-line diff hyperlinks were leaving `{column}` literal
+        // in the URL, which terminals then percent-encoded as `%7Bcolumn%7D`.
+        let url = hyperlink_url("vscode://file{path}:{line}:{column}", "/tmp/cli.rs", 808, 0);
+        assert!(!url.contains("{column}"));
+        assert!(!url.contains("%7B"));
+        assert_eq!(url, "vscode://file/tmp/cli.rs:808:1");
+    }
+
+    #[test]
+    fn test_hyperlink_format_disables_for_empty_and_none() {
+        assert_eq!(hyperlink_format(""), None);
+        assert_eq!(hyperlink_format("   "), None);
+        assert_eq!(hyperlink_format("none"), None);
+        assert_eq!(hyperlink_format("NONE"), None);
+    }
+
+    #[test]
+    fn test_hyperlink_url_defaults_zero_line_to_one() {
+        assert_eq!(
+            hyperlink_url("vscode://file{path}:{line}", "/tmp/a.txt", 0, 0),
+            "vscode://file/tmp/a.txt:1"
+        );
+    }
+
+    #[test]
+    fn test_percent_encode_path_preserves_unreserved_and_path_separators() {
+        assert_eq!(percent_encode_path("/tmp/a.txt"), "/tmp/a.txt");
+        assert_eq!(percent_encode_path("/a-b_c.d~e/f"), "/a-b_c.d~e/f");
+        // ":" is preserved as a URI authority/segment separator.
+        assert_eq!(percent_encode_path("/srv:8080/a"), "/srv:8080/a");
+    }
+
+    #[test]
+    fn test_percent_encode_path_encodes_special_chars() {
+        assert_eq!(
+            percent_encode_path("/tmp/notes (draft).md"),
+            "/tmp/notes%20%28draft%29.md"
+        );
+        assert_eq!(percent_encode_path("/tmp/file#1.txt"), "/tmp/file%231.txt");
+        assert_eq!(percent_encode_path("/tmp/a?b"), "/tmp/a%3Fb");
+        assert_eq!(percent_encode_path("/tmp/100%.txt"), "/tmp/100%25.txt");
+    }
+
+    #[test]
+    fn test_percent_encode_path_passes_utf8_through() {
+        assert_eq!(percent_encode_path("/tmp/café.txt"), "/tmp/café.txt");
+    }
+
+    #[test]
+    fn test_hyperlink_url_substitutes_host() {
+        // `{host}` is replaced by the system hostname (or empty if unresolvable).
+        let url = hyperlink_url("file://{host}{path}", "/tmp/a.txt", 0, 0);
+        assert!(url.starts_with("file://"));
+        assert!(url.ends_with("/tmp/a.txt"));
     }
 
     #[test]

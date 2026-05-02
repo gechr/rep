@@ -34,11 +34,22 @@ type Result<T> = ::std::result::Result<T, Error>;
 pub(crate) struct Hyperlinks<'a> {
     format: Option<&'a str>,
     path: &'a str,
+    /// 1-indexed line -> first-match column. Empty when not tracked; lookups
+    /// for absent lines fall back to column 1 inside `hyperlink_url`.
+    columns: Option<&'a std::collections::HashMap<usize, usize>>,
 }
 
 impl<'a> Hyperlinks<'a> {
-    pub(crate) fn new(format: Option<&'a str>, path: &'a str) -> Self {
-        Self { format, path }
+    pub(crate) fn new(
+        format: Option<&'a str>,
+        path: &'a str,
+        columns: Option<&'a std::collections::HashMap<usize, usize>>,
+    ) -> Self {
+        Self {
+            format,
+            path,
+            columns,
+        }
     }
 
     fn wrap(self, line: usize, text: impl AsRef<str>) -> String {
@@ -46,17 +57,11 @@ impl<'a> Hyperlinks<'a> {
         let Some(format) = self.format else {
             return text.to_string();
         };
-        let url = format.replace("{path}", self.path);
-        let url = if line > 0 {
-            url.replace("{line}", &line.to_string())
-        } else {
-            url.replace(":{line}", "")
-                .replace("#{line}", "")
-                .replace("&line={line}", "")
-                .replace("?line={line}", "")
-                .replace("{line}", "")
-        };
-        format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+        let column = self
+            .columns
+            .and_then(|m| m.get(&line).copied())
+            .unwrap_or(0);
+        crate::osc8(&crate::hyperlink_url(format, self.path, line, column), text)
     }
 }
 
@@ -161,7 +166,7 @@ fn prompt(
         let styles = Styles::ansi();
         match c {
             NAV_BACK => print!("{}\r", styles.paint(Color::Yellow, "←")),
-            NAV_FORWARD => print!("{}\r", styles.paint(Color::Yellow, "→")),
+            NAV_FORWARD => print!("{}\r", styles.paint(Color::Yellow, "->")),
             'y' | 'A' => println!("{}", styles.paint(Color::Green, c.to_string())),
             'n' | 'q' => println!("{}", styles.paint(Color::Red, c.to_string())),
             'e' => println!("{}", styles.paint(Color::Blue, c.to_string())),
@@ -177,9 +182,11 @@ pub(crate) fn print_file_line_diff(
     styles: Styles,
     hyperlink_format: Option<&str>,
     hyperlink_path: &str,
+    columns: &std::collections::HashMap<usize, usize>,
 ) {
     let diffs = diff::lines(old, new);
-    let hyperlinks = Hyperlinks::new(hyperlink_format, hyperlink_path);
+    let columns = (!columns.is_empty()).then_some(columns);
+    let hyperlinks = Hyperlinks::new(hyperlink_format, hyperlink_path, columns);
     let mut old_line_no = 1;
     let mut new_line_no = 1;
     let mut i = 0;
@@ -824,7 +831,7 @@ mod tests {
         let s = "café";
         assert_eq!(to_char_boundary(s, 0), 0);
         assert_eq!(to_char_boundary(s, 3), 3);
-        assert_eq!(to_char_boundary(s, 4), 5); // mid-rune → advances to end
+        assert_eq!(to_char_boundary(s, 4), 5); // mid-rune -> advances to end
         assert_eq!(to_char_boundary(s, 5), 5);
     }
 
@@ -836,7 +843,7 @@ mod tests {
         let s = "café";
         assert_eq!(backward_to_char_boundary(s, 0), 0);
         assert_eq!(backward_to_char_boundary(s, 3), 3);
-        assert_eq!(backward_to_char_boundary(s, 4), 3); // mid-rune → retreats
+        assert_eq!(backward_to_char_boundary(s, 4), 3); // mid-rune -> retreats
         assert_eq!(backward_to_char_boundary(s, 5), 5);
     }
 }
