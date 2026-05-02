@@ -744,3 +744,68 @@ fn delete_mode_with_expression_treats_trailing_arg_as_path_not_replace() {
     assert_eq!(read(&inside), "keep\ntail\n");
     assert_eq!(read(&outside), "keep\nfoo line\ntail\n");
 }
+
+#[test]
+fn rc_file_flags_are_applied_via_config_path() {
+    // Hidden files are skipped by default; an rc file enabling --hidden
+    // should make them searchable.
+    let dir = tempdir().unwrap();
+    let visible = dir.path().join("a.txt");
+    let hidden = dir.path().join(".secret.txt");
+    write(&visible, "foo here");
+    write(&hidden, "foo here");
+
+    let rc = dir.path().join("reprc");
+    write(&rc, "# enable hidden\n--hidden\n");
+
+    let status = Command::new(REP)
+        .env("REP_CONFIG_PATH", &rc)
+        .args(["foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(read(&visible), "bar here");
+    assert_eq!(read(&hidden), "bar here");
+}
+
+#[test]
+fn cli_args_override_rc_args() {
+    // rc restricts to *.md; CLI overrides with *.txt. Only the .txt file
+    // should be rewritten.
+    let dir = tempdir().unwrap();
+    let txt = dir.path().join("a.txt");
+    let md = dir.path().join("b.md");
+    write(&txt, "foo");
+    write(&md, "foo");
+
+    let rc = dir.path().join("reprc");
+    write(&rc, "--files=*.md\n");
+
+    let status = Command::new(REP)
+        .env("REP_CONFIG_PATH", &rc)
+        .args(["--files=*.txt", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(read(&txt), "bar");
+    assert_eq!(read(&md), "foo");
+}
+
+#[test]
+fn empty_or_missing_rc_path_is_ignored() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo");
+
+    // Point at a non-existent file: rep should run normally.
+    let status = Command::new(REP)
+        .env("REP_CONFIG_PATH", dir.path().join("nope"))
+        .args(["foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(read(&file), "bar");
+}

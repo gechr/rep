@@ -63,3 +63,21 @@ rep -e foo bar -e baz qux src
 # Delete every line containing "TODO"
 rep -d TODO
 ```
+
+## Configuration
+
+`rep` reads default flags from `~/.reprc` if it exists. The file is plain - one CLI flag per line, blank lines and `#` comments ignored. Flags from the rc are prepended to argv before parsing, so command-line arguments override rc values.
+
+```sh
+# ~/.reprc
+--hidden
+--ignore-case
+--preview-tool=delta
+--hyperlink-format=vscode
+```
+
+Set `REP_CONFIG_PATH` to use a different file (e.g. for project-local config), or set it to an empty string to disable rc loading entirely.
+
+```sh
+REP_CONFIG_PATH=./.reprc rep foo bar
+```

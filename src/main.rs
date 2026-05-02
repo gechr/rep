@@ -1,3 +1,4 @@
+mod config;
 mod expressions;
 mod interactive;
 mod scan;
@@ -63,7 +64,7 @@ struct Cli {
     help_long: bool,
 
     /// File glob patterns
-    #[arg(short = 'f', long = "files")]
+    #[arg(short = 'f', long = "files", overrides_with = "files")]
     files: Option<String>,
 
     /// Include hidden files
@@ -132,12 +133,24 @@ struct Cli {
     preview: bool,
 
     /// Diff tool for preview
-    #[arg(long = "preview-tool", requires = "preview")]
+    #[arg(
+        long = "preview-tool",
+        requires = "preview",
+        overrides_with = "preview_tool"
+    )]
     preview_tool: Option<String>,
 
     /// Suppress final summary output
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
+
+    /// Hyperlink format for terminal output (cursor|vscode|vscode-insiders|vscodium|<custom>)
+    #[arg(
+        long = "hyperlink-format",
+        value_name = "FORMAT",
+        overrides_with = "hyperlink_format"
+    )]
+    hyperlink_format: Option<String>,
 
     #[arg(long = "completions", value_name = "SHELL", hide = true)]
     completions: Option<Shell>,
@@ -197,6 +210,7 @@ fn print_help() {
 {yellow}{bold}Miscellaneous{reset}
 
   {red}-q{reset}, {red}--quiet{reset}               Suppress summary output
+      {red}--hyperlink-format {dim}<fmt>{reset}  Terminal hyperlink format (e.g. cursor, vscode)
   {red}-V{reset}, {red}--version{reset}             Print version
 
   {red}-h{reset}                        Print short help
@@ -265,42 +279,6 @@ fn print_help_long() {
 }
 
 impl Cli {
-    /// Fill in defaults from `REP_*` env vars. CLI flags take precedence:
-    /// for booleans, an explicit `--flag` (true) is never overridden; for
-    /// `Option<T>`, env only fills when the flag is absent (`None`).
-    fn apply_env_defaults(&mut self) {
-        self.apply_env_defaults_with(|k| std::env::var(k).ok());
-    }
-
-    /// Testable core of `apply_env_defaults`. Skips env fallback where it would
-    /// violate a clap-level conflict that the user's CLI flags already expressed
-    /// (e.g. `-d` vs `REP_SMART`).
-    fn apply_env_defaults_with(&mut self, get: impl Fn(&str) -> Option<String>) {
-        // Truthy: "1", "true" (case-insensitive). Anything else is false.
-        let bool_var = |k| {
-            get(k)
-                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
-                .unwrap_or(false)
-        };
-        let str_var = |k| get(k).filter(|v| !v.is_empty());
-
-        self.hidden |= bool_var("REP_HIDDEN");
-        self.no_ignore |= bool_var("REP_NO_IGNORE");
-        self.greedy |= bool_var("REP_GREEDY");
-        self.ignore_case |= bool_var("REP_IGNORE_CASE");
-        self.regexp |= bool_var("REP_REGEXP");
-
-        self.smart |= bool_var("REP_SMART");
-        // `preview` conflicts with `dry_run`; don't let env re-enable preview on a dry-run.
-        if !self.dry_run {
-            self.preview |= bool_var("REP_PREVIEW");
-        }
-
-        if self.preview_tool.is_none() {
-            self.preview_tool = str_var("REP_PREVIEW_TOOL");
-        }
-    }
-
     fn uses_expressions(&self) -> bool {
         !self.expressions.is_empty()
     }
@@ -666,7 +644,12 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     }
 
     ok_results.sort_by(|a, b| natord::compare(&a.path, &b.path));
-    print_results(&ok_results, !write, cli.quiet);
+    print_results(
+        &ok_results,
+        !write,
+        cli.quiet,
+        cli.hyperlink_format.as_deref(),
+    );
     Ok(())
 }
 
@@ -765,7 +748,12 @@ fn summary_message(total_files: usize, total_matches: usize, dry: bool) -> Strin
 
 /// `dry=true` → yellow "Would perform"; `dry=false` → green "Performed".
 /// Write + `quiet` → silence all output. Dry-run + `quiet` → suppress diff only.
-fn print_results(results: &[ReplacementResult], dry: bool, quiet: bool) {
+fn print_results(
+    results: &[ReplacementResult],
+    dry: bool,
+    quiet: bool,
+    hyperlink_format_opt: Option<&str>,
+) {
     if !dry && quiet {
         return;
     }
@@ -781,9 +769,7 @@ fn print_results(results: &[ReplacementResult], dry: bool, quiet: bool) {
     let total_files = results.len();
     let total_matches: usize = results.iter().map(|result| result.count).sum();
     let styles = Styles::ansi();
-    let hyperlink_format = std::env::var("REP_HYPERLINK_FORMAT")
-        .ok()
-        .map(|value| hyperlink_format(&value));
+    let hyperlink_format = hyperlink_format_opt.map(hyperlink_format);
 
     for (idx, result) in results.iter().enumerate() {
         let count = with_commas(result.count);
@@ -861,8 +847,21 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut cli = Cli::parse_from(preprocess_expression_args(std::env::args().collect()));
-    cli.apply_env_defaults();
+    let mut argv: Vec<_> = std::env::args().collect();
+    let rc_args = config::rc_args();
+    if !rc_args.is_empty() {
+        // Insert rc args after argv[0] so clap sees: [program, ...rc, ...cli].
+        // CLI args come last so they win for `Option<T>` (last occurrence) and
+        // positionals stay in their expected positions.
+        let tail = argv.split_off(1);
+        argv.extend(
+            rc_args
+                .into_iter()
+                .map(|a| a.into_string().unwrap_or_default()),
+        );
+        argv.extend(tail);
+    }
+    let cli = Cli::parse_from(preprocess_expression_args(argv));
 
     if let Some(shell) = cli.completions {
         clap_complete::generate(shell, &mut Cli::command(), "rep", &mut std::io::stdout());
@@ -1110,60 +1109,6 @@ mod tests {
         let cli = Cli::parse_from(["rep", "-d", "-l", "foo"]);
         assert!(cli.delete);
         assert!(cli.list_files);
-    }
-
-    #[test]
-    fn test_env_defaults_enable_boolean_flags() {
-        let env = std::collections::HashMap::from([
-            ("REP_HIDDEN", "1"),
-            ("REP_NO_IGNORE", "true"),
-            ("REP_SMART", "TRUE"),
-            ("REP_IGNORE_CASE", "1"),
-            ("REP_GREEDY", "1"),
-            ("REP_REGEXP", "1"),
-            ("REP_PREVIEW", "1"),
-            ("REP_PREVIEW_TOOL", "delta --side-by-side"),
-        ]);
-        let mut cli = Cli::parse_from(["rep", "foo", "bar"]);
-        cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
-        assert!(cli.hidden);
-        assert!(cli.no_ignore);
-        assert!(cli.smart);
-        assert!(cli.ignore_case);
-        assert!(cli.greedy);
-        assert!(cli.regexp);
-        assert!(cli.preview);
-        assert_eq!(cli.preview_tool.as_deref(), Some("delta --side-by-side"));
-    }
-
-    #[test]
-    fn test_env_defaults_falsy_values_are_ignored() {
-        let env = std::collections::HashMap::from([
-            ("REP_HIDDEN", "0"),
-            ("REP_SMART", "false"),
-            ("REP_PREVIEW_TOOL", ""),
-        ]);
-        let mut cli = Cli::parse_from(["rep", "foo", "bar"]);
-        cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
-        assert!(!cli.hidden);
-        assert!(!cli.smart);
-        assert!(cli.preview_tool.is_none());
-    }
-
-    #[test]
-    fn test_cli_flag_wins_over_env_for_preview_tool() {
-        let env = std::collections::HashMap::from([("REP_PREVIEW_TOOL", "delta")]);
-        let mut cli = Cli::parse_from(["rep", "-p", "--preview-tool", "diff -u", "foo", "bar"]);
-        cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
-        assert_eq!(cli.preview_tool.as_deref(), Some("diff -u"));
-    }
-
-    #[test]
-    fn test_env_preview_skipped_when_dry_run_flag_present() {
-        let env = std::collections::HashMap::from([("REP_PREVIEW", "1")]);
-        let mut cli = Cli::parse_from(["rep", "-n", "foo", "bar"]);
-        cli.apply_env_defaults_with(|k| env.get(k).map(|s| (*s).to_owned()));
-        assert!(!cli.preview);
     }
 
     #[test]
