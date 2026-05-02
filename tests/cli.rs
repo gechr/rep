@@ -549,6 +549,24 @@ fn hidden_mode_skips_gitignored_and_vcs_paths() {
 }
 
 #[test]
+fn no_ignore_with_hidden_still_skips_vcs_paths() {
+    let dir = tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    write(&dir.path().join(".git/config"), "foo");
+    write(&dir.path().join("file.txt"), "foo");
+
+    let status = Command::new(REP)
+        .args(["--no-ignore", "--hidden", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(read(&dir.path().join("file.txt")), "bar");
+    assert_eq!(read(&dir.path().join(".git/config")), "foo");
+}
+
+#[test]
 fn smart_mode_replaces_all_seven_case_variants() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");

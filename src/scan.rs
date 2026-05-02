@@ -72,9 +72,8 @@ pub(crate) fn apply_walk_flags(builder: &mut WalkBuilder, hidden: bool, no_ignor
             .git_ignore(false)
             .git_exclude(false)
             .git_global(false);
-    } else {
-        builder.filter_entry(|entry| !is_vcs_path(entry.path()));
     }
+    builder.filter_entry(|entry| !is_vcs_path(entry.path()));
 }
 
 pub(crate) fn make_searcher() -> Searcher {
