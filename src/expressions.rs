@@ -340,11 +340,11 @@ pub(crate) fn build_pre_filter_matcher(
         .collect::<Vec<_>>()
         .join("|");
     let mut builder = RegexMatcherBuilder::new();
+    builder
+        .multi_line(true)
+        .dot_matches_new_line(cli.dotall || cli.multiline);
     if !cli.smart {
-        builder
-            .case_insensitive(cli.ignore_case)
-            .multi_line(true)
-            .dot_matches_new_line(cli.dotall || cli.multiline);
+        builder.case_insensitive(cli.ignore_case);
     }
     builder
         .build(&union)
@@ -614,6 +614,26 @@ mod tests {
         let (output, count) = apply_str("Repo\nReports\nfoo Repo bar\n", &expressions);
         assert_eq!(output, "Repository\nReports\nfoo Repo bar\n");
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_pre_filter_matcher_anchors_at_line_boundaries_for_smart_multi_expr() {
+        use grep::matcher::Matcher as _;
+        let cli = parse_cli(&[
+            "rep",
+            "-S",
+            "-x",
+            "-e",
+            "Repo",
+            "Repository",
+            "-e",
+            "Api",
+            "Apis",
+        ]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let matcher = build_pre_filter_matcher(&cli, &expressions).unwrap();
+        assert!(matcher.is_match(b"head\nRepo\ntail\n").unwrap());
+        assert!(matcher.is_match(b"foo\napi\nbar\n").unwrap());
     }
 
     #[test]
