@@ -117,8 +117,13 @@ pub(crate) fn file_matches(searcher: &mut Searcher, matcher: &RegexMatcher, path
 }
 
 pub(crate) fn is_candidate_path(path: &Path) -> bool {
-    let bytes = path.as_os_str().as_encoded_bytes();
-    !bytes.ends_with(b"~") && !bytes.ends_with(b"tags") && !bytes.ends_with(b"TAGS")
+    if path.as_os_str().as_encoded_bytes().ends_with(b"~") {
+        return false;
+    }
+    !matches!(
+        path.file_name().map(OsStr::as_encoded_bytes),
+        Some(b"tags" | b"TAGS")
+    )
 }
 
 fn is_vcs_path(path: &Path) -> bool {
@@ -238,6 +243,16 @@ mod tests {
         assert!(!is_candidate_path(Path::new("tags")));
         assert!(!is_candidate_path(Path::new("TAGS")));
         assert!(!is_candidate_path(Path::new("./tags")));
+        assert!(!is_candidate_path(Path::new("src/tags")));
+    }
+
+    #[test]
+    fn test_is_candidate_path_accepts_filenames_that_merely_end_in_tags() {
+        assert!(is_candidate_path(Path::new("etags")));
+        assert!(is_candidate_path(Path::new("mytags")));
+        assert!(is_candidate_path(Path::new("name-tags")));
+        assert!(is_candidate_path(Path::new("src/nametags")));
+        assert!(is_candidate_path(Path::new("META-TAGS")));
     }
 
     #[test]
