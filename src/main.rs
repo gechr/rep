@@ -57,109 +57,242 @@ struct Cli {
     #[arg(value_name = "arg")]
     args: Vec<String>,
 
-    #[arg(short = 'h', help = "Print help")]
-    help: bool,
-
-    #[arg(long = "help", hide = true)]
-    help_long: bool,
-
-    /// File glob patterns
-    #[arg(short = 'f', long = "files", overrides_with = "files")]
+    #[arg(
+        short = 'f',
+        long = "files",
+        value_name = "glob",
+        help = "Smart glob patterns to match files against",
+        help_heading = "Filter",
+        overrides_with = "files"
+    )]
     files: Option<String>,
 
-    /// Include hidden files
-    #[arg(short = 'H', long = "hidden")]
+    #[arg(
+        short = 'H',
+        long = "hidden",
+        help = "Search hidden files and directories",
+        help_heading = "Filter"
+    )]
     hidden: bool,
 
-    /// Ignore .gitignore / .ignore / .git/info/exclude
-    #[arg(long = "no-ignore")]
+    #[arg(
+        long = "no-ignore",
+        help = "Don't respect .gitignore / .ignore / .git/info/exclude",
+        help_heading = "Filter"
+    )]
     no_ignore: bool,
 
-    /// Greedy matching
-    #[arg(short = 'G', long = "greedy")]
-    greedy: bool,
-
-    /// Case-insensitive
-    #[arg(short = 'i', long = "ignore-case")]
-    ignore_case: bool,
-
-    /// Multiline matching
-    #[arg(short = 'm', long = "multiline")]
-    multiline: bool,
-
-    /// Dot matches newlines
-    #[arg(long = "dotall")]
-    dotall: bool,
-
-    /// Use regex
-    #[arg(short = 'r', long = "regex", alias = "regexp")]
-    regexp: bool,
-
-    /// Preserve-case replacement
-    #[arg(short = 'S', long = "smart")]
-    smart: bool,
-
-    /// Find replace expression
-    #[arg(short = 'e', long = "expression", value_name = "<find> <replace>")]
+    #[arg(
+        short = 'e',
+        long = "expression",
+        value_name = "f> <r",
+        help = "Find/replace expression",
+        help_heading = "Replace"
+    )]
     expressions: Vec<String>,
 
-    /// Whole words only
-    #[arg(short = 'w', long = "word-regexp")]
+    #[arg(
+        short = 'S',
+        long = "smart",
+        help = "Replace all case variants of the pattern",
+        help_heading = "Replace"
+    )]
+    smart: bool,
+
+    #[arg(
+        short = 'G',
+        long = "greedy",
+        help = "Use greedy matching for regular expressions",
+        help_heading = "Regex"
+    )]
+    greedy: bool,
+
+    #[arg(
+        short = 'i',
+        long = "ignore-case",
+        help = "Case-insensitive matching",
+        help_heading = "Regex"
+    )]
+    ignore_case: bool,
+
+    #[arg(
+        short = 'm',
+        long = "multiline",
+        help = "Search across multiple lines",
+        help_heading = "Regex"
+    )]
+    multiline: bool,
+
+    #[arg(
+        long = "dotall",
+        help = "Allow dot to match newlines",
+        help_heading = "Regex"
+    )]
+    dotall: bool,
+
+    #[arg(
+        short = 'r',
+        long = "regex",
+        alias = "regexp",
+        help = "Treat patterns as regular expressions",
+        help_heading = "Regex"
+    )]
+    regexp: bool,
+
+    #[arg(
+        short = 'w',
+        long = "word-regexp",
+        help = "Match only whole words",
+        help_heading = "Regex"
+    )]
     word_regexp: bool,
 
-    /// Match only whole lines
-    #[arg(short = 'x', long = "line-regexp")]
+    #[arg(
+        short = 'x',
+        long = "line-regexp",
+        help = "Match only whole lines",
+        help_heading = "Regex"
+    )]
     line_regexp: bool,
 
-    /// Print matching file paths
-    #[arg(short = 'l', long = "list-files")]
-    list_files: bool,
-
-    /// Delete lines matching <find>
-    #[arg(short = 'd', long = "delete")]
+    #[arg(
+        short = 'd',
+        long = "delete",
+        help = "Delete lines matching <find>",
+        help_heading = "Behavior"
+    )]
     delete: bool,
 
-    /// Dry run
+    #[arg(
+        short = 'l',
+        long = "list-files",
+        help = "Print only file paths that contain matches",
+        help_heading = "Behavior"
+    )]
+    list_files: bool,
+
     #[arg(
         short = 'n',
         long = "dry-run",
         alias = "dry",
-        conflicts_with = "preview"
+        conflicts_with = "preview",
+        help = "Show what would be changed without writing",
+        help_heading = "Behavior"
     )]
     dry_run: bool,
 
-    /// Interactive preview
-    #[arg(short = 'p', long = "preview")]
+    #[arg(
+        short = 'p',
+        long = "preview",
+        help = "Preview the changes before applying them",
+        help_heading = "Behavior"
+    )]
     preview: bool,
 
-    /// Diff tool for preview
     #[arg(
         long = "preview-tool",
+        value_name = "cmd",
         requires = "preview",
-        overrides_with = "preview_tool"
+        overrides_with = "preview_tool",
+        help = "External diff tool for preview mode",
+        help_heading = "Behavior"
     )]
     preview_tool: Option<String>,
 
-    /// Suppress final summary output
-    #[arg(short = 'q', long = "quiet")]
-    quiet: bool,
-
-    /// Hyperlink format for terminal output (cursor|vscode|vscode-insiders|vscodium|<custom>)
     #[arg(
         long = "hyperlink-format",
-        value_name = "FORMAT",
-        overrides_with = "hyperlink_format"
+        value_name = "fmt",
+        overrides_with = "hyperlink_format",
+        help = "Terminal hyperlink format",
+        help_heading = "Miscellaneous",
+        display_order = 100
     )]
     hyperlink_format: Option<String>,
 
-    #[arg(long = "completions", value_name = "SHELL", hide = true)]
+    #[arg(
+        short = 'q',
+        long = "quiet",
+        help = "Suppress summary output",
+        help_heading = "Miscellaneous",
+        display_order = 110
+    )]
+    quiet: bool,
+
+    #[arg(
+        short = 'h',
+        help = "Print short help",
+        help_heading = "Miscellaneous",
+        display_order = 130
+    )]
+    help: bool,
+
+    #[arg(
+        long = "help",
+        help = "Print long help with examples",
+        help_heading = "Miscellaneous",
+        display_order = 140
+    )]
+    help_long: bool,
+
+    #[arg(long = "completions", value_name = "shell", hide = true)]
     completions: Option<Shell>,
+}
+
+const HELP_SECTIONS: &[&str] = &["Filter", "Replace", "Regex", "Behavior", "Miscellaneous"];
+const SECTION_SPACERS: &[&str] = &["list_files", "hyperlink_format", "version"];
+
+/// Clap auto-assigns a value_name to every arg, including bool flags. Gate on
+/// the action so `--quiet` doesn't render as `--quiet <QUIET>`.
+fn arg_value_name(arg: &clap::Arg) -> Option<&str> {
+    matches!(
+        arg.get_action(),
+        clap::ArgAction::Set | clap::ArgAction::Append
+    )
+    .then(|| {
+        arg.get_value_names()
+            .and_then(|v| v.first())
+            .map(|s| s.as_str())
+    })
+    .flatten()
+}
+
+fn arg_body_width(arg: &clap::Arg) -> usize {
+    let long_part = arg.get_long().map_or(0, |l| 4 + 2 + l.len());
+    let short_only = arg.get_long().is_none() && arg.get_short().is_some();
+    let flags = if short_only { 2 } else { long_part };
+    let val = arg_value_name(arg).map_or(0, |v| 3 + v.len());
+    flags + val
+}
+
+fn render_arg_body(arg: &clap::Arg, styles: &Styles) -> String {
+    use std::fmt::Write as _;
+
+    let red = styles.fg(Color::Red);
+    let dim_attr = styles.dim();
+    let reset = styles.reset();
+
+    let mut body = match (arg.get_short(), arg.get_long()) {
+        (Some(c), Some(l)) => format!("{red}-{c}{reset}, {red}--{l}{reset}"),
+        (None, Some(l)) => format!("    {red}--{l}{reset}"),
+        (Some(c), None) => format!("{red}-{c}{reset}"),
+        (None, None) => String::new(),
+    };
+    if let Some(v) = arg_value_name(arg) {
+        let _ = write!(body, " {red}{dim_attr}<{v}>{reset}");
+    }
+    body
+}
+
+fn colorize_help_metavars(help: &str, styles: &Styles) -> String {
+    let blue = styles.fg(Color::Blue);
+    let reset = styles.reset();
+    help.replace("<find>", &format!("{blue}<find>{reset}"))
+        .replace("<replace>", &format!("{blue}<replace>{reset}"))
 }
 
 fn print_help() {
     let styles = ui::Styles::when(std::io::stdout().is_terminal());
     let bold = styles.bold();
-    let dim = styles.fg(Color::Dim);
     let red = styles.fg(Color::Red);
     let green = styles.fg(Color::Green);
     let yellow = styles.fg(Color::Yellow);
@@ -168,7 +301,7 @@ fn print_help() {
     let grey = styles.fg(Color::Grey);
     let reset = styles.reset();
 
-    let text = format!(
+    print!(
         "\
 {yellow}{bold}Usage{reset}
 
@@ -177,47 +310,60 @@ fn print_help() {
     {blue}<find>{reset}     String to find
     {blue}<replace>{reset}  String to replace with
     {magenta}<path>…{reset}    Paths to search in {grey}(optional){reset}
-
-{yellow}{bold}Filter{reset}
-
-  {red}-f{reset}, {red}--files {dim}<glob>{reset}        Smart glob patterns to match files against
-  {red}-H{reset}, {red}--hidden{reset}              Search hidden files and directories
-
-{yellow}{bold}Replace{reset}
-
-  {red}-e{reset}, {red}--expression {dim}<f> <r>{reset}  Find/replace expression
-  {red}-S{reset}, {red}--smart{reset}               Replace all case variants of the pattern
-
-{yellow}{bold}Regex{reset}
-
-  {red}-G{reset}, {red}--greedy{reset}              Use greedy matching for regular expressions
-  {red}-i{reset}, {red}--ignore-case{reset}         Case-insensitive matching
-  {red}-m{reset}, {red}--multiline{reset}           Search across multiple lines
-      {red}--dotall{reset}              Allow dot to match newlines
-  {red}-r{reset}, {red}--regex{reset}               Treat patterns as regular expressions
-  {red}-w{reset}, {red}--word-regexp{reset}         Match only whole words
-  {red}-x{reset}, {red}--line-regexp{reset}         Match only whole lines
-
-{yellow}{bold}Behavior{reset}
-
-  {red}-d{reset}, {red}--delete{reset}              Delete lines matching {blue}<find>{reset}
-  {red}-l{reset}, {red}--list-files{reset}          Print only file paths that contain matches
-
-  {red}-n{reset}, {red}--dry-run{reset}             Show what would be changed without writing
-  {red}-p{reset}, {red}--preview{reset}             Preview the changes before applying them
-      {red}--preview-tool {dim}<cmd>{reset}  External diff tool for preview mode
-
-{yellow}{bold}Miscellaneous{reset}
-
-  {red}-q{reset}, {red}--quiet{reset}               Suppress summary output
-      {red}--hyperlink-format {dim}<fmt>{reset}  Terminal hyperlink format (e.g. cursor, vscode)
-  {red}-V{reset}, {red}--version{reset}             Print version
-
-  {red}-h{reset}                        Print short help
-      {red}--help{reset}                Print long help with examples
 "
     );
-    print!("{text}");
+
+    let cmd = Cli::command();
+
+    // Synthesized for the renderer: the real `--version` is added by clap's
+    // build pass, which `Cli::command()` doesn't trigger.
+    let version_arg = clap::Arg::new("version")
+        .short('V')
+        .long("version")
+        .help("Print version")
+        .help_heading("Miscellaneous")
+        .display_order(120);
+
+    let mut visible: Vec<(usize, &clap::Arg)> = cmd
+        .get_arguments()
+        .enumerate()
+        .filter(|(_, a)| !a.is_hide_set())
+        .collect();
+    visible.push((visible.len(), &version_arg));
+
+    let cell = visible
+        .iter()
+        .map(|(_, a)| arg_body_width(a))
+        .max()
+        .unwrap_or(0);
+
+    for section in HELP_SECTIONS {
+        let mut rows: Vec<(usize, &clap::Arg)> = visible
+            .iter()
+            .filter(|(_, a)| a.get_help_heading() == Some(*section))
+            .copied()
+            .collect();
+        rows.sort_by_key(|(idx, a)| (a.get_display_order(), *idx));
+        if rows.is_empty() {
+            continue;
+        }
+
+        println!();
+        println!("{yellow}{bold}{section}{reset}");
+        println!();
+
+        for (_, arg) in &rows {
+            let body = render_arg_body(arg, &styles);
+            let pad = (cell + 2).saturating_sub(arg_body_width(arg)).max(2);
+            let help_text = arg.get_help().map(ToString::to_string).unwrap_or_default();
+            let help = colorize_help_metavars(&help_text, &styles);
+            println!("  {body}{}{help}", " ".repeat(pad));
+
+            if SECTION_SPACERS.contains(&arg.get_id().as_str()) {
+                println!();
+            }
+        }
+    }
 }
 
 fn print_help_long() {
