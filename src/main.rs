@@ -881,7 +881,11 @@ fn run() -> Result<()> {
     }
 
     let paths = cli.paths();
-    let has_stdin_arg = !cli.list_files && paths.len() == 1 && paths[0].to_str() == Some("-");
+    let has_stdin_arg = !cli.list_files && paths.iter().any(|p| p.to_str() == Some("-"));
+
+    if has_stdin_arg && paths.len() > 1 {
+        bail!("Cannot mix `-` (stdin) with other paths");
+    }
 
     // Validate paths exist
     for dir in &cli.dirs() {
@@ -901,10 +905,6 @@ fn run() -> Result<()> {
 
     if cli.smart && paths.len() > 1 {
         bail!("Smart mode only supports a single path");
-    }
-
-    if is_stdin_mode && has_stdin_arg && paths.len() > 1 {
-        bail!("Expected exactly 2 positional arguments when reading from stdin");
     }
 
     if cli.preview && !std::io::stdin().is_terminal() {
