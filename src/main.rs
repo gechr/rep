@@ -1,4 +1,5 @@
 mod config;
+mod diff;
 mod expressions;
 mod interactive;
 mod scan;
@@ -606,6 +607,10 @@ fn hyperlink_format(value: &str) -> Option<String> {
     Some(resolved.to_string())
 }
 
+fn hyperlink_format_uses_column(format: &str) -> bool {
+    format.contains("{column}")
+}
+
 /// System hostname, cached. `None` if it can't be resolved or isn't UTF-8.
 fn hostname() -> Option<&'static str> {
     static HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -763,10 +768,15 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     let expressions = Arc::new(compile_expressions(cli)?);
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
 
-    // Position tracking is paid for only when the diff renderer will use it.
-    // Non-interactive paths (piped output, file-write+quiet) skip the per-
-    // match Vec push entirely.
-    let track_positions = std::io::stdout().is_terminal() && !cli.quiet;
+    let stdout_terminal = std::io::stdout().is_terminal();
+    let hyperlink_format = cli.hyperlink_format.as_deref().and_then(hyperlink_format);
+    // Position tracking is paid for only when rendered hyperlinks can consume
+    // it. Line-only formats still get hyperlinks without the per-match Vec push.
+    let track_positions = stdout_terminal
+        && !cli.quiet
+        && hyperlink_format
+            .as_deref()
+            .is_some_and(hyperlink_format_uses_column);
 
     let dirs = cli.dirs();
     let mut builder = scan::walk_builder_with_file_set(&dirs, cli.file_set())?;
@@ -855,9 +865,10 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     ok_results.sort_by(|a, b| natord::compare(&a.path, &b.path));
     print_results(
         &ok_results,
-        !write,
         cli.quiet,
-        cli.hyperlink_format.as_deref(),
+        cli.delete,
+        !write,
+        hyperlink_format.as_deref(),
     );
     Ok(())
 }
@@ -935,6 +946,7 @@ fn with_commas(n: usize) -> String {
 fn summary_message_with_formatter<F>(
     total_files: usize,
     total_matches: usize,
+    delete: bool,
     dry: bool,
     format_count: F,
 ) -> String
@@ -942,8 +954,9 @@ where
     F: Fn(usize) -> String,
 {
     let verb = if dry { "Would perform" } else { "Performed" };
+    let noun = if delete { "deletion" } else { "replacement" };
     format!(
-        "{} {} replacement{} in {} file{}",
+        "{} {} {noun}{} in {} file{}",
         verb,
         format_count(total_matches),
         if total_matches == 1 { "" } else { "s" },
@@ -952,17 +965,18 @@ where
     )
 }
 
-fn summary_message(total_files: usize, total_matches: usize, dry: bool) -> String {
-    summary_message_with_formatter(total_files, total_matches, dry, with_commas)
+fn summary_message(total_files: usize, total_matches: usize, delete: bool, dry: bool) -> String {
+    summary_message_with_formatter(total_files, total_matches, delete, dry, with_commas)
 }
 
 /// `dry=true` -> yellow "Would perform"; `dry=false` -> green "Performed".
 /// Write + `quiet` -> silence all output. Dry-run + `quiet` -> suppress diff only.
 fn print_results(
     results: &[ReplacementResult],
-    dry: bool,
     quiet: bool,
-    hyperlink_format_opt: Option<&str>,
+    delete: bool,
+    dry: bool,
+    hyperlink_format: Option<&str>,
 ) {
     if !dry && quiet {
         return;
@@ -979,16 +993,9 @@ fn print_results(
     let total_files = results.len();
     let total_matches: usize = results.iter().map(|result| result.count).sum();
     let styles = Styles::when(true);
-    let hyperlink_format = hyperlink_format_opt.and_then(hyperlink_format);
-
     for (idx, result) in results.iter().enumerate() {
         let count = with_commas(result.count);
-        let path = hyperlink(
-            hyperlink_format.as_deref(),
-            &result.link_path,
-            0,
-            &result.path,
-        );
+        let path = hyperlink(hyperlink_format, &result.link_path, 0, &result.path);
         println!(
             "{}{} {}({count}){}",
             if quiet { "" } else { styles.fg(Color::Magenta) },
@@ -998,11 +1005,11 @@ fn print_results(
         );
 
         if !quiet && let Some((old, new)) = &result.diff {
-            interactive::print_file_line_diff(
+            diff::print_file_line_diff(
                 old,
                 new,
                 styles,
-                hyperlink_format.as_deref(),
+                hyperlink_format,
                 &result.link_path,
                 &result.columns,
             );
@@ -1015,7 +1022,7 @@ fn print_results(
 
     if total_files > 0 {
         let color = if dry { Color::Yellow } else { Color::Green };
-        let msg = summary_message(total_files, total_matches, dry);
+        let msg = summary_message(total_files, total_matches, delete, dry);
         println!(
             "\n{}{}{}{}",
             styles.bold(),
@@ -1462,7 +1469,7 @@ mod tests {
     #[test]
     fn test_summary_message_singular() {
         assert_eq!(
-            summary_message(1, 1, false),
+            summary_message(1, 1, false, false),
             "Performed 1 replacement in 1 file"
         );
     }
@@ -1470,7 +1477,7 @@ mod tests {
     #[test]
     fn test_summary_message_plural() {
         assert_eq!(
-            summary_message(2, 5, false),
+            summary_message(2, 5, false, false),
             "Performed 5 replacements in 2 files"
         );
     }
@@ -1478,8 +1485,24 @@ mod tests {
     #[test]
     fn test_summary_message_dry_run_uses_would_perform() {
         assert_eq!(
-            summary_message(1, 1, true),
+            summary_message(1, 1, false, true),
             "Would perform 1 replacement in 1 file"
+        );
+    }
+
+    #[test]
+    fn test_summary_message_delete_uses_deletion() {
+        assert_eq!(
+            summary_message(1, 1, true, false),
+            "Performed 1 deletion in 1 file"
+        );
+        assert_eq!(
+            summary_message(2, 5, true, false),
+            "Performed 5 deletions in 2 files"
+        );
+        assert_eq!(
+            summary_message(1, 3, true, true),
+            "Would perform 3 deletions in 1 file"
         );
     }
 
@@ -1514,13 +1537,13 @@ mod tests {
     #[test]
     fn test_summary_message_large_counts_use_thousands_separators() {
         assert_eq!(
-            summary_message_with_formatter(718, 648_098, false, |n| {
+            summary_message_with_formatter(718, 648_098, false, false, |n| {
                 format_count(n, &num_format::Locale::en)
             }),
             "Performed 648,098 replacements in 718 files"
         );
         assert_eq!(
-            summary_message_with_formatter(1_000, 2_500_000, true, |n| {
+            summary_message_with_formatter(1_000, 2_500_000, false, true, |n| {
                 format_count(n, &num_format::Locale::en)
             }),
             "Would perform 2,500,000 replacements in 1,000 files"
