@@ -43,6 +43,7 @@ use crate::expressions::{
     byte_offsets_to_line_first_column, compile_expressions,
 };
 use crate::ui::Color;
+use crate::ui::ColorChoice;
 use crate::ui::Styles;
 
 struct ReplacementResult {
@@ -213,6 +214,19 @@ struct Cli {
         display_order = 100
     )]
     hyperlink_format: Option<String>,
+
+    #[arg(
+        long = "color",
+        alias = "colour",
+        value_name = "when",
+        value_enum,
+        default_value_t = ColorChoice::Auto,
+        overrides_with = "color",
+        help = "When to use color",
+        help_heading = "Miscellaneous",
+        display_order = 95
+    )]
+    color: ColorChoice,
 
     #[arg(
         short = 'q',
@@ -577,7 +591,7 @@ fn hyperlink_path(path: &std::path::Path) -> String {
 }
 
 pub(crate) fn osc8(url: &str, text: &str) -> String {
-    if ui::no_color() {
+    if ui::Styles::when(true).is_plain() {
         return text.to_string();
     }
     format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
@@ -983,7 +997,8 @@ fn print_results(
     }
 
     let stdout_is_terminal = std::io::stdout().is_terminal();
-    if !stdout_is_terminal {
+    let force_color = ui::color_choice() == ui::ColorChoice::Always;
+    if !stdout_is_terminal && !force_color {
         if !quiet {
             print_patch_results(results);
         }
@@ -1080,6 +1095,7 @@ fn run() -> Result<()> {
         argv.extend(tail);
     }
     let cli = Cli::parse_from(preprocess_expression_args(argv));
+    ui::set_color_choice(cli.color);
 
     if let Some(shell) = cli.completions {
         clap_complete::generate(shell, &mut Cli::command(), "rep", &mut std::io::stdout());
@@ -1428,6 +1444,29 @@ mod tests {
         let cli = Cli::parse_from(["rep", "-d", "-l", "foo"]);
         assert!(cli.delete);
         assert!(cli.list_files);
+    }
+
+    #[test]
+    fn test_color_flag_parses_all_variants() {
+        assert_eq!(
+            Cli::parse_from(["rep", "--color=auto", "a", "b"]).color,
+            ColorChoice::Auto
+        );
+        assert_eq!(
+            Cli::parse_from(["rep", "--color=always", "a", "b"]).color,
+            ColorChoice::Always
+        );
+        assert_eq!(
+            Cli::parse_from(["rep", "--color=never", "a", "b"]).color,
+            ColorChoice::Never
+        );
+        // Default when omitted.
+        assert_eq!(Cli::parse_from(["rep", "a", "b"]).color, ColorChoice::Auto);
+    }
+
+    #[test]
+    fn test_color_flag_rejects_invalid_value() {
+        assert!(Cli::try_parse_from(["rep", "--color=bogus", "a", "b"]).is_err());
     }
 
     #[test]

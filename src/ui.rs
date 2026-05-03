@@ -25,6 +25,32 @@ impl Color {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub(crate) enum ColorChoice {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+static COLOR_CHOICE: std::sync::OnceLock<ColorChoice> = std::sync::OnceLock::new();
+
+/// Lock in the user's `--color` selection. First write wins; subsequent calls
+/// are silently ignored, which keeps tests and the rc-args path safe.
+pub(crate) fn set_color_choice(choice: ColorChoice) {
+    let _ = COLOR_CHOICE.set(choice);
+}
+
+pub(crate) fn color_choice() -> ColorChoice {
+    COLOR_CHOICE.get().copied().unwrap_or_default()
+}
+
+/// <https://no-color.org>
+pub(crate) fn no_color() -> bool {
+    static NO_COLOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()))
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Styles {
     enabled: bool,
@@ -38,10 +64,16 @@ impl Styles {
     }
 
     pub(crate) fn when(enabled: bool) -> Self {
-        if enabled && !no_color() {
-            Self::ansi()
-        } else {
-            Self::PLAIN
+        match color_choice() {
+            ColorChoice::Always => Self::ansi(),
+            ColorChoice::Never => Self::PLAIN,
+            ColorChoice::Auto => {
+                if enabled && !no_color() {
+                    Self::ansi()
+                } else {
+                    Self::PLAIN
+                }
+            }
         }
     }
 
@@ -90,10 +122,4 @@ impl Styles {
     pub(crate) fn print_reset(self) {
         print!("{}", self.reset());
     }
-}
-
-/// <https://no-color.org>
-pub(crate) fn no_color() -> bool {
-    static NO_COLOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()))
 }

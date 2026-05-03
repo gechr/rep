@@ -24,6 +24,52 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
 
+/// Strip ANSI CSI (`ESC [ … m`) and OSC-8 hyperlink (`ESC ] 8 ; ; … ESC \`)
+/// sequences. Used by tests that drive the rich output path via
+/// `--color=always` and want to assert on layout text rather than escapes.
+fn strip_ansi(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'[' => {
+                    i += 2;
+                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1;
+                    }
+                }
+                b']' => {
+                    i += 2;
+                    while i < bytes.len() {
+                        if bytes[i] == 0x07 {
+                            i += 1;
+                            break;
+                        }
+                        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
 #[test]
 fn basic_replace_rewrites_file_contents() {
     let dir = tempdir().unwrap();
@@ -808,4 +854,218 @@ fn empty_or_missing_rc_path_is_ignored() {
         .unwrap();
     assert!(status.success());
     assert_eq!(read(&file), "bar");
+}
+
+// ---- `--color` flag interactions --------------------------------------------
+//
+// The output format and color enablement are both gated by a small matrix:
+//   - `--color=always` forces the rich (TTY-style) layout *and* ANSI through
+//     pipes, overriding the default patch fallback.
+//   - `--color=never` keeps the patch fallback under a pipe and suppresses
+//     ANSI on a TTY.
+//   - `--color=auto` (default) honors `is_terminal` and `NO_COLOR`.
+//   - Explicit `--color=always` outranks `NO_COLOR`.
+// `Command::output()` always pipes, so these tests exercise the piped half of
+// the matrix; the TTY half is verified manually.
+
+#[test]
+fn color_always_forces_rich_layout_through_pipe() {
+    let dir = tempdir().unwrap();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    write(&a, "foo bar foo\n");
+    write(&b, "foo\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            "foo",
+            "bar",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // Rich layout (vs patch fallback) is identifiable by ANSI escapes and the
+    // summary line; the patch format has neither.
+    assert!(stdout.contains('\x1b'), "expected ANSI escapes: {stdout:?}");
+    let plain = strip_ansi(&stdout);
+    assert!(plain.contains("a.txt (2)"), "missing a.txt header: {plain}");
+    assert!(plain.contains("b.txt (1)"), "missing b.txt header: {plain}");
+    assert!(
+        plain.contains("Would perform 3 replacements in 2 files"),
+        "missing summary: {plain}"
+    );
+}
+
+#[test]
+fn color_always_wraps_diff_text_in_red_and_green() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo line\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            "foo",
+            "bar",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // 31 = red (removed), 32 = green (added). Don't pin the surrounding
+    // attributes (bold/underline) since those compose orthogonally.
+    assert!(stdout.contains("\x1b[31m"), "missing red escape: {stdout:?}");
+    assert!(
+        stdout.contains("\x1b[32m"),
+        "missing green escape: {stdout:?}"
+    );
+}
+
+#[test]
+fn color_never_keeps_patch_format_through_pipe() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "--color=never", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.contains('\x1b'),
+        "no escapes expected: {stdout:?}"
+    );
+    assert!(
+        stdout.starts_with("--- a/"),
+        "patch format expected: {stdout:?}"
+    );
+    // The summary is exclusive to the rich format.
+    assert!(
+        !stdout.contains("Would perform"),
+        "summary leaked into patch output: {stdout:?}"
+    );
+}
+
+#[test]
+fn color_auto_under_pipe_keeps_patch_format() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains('\x1b'), "no escapes expected: {stdout:?}");
+    assert!(stdout.starts_with("--- a/"), "patch expected: {stdout:?}");
+}
+
+#[test]
+fn color_always_outranks_no_color_env() {
+    // <https://no-color.org> says NO_COLOR suppresses color, but an explicit
+    // `--color=always` is the more specific user intent and must win.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\n");
+
+    let output = Command::new(REP)
+        .env("NO_COLOR", "1")
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            "foo",
+            "bar",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains('\x1b'),
+        "expected ANSI despite NO_COLOR=1: {stdout:?}"
+    );
+}
+
+#[test]
+fn no_color_env_strips_ansi_under_auto() {
+    // Under `--color=auto` (the default), NO_COLOR is honored; output remains
+    // the patch format because stdout is piped.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\n");
+
+    let output = Command::new(REP)
+        .env("NO_COLOR", "1")
+        .args(["-n", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains('\x1b'), "NO_COLOR honored: {stdout:?}");
+}
+
+#[test]
+fn colour_alias_behaves_like_color() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--colour=always",
+            "--hyperlink-format=none",
+            "foo",
+            "bar",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains('\x1b'), "alias forced color: {stdout:?}");
+    assert!(strip_ansi(&stdout).contains("Would perform"));
+}
+
+#[test]
+fn invalid_color_value_is_rejected() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("a.txt"), "foo\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "--color=bogus", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "should reject invalid value");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("invalid value 'bogus'"),
+        "stderr: {stderr}"
+    );
 }
