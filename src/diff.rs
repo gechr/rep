@@ -4,7 +4,6 @@
 // prompt (`interactive.rs`). Output is buffered into a single `String` per
 // file and emitted in one `print!` to amortize stdout-lock overhead.
 
-use std::cmp::max;
 use std::fmt::Write as _;
 use std::io::Write as _;
 
@@ -376,7 +375,7 @@ fn write_intra_word(
 }
 
 pub(crate) fn should_intra_word_diff(old_tok: &str, new_tok: &str) -> bool {
-    // Cap LCS work for pathological tokens (e.g. a multi-KB minified identifier).
+    // Cap diff work for pathological tokens (e.g. a multi-KB minified identifier).
     const MAX_INTRA_WORD_LEN: usize = 1024;
     if token_kind(old_tok) != TokenKind::Word || token_kind(new_tok) != TokenKind::Word {
         return false;
@@ -384,9 +383,39 @@ pub(crate) fn should_intra_word_diff(old_tok: &str, new_tok: &str) -> bool {
     if old_tok.len() > MAX_INTRA_WORD_LEN || new_tok.len() > MAX_INTRA_WORD_LEN {
         return false;
     }
-    let min_len = old_tok.chars().count().min(new_tok.chars().count());
-    let threshold = max(2, min_len / 2);
-    lcs_len(old_tok, new_tok) >= threshold
+    // Use char-diff only when each side forms at most one contiguous changed
+    // run, so colored characters are never interrupted by uncolored shared
+    // chars. Two-or-more runs on either side would speckle the output.
+    let mut left_runs = 0usize;
+    let mut right_runs = 0usize;
+    let mut in_left = false;
+    let mut in_right = false;
+    for item in diff::chars(old_tok, new_tok) {
+        match item {
+            DiffResult::Left(_) => {
+                if !in_left {
+                    left_runs += 1;
+                    in_left = true;
+                }
+                in_right = false;
+            }
+            DiffResult::Right(_) => {
+                if !in_right {
+                    right_runs += 1;
+                    in_right = true;
+                }
+                in_left = false;
+            }
+            DiffResult::Both(..) => {
+                in_left = false;
+                in_right = false;
+            }
+        }
+        if left_runs > 1 || right_runs > 1 {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -476,28 +505,6 @@ fn is_subword_boundary(prev: char, cur: char, next: Option<char>) -> bool {
     false
 }
 
-fn lcs_len(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    if a.is_empty() || b.is_empty() {
-        return 0;
-    }
-    let mut prev = vec![0usize; b.len() + 1];
-    let mut cur = vec![0usize; b.len() + 1];
-    for ac in &a {
-        for (j, bc) in b.iter().enumerate() {
-            cur[j + 1] = if ac == bc {
-                prev[j] + 1
-            } else {
-                prev[j + 1].max(cur[j])
-            };
-        }
-        std::mem::swap(&mut prev, &mut cur);
-        cur.fill(0);
-    }
-    prev[b.len()]
-}
-
 #[cfg(test)]
 mod tests {
     use super::{should_intra_word_diff, tokenize};
@@ -543,17 +550,20 @@ mod tests {
     }
 
     #[test]
-    fn intra_word_diff_gate_rejects_too_short_tokens() {
-        // min_len=2 -> threshold=2, but LCS("Id","Ip")=1 -> no intra-word diff.
-        assert!(!should_intra_word_diff("Id", "Ip"));
-        // Single-char tokens with no shared chars: still no intra-word diff.
-        assert!(!should_intra_word_diff("a", "b"));
+    fn intra_word_diff_gate_accepts_clean_runs() {
+        // Single contiguous changed run on each side: char-diff is clean.
+        assert!(should_intra_word_diff("Id", "Ip")); // d -> p
+        assert!(should_intra_word_diff("a", "b")); // a -> b
+        assert!(should_intra_word_diff("for", "bar")); // fo -> ba, shared trailing r
+        assert!(should_intra_word_diff("Identifier", "Id")); // entifier dropped
+        assert!(should_intra_word_diff("Name", "Names")); // s appended
+        assert!(should_intra_word_diff("format", "barmat")); // fo -> ba, shared rmat
     }
 
     #[test]
-    fn intra_word_diff_gate_accepts_similar_words() {
-        assert!(should_intra_word_diff("Identifier", "Id"));
-        assert!(should_intra_word_diff("Name", "Names"));
+    fn intra_word_diff_gate_rejects_speckled_pairs() {
+        // `cursor` -> `code`: shared `c` and `o` form a speckled old side.
+        assert!(!should_intra_word_diff("cursor", "code"));
     }
 
     #[test]
