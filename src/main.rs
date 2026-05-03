@@ -92,7 +92,7 @@ struct Cli {
         short = 'e',
         long = "expression",
         value_name = "f> <r",
-        help = "Find/replace expression",
+        help = "Repeatable <find> <replace> expression",
         help_heading = "Replace"
     )]
     expressions: Vec<String>,
