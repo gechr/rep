@@ -576,6 +576,9 @@ fn hyperlink_path(path: &std::path::Path) -> String {
 }
 
 pub(crate) fn osc8(url: &str, text: &str) -> String {
+    if ui::no_color() {
+        return text.to_string();
+    }
     format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
 }
 
@@ -975,7 +978,7 @@ fn print_results(
 
     let total_files = results.len();
     let total_matches: usize = results.iter().map(|result| result.count).sum();
-    let styles = Styles::ansi();
+    let styles = Styles::when(true);
     let hyperlink_format = hyperlink_format_opt.and_then(hyperlink_format);
 
     for (idx, result) in results.iter().enumerate() {

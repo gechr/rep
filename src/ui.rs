@@ -37,8 +37,12 @@ impl Styles {
         Self { enabled: true }
     }
 
-    pub(crate) const fn when(enabled: bool) -> Self {
-        if enabled { Self::ansi() } else { Self::PLAIN }
+    pub(crate) fn when(enabled: bool) -> Self {
+        if enabled && !no_color() {
+            Self::ansi()
+        } else {
+            Self::PLAIN
+        }
     }
 
     pub(crate) const fn is_plain(self) -> bool {
@@ -55,6 +59,10 @@ impl Styles {
 
     pub(crate) const fn dim(self) -> &'static str {
         if self.enabled { "\x1b[2m" } else { "" }
+    }
+
+    pub(crate) const fn underline(self) -> &'static str {
+        if self.enabled { "\x1b[4m" } else { "" }
     }
 
     pub(crate) const fn reset(self) -> &'static str {
@@ -82,4 +90,9 @@ impl Styles {
     pub(crate) fn print_reset(self) {
         print!("{}", self.reset());
     }
+}
+
+/// <https://no-color.org>
+pub(crate) fn no_color() -> bool {
+    std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
 }

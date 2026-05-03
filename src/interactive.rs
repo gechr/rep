@@ -162,7 +162,7 @@ fn prompt(
     };
     disable_raw_mode().ok();
     if let Ok(c) = result {
-        let styles = Styles::ansi();
+        let styles = Styles::when(true);
         match c {
             NAV_BACK => print!("{}\r", styles.paint(Color::Yellow, "←")),
             NAV_FORWARD => print!("{}\r", styles.paint(Color::Yellow, "->")),
@@ -439,7 +439,12 @@ fn render_change_block(lefts: &[&str], rights: &[&str], side: InlineSide, styles
         if balanced && should_intra_word_diff(lefts[k], rights[k]) {
             render_intra_word(lefts[k], rights[k], side, styles);
         } else {
-            print!("{}{own_tok}{}", styles.fg(own_color), styles.reset());
+            print!(
+                "{}{}{own_tok}{}",
+                styles.fg(own_color),
+                styles.underline(),
+                styles.reset(),
+            );
         }
     }
 }
@@ -462,7 +467,7 @@ fn render_intra_word(old_tok: &str, new_tok: &str, side: InlineSide, styles: Sty
             }
             (InlineSide::Old, DiffResult::Left(ch)) | (InlineSide::New, DiffResult::Right(ch)) => {
                 if !highlighting {
-                    styles.print_fg(color);
+                    print!("{}{}", styles.fg(color), styles.underline());
                     highlighting = true;
                 }
                 print!("{ch}");
@@ -848,7 +853,7 @@ impl InteractivePatcher {
         let diff_result = if let Some(ref preview_tool) = self.preview_tool {
             Self::run_external_diff(old, new, preview_tool)
         } else {
-            print_diff(&diffs, Styles::ansi());
+            print_diff(&diffs, Styles::when(true));
             Ok(())
         };
 
@@ -862,25 +867,25 @@ impl InteractivePatcher {
         let user_input = prompt(
             &format!(
                 "\n{} {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
-                Styles::ansi().bold_paint(
+                Styles::when(true).bold_paint(
                     Color::Yellow,
                     format!("Accept [{match_index}/{match_total}]?")
                 ),
-                Styles::ansi().bold_paint(Color::Green, "y"),
-                Styles::ansi().paint(Color::White, "es "),
-                Styles::ansi().paint(Color::Dim, "· "),
-                Styles::ansi().paint(Color::Red, "n"),
-                Styles::ansi().paint(Color::White, "o "),
-                Styles::ansi().paint(Color::Dim, "· "),
-                Styles::ansi().paint(Color::Blue, "e"),
-                Styles::ansi().paint(Color::White, "dit "),
-                Styles::ansi().paint(Color::Dim, "· "),
-                Styles::ansi().paint(Color::Green, "A"),
-                Styles::ansi().paint(Color::White, "ll "),
-                Styles::ansi().paint(Color::Dim, "· "),
-                Styles::ansi().paint(Color::Red, "q"),
-                Styles::ansi().paint(Color::White, "uit\n"),
-                Styles::ansi().paint(Color::Yellow, "❯ "),
+                Styles::when(true).bold_paint(Color::Green, "y"),
+                Styles::when(true).paint(Color::White, "es "),
+                Styles::when(true).paint(Color::Dim, "· "),
+                Styles::when(true).paint(Color::Red, "n"),
+                Styles::when(true).paint(Color::White, "o "),
+                Styles::when(true).paint(Color::Dim, "· "),
+                Styles::when(true).paint(Color::Blue, "e"),
+                Styles::when(true).paint(Color::White, "dit "),
+                Styles::when(true).paint(Color::Dim, "· "),
+                Styles::when(true).paint(Color::Green, "A"),
+                Styles::when(true).paint(Color::White, "ll "),
+                Styles::when(true).paint(Color::Dim, "· "),
+                Styles::when(true).paint(Color::Red, "q"),
+                Styles::when(true).paint(Color::White, "uit\n"),
+                Styles::when(true).paint(Color::Yellow, "❯ "),
             ),
             "yneAq",
             Some('y'),
