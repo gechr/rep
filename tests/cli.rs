@@ -24,52 +24,6 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
 
-/// Strip ANSI CSI (`ESC [ … m`) and OSC-8 hyperlink (`ESC ] 8 ; ; … ESC \`)
-/// sequences. Used by tests that drive the rich output path via
-/// `--color=always` and want to assert on layout text rather than escapes.
-fn strip_ansi(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b && i + 1 < bytes.len() {
-            match bytes[i + 1] {
-                b'[' => {
-                    i += 2;
-                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
-                        i += 1;
-                    }
-                    if i < bytes.len() {
-                        i += 1;
-                    }
-                }
-                b']' => {
-                    i += 2;
-                    while i < bytes.len() {
-                        if bytes[i] == 0x07 {
-                            i += 1;
-                            break;
-                        }
-                        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                            i += 2;
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                _ => {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).unwrap()
-}
-
 #[test]
 fn basic_replace_rewrites_file_contents() {
     let dir = tempdir().unwrap();
@@ -248,10 +202,9 @@ fn dry_run_warns_when_diff_is_not_valid_utf8() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("skipping diff (not valid UTF-8"),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Warning: ./a.txt: skipping diff (not valid UTF-8; use non-dry-run mode)\n"
     );
 }
 
@@ -550,8 +503,59 @@ fn explicit_help_writes_to_stdout() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty(), "stderr: {:?}", output.stderr);
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Usage"));
-    assert!(stdout.contains("--preview-tool"));
+    assert_eq!(
+        stdout,
+        "\
+Usage
+
+  rep [options] <find> <replace> [<path>…]
+
+    <find>     String to find
+    <replace>  String to replace with
+    <path>…    Paths to search in (optional)
+
+Filter
+
+  -f, --files <glob>            Smart glob patterns to match files against
+  -H, --hidden                  Search hidden files and directories
+      --no-ignore               Don't respect ignore files
+
+Replace
+
+  -e, --expression <f> <r>      Repeatable <find> <replace> expression
+  -S, --smart                   Replace all case variants of the pattern
+
+Regex
+
+  -G, --greedy                  Use greedy matching for regular expressions
+  -i, --ignore-case             Case-insensitive matching
+  -m, --multiline               Search across multiple lines
+      --dotall                  Allow dot to match newlines
+  -r, --regex                   Treat patterns as regular expressions
+  -w, --word-regexp             Match only whole words
+  -x, --line-regexp             Match only whole lines
+
+Behavior
+
+  -d, --delete                  Delete lines matching <find>
+  -l, --list-files              Print only file paths that contain matches
+
+  -n, --dry-run                 Show what would be changed without writing
+  -p, --preview                 Preview the changes before applying them
+      --preview-tool <cmd>      External diff tool for preview mode
+
+Miscellaneous
+
+      --color <when>            When to use color
+      --hyperlink-format <fmt>  Terminal hyperlink format
+
+  -q, --quiet                   Suppress summary output
+  -V, --version                 Print version
+
+  -h                            Print short help
+      --help                    Print long help with examples
+"
+    );
 }
 
 #[test]
@@ -664,10 +668,7 @@ fn smart_mode_rejects_multiple_paths_with_clear_error() {
         "expected non-zero exit for smart mode with multiple paths"
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("Smart mode only supports a single path"),
-        "stderr did not contain expected error: {stderr}"
-    );
+    assert_eq!(stderr, "error: Smart mode only supports a single path\n");
     // Files must be untouched when validation rejects the invocation.
     assert_eq!(read(&a), "foo_bar");
     assert_eq!(read(&b), "foo_bar");
@@ -721,8 +722,7 @@ fn delete_mode_with_list_files_prints_matching_paths_without_modifying() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("a.txt"), "stdout: {stdout:?}");
-    assert!(!stdout.contains("b.txt"), "stdout: {stdout:?}");
+    assert_eq!(stdout, "a.txt\n");
     // File must be untouched - `-l` is informational.
     assert_eq!(read(&a), "has foo\nother\n");
 }
@@ -894,15 +894,19 @@ fn color_always_forces_rich_layout_through_pipe() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    // Rich layout (vs patch fallback) is identifiable by ANSI escapes and the
-    // summary line; the patch format has neither.
-    assert!(stdout.contains('\x1b'), "expected ANSI escapes: {stdout:?}");
-    let plain = strip_ansi(&stdout);
-    assert!(plain.contains("a.txt (2)"), "missing a.txt header: {plain}");
-    assert!(plain.contains("b.txt (1)"), "missing b.txt header: {plain}");
-    assert!(
-        plain.contains("Would perform 3 replacements in 2 files"),
-        "missing summary: {plain}"
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
+\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m bar \x1b[31m\x1b[4mfoo\x1b[m
+\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m bar \x1b[32m\x1b[4mbar\x1b[m
+
+\x1b[35mb.txt \x1b[38;5;248m(1)\x1b[m
+\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
+\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
+
+\x1b[1m\x1b[33mWould perform 3 replacements in 2 files\x1b[m
+"
     );
 }
 
@@ -926,12 +930,47 @@ fn color_always_wraps_diff_text_in_red_and_green() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    // 31 = red (removed), 32 = green (added). Don't pin the surrounding
-    // attributes (bold/underline) since those compose orthogonally.
-    assert!(stdout.contains("\x1b[31m"), "missing red escape: {stdout:?}");
-    assert!(
-        stdout.contains("\x1b[32m"),
-        "missing green escape: {stdout:?}"
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
+\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m line
+\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m line
+
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+"
+    );
+}
+
+#[test]
+fn color_always_highlights_merged_token_replacements_at_char_granularity() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "github.workflow\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            ".",
+            "b",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
+\x1b[2m\x1b[31m1\x1b[m github\x1b[31m\x1b[4m.\x1b[mworkflow
+\x1b[2m\x1b[32m1\x1b[m github\x1b[32m\x1b[4mb\x1b[mworkflow
+
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+"
     );
 }
 
@@ -948,18 +987,15 @@ fn color_never_keeps_patch_format_through_pipe() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "no escapes expected: {stdout:?}"
-    );
-    assert!(
-        stdout.starts_with("--- a/"),
-        "patch format expected: {stdout:?}"
-    );
-    // The summary is exclusive to the rich format.
-    assert!(
-        !stdout.contains("Would perform"),
-        "summary leaked into patch output: {stdout:?}"
+    assert_eq!(
+        stdout,
+        "\
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-foo
++bar
+"
     );
 }
 
@@ -976,8 +1012,16 @@ fn color_auto_under_pipe_keeps_patch_format() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(!stdout.contains('\x1b'), "no escapes expected: {stdout:?}");
-    assert!(stdout.starts_with("--- a/"), "patch expected: {stdout:?}");
+    assert_eq!(
+        stdout,
+        "\
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-foo
++bar
+"
+    );
 }
 
 #[test]
@@ -1003,9 +1047,15 @@ fn color_always_outranks_no_color_env() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.contains('\x1b'),
-        "expected ANSI despite NO_COLOR=1: {stdout:?}"
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
+\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
+\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
+
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+"
     );
 }
 
@@ -1025,7 +1075,16 @@ fn no_color_env_strips_ansi_under_auto() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(!stdout.contains('\x1b'), "NO_COLOR honored: {stdout:?}");
+    assert_eq!(
+        stdout,
+        "\
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-foo
++bar
+"
+    );
 }
 
 #[test]
@@ -1048,8 +1107,16 @@ fn colour_alias_behaves_like_color() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains('\x1b'), "alias forced color: {stdout:?}");
-    assert!(strip_ansi(&stdout).contains("Would perform"));
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
+\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
+\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
+
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+"
+    );
 }
 
 #[test]
@@ -1064,8 +1131,8 @@ fn invalid_color_value_is_rejected() {
         .unwrap();
     assert!(!output.status.success(), "should reject invalid value");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("invalid value 'bogus'"),
-        "stderr: {stderr}"
+    assert_eq!(
+        stderr,
+        "error: invalid value 'bogus' for '--color <when>'\n  [possible values: auto, always, never]\n"
     );
 }

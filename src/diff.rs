@@ -315,16 +315,40 @@ fn write_change_block(
     side: InlineSide,
     styles: Styles,
 ) {
-    // Only intra-word diff when the two sides line up 1:1; otherwise positional
-    // pairing implies token relationships that are just index accidents.
     let balanced = lefts.len() == rights.len();
+    if balanced {
+        write_balanced_change_block(out, lefts, rights, side, styles);
+        return;
+    }
+
+    let old_text = lefts.concat();
+    let new_text = rights.concat();
+    if should_block_char_diff(&old_text, &new_text) {
+        write_char_diff(out, &old_text, &new_text, side, styles);
+        return;
+    }
+
+    let (own_tokens, own_color) = match side {
+        InlineSide::Old => (lefts, Color::Red),
+        InlineSide::New => (rights, Color::Green),
+    };
+    write_underlined_tokens(out, own_tokens, own_color, styles);
+}
+
+fn write_balanced_change_block(
+    out: &mut String,
+    lefts: &[&str],
+    rights: &[&str],
+    side: InlineSide,
+    styles: Styles,
+) {
     let (own_tokens, own_color) = match side {
         InlineSide::Old => (lefts, Color::Red),
         InlineSide::New => (rights, Color::Green),
     };
     for (k, own_tok) in own_tokens.iter().enumerate() {
-        if balanced && should_intra_word_diff(lefts[k], rights[k]) {
-            write_intra_word(out, lefts[k], rights[k], side, styles);
+        if should_intra_word_diff(lefts[k], rights[k]) {
+            write_char_diff(out, lefts[k], rights[k], side, styles);
         } else {
             let _ = write!(
                 out,
@@ -337,19 +361,25 @@ fn write_change_block(
     }
 }
 
-fn write_intra_word(
-    out: &mut String,
-    old_tok: &str,
-    new_tok: &str,
-    side: InlineSide,
-    styles: Styles,
-) {
+fn write_underlined_tokens(out: &mut String, tokens: &[&str], color: Color, styles: Styles) {
+    for token in tokens {
+        let _ = write!(
+            out,
+            "{}{}{token}{}",
+            styles.fg(color),
+            styles.underline(),
+            styles.reset(),
+        );
+    }
+}
+
+fn write_char_diff(out: &mut String, old: &str, new: &str, side: InlineSide, styles: Styles) {
     let color = match side {
         InlineSide::Old => Color::Red,
         InlineSide::New => Color::Green,
     };
     let mut highlighting = false;
-    for item in diff::chars(old_tok, new_tok) {
+    for item in diff::chars(old, new) {
         match (side, item) {
             (InlineSide::Old, DiffResult::Both(ch, _))
             | (InlineSide::New, DiffResult::Both(_, ch)) => {
@@ -374,6 +404,14 @@ fn write_intra_word(
     }
 }
 
+fn should_block_char_diff(old: &str, new: &str) -> bool {
+    const MAX_BLOCK_CHAR_DIFF_LEN: usize = 1024;
+    if old.len() > MAX_BLOCK_CHAR_DIFF_LEN || new.len() > MAX_BLOCK_CHAR_DIFF_LEN {
+        return false;
+    }
+    has_single_changed_run_per_side(old, new)
+}
+
 pub(crate) fn should_intra_word_diff(old_tok: &str, new_tok: &str) -> bool {
     // Cap diff work for pathological tokens (e.g. a multi-KB minified identifier).
     const MAX_INTRA_WORD_LEN: usize = 1024;
@@ -386,11 +424,15 @@ pub(crate) fn should_intra_word_diff(old_tok: &str, new_tok: &str) -> bool {
     // Use char-diff only when each side forms at most one contiguous changed
     // run, so colored characters are never interrupted by uncolored shared
     // chars. Two-or-more runs on either side would speckle the output.
+    has_single_changed_run_per_side(old_tok, new_tok)
+}
+
+fn has_single_changed_run_per_side(old: &str, new: &str) -> bool {
     let mut left_runs = 0usize;
     let mut right_runs = 0usize;
     let mut in_left = false;
     let mut in_right = false;
-    for item in diff::chars(old_tok, new_tok) {
+    for item in diff::chars(old, new) {
         match item {
             DiffResult::Left(_) => {
                 if !in_left {
@@ -507,7 +549,10 @@ fn is_subword_boundary(prev: char, cur: char, next: Option<char>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_intra_word_diff, tokenize};
+    use super::{
+        InlineSide, inline_token_diff, should_intra_word_diff, tokenize, write_inline_chars,
+    };
+    use crate::ui::Styles;
 
     #[test]
     fn tokenize_handles_empty_and_whitespace() {
@@ -580,5 +625,18 @@ mod tests {
         let long_a = "a".repeat(2048);
         let long_b = "a".repeat(2048);
         assert!(!should_intra_word_diff(&long_a, &long_b));
+    }
+
+    #[test]
+    fn unbalanced_token_block_highlights_only_changed_chars_when_clean() {
+        let inline = inline_token_diff("github.workflow", "githubbworkflow");
+
+        let mut old = String::new();
+        write_inline_chars(&mut old, &inline, InlineSide::Old, Styles::ansi());
+        assert_eq!(old, "github\x1b[31m\x1b[4m.\x1b[mworkflow");
+
+        let mut new = String::new();
+        write_inline_chars(&mut new, &inline, InlineSide::New, Styles::ansi());
+        assert_eq!(new, "github\x1b[32m\x1b[4mb\x1b[mworkflow");
     }
 }

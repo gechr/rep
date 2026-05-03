@@ -1317,8 +1317,6 @@ mod tests {
         // Regression: per-line diff hyperlinks were leaving `{column}` literal
         // in the URL, which terminals then percent-encoded as `%7Bcolumn%7D`.
         let url = hyperlink_url("vscode://file{path}:{line}:{column}", "/tmp/cli.rs", 808, 0);
-        assert!(!url.contains("{column}"));
-        assert!(!url.contains("%7B"));
         assert_eq!(url, "vscode://file/tmp/cli.rs:808:1");
     }
 
