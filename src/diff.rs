@@ -104,7 +104,12 @@ pub(crate) fn print_file_line_diff(
 ) {
     let columns = (!columns.is_empty()).then_some(columns);
     let hyperlinks = Hyperlinks::new(hyperlink_template, encoded_path, columns);
-    let spans = hints.spans;
+    let trimmed: Vec<Replacement> = hints
+        .spans
+        .iter()
+        .map(|s| trim_shared_affixes(*s, old, new))
+        .collect();
+    let spans = trimmed.as_slice();
     let old_line_spans = group_spans_by_line(old, spans, SpanSide::Input);
     let new_line_spans = group_spans_by_line(new, spans, SpanSide::Output);
     let span_highlighting = !spans.is_empty();
@@ -206,6 +211,69 @@ pub(crate) fn print_file_line_diff(
         writer.write_block(&old_lines, &new_lines);
     }
     write_stdout(&out);
+}
+
+/// Shrink a span by stripping the longest common prefix and suffix shared by
+/// its input and output bytes, so highlighting only covers the actual edit
+/// rather than the full matched literal. A literal pattern that ends with `;`
+/// being replaced by the same pattern with `;;` should highlight just the
+/// trailing punctuation, not the whole expression.
+///
+/// Always leaves at least one byte on each side: an empty span would be
+/// dropped by `group_spans_by_line` and the diff would render with no
+/// highlight at all. Bails out for spans that contain a newline (the
+/// multi-line and linewise paths assume span endpoints sit at the actual
+/// edit boundaries) and for very large spans where the trim scan would
+/// dominate per-match cost.
+fn trim_shared_affixes(span: Replacement, old: &str, new: &str) -> Replacement {
+    const TRIM_AFFIX_LIMIT: usize = 64 * 1024;
+
+    let in_bytes = &old.as_bytes()[span.input_start..span.input_end()];
+    let out_bytes = &new.as_bytes()[span.output_start..span.output_end()];
+    if in_bytes.is_empty()
+        || out_bytes.is_empty()
+        || in_bytes.len() > TRIM_AFFIX_LIMIT
+        || out_bytes.len() > TRIM_AFFIX_LIMIT
+        || in_bytes.contains(&b'\n')
+        || out_bytes.contains(&b'\n')
+    {
+        return span;
+    }
+
+    let prefix_max = in_bytes.len().min(out_bytes.len()) - 1;
+    let mut prefix = 0;
+    while prefix < prefix_max && in_bytes[prefix] == out_bytes[prefix] {
+        prefix += 1;
+    }
+    while prefix > 0
+        && (!old.is_char_boundary(span.input_start + prefix)
+            || !new.is_char_boundary(span.output_start + prefix))
+    {
+        prefix -= 1;
+    }
+
+    let in_after = &in_bytes[prefix..];
+    let out_after = &out_bytes[prefix..];
+    let suffix_max = in_after.len().min(out_after.len()) - 1;
+    let mut suffix = 0;
+    while suffix < suffix_max
+        && in_after[in_after.len() - 1 - suffix] == out_after[out_after.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    while suffix > 0
+        && (!old.is_char_boundary(span.input_end() - suffix)
+            || !new.is_char_boundary(span.output_end() - suffix))
+    {
+        suffix -= 1;
+    }
+
+    Replacement {
+        input_start: span.input_start + prefix,
+        input_len: span.input_len - prefix - suffix,
+        output_start: span.output_start + prefix,
+        output_len: span.output_len - prefix - suffix,
+    }
 }
 
 fn replacements_preserve_line_boundaries(old: &str, new: &str, spans: &[Replacement]) -> bool {
@@ -1175,6 +1243,68 @@ mod tests {
     }
 
     #[test]
+    fn trim_shared_affixes_narrows_to_actual_edit() {
+        // "let dir = tempdir().unwrap();" -> same with trailing ";;".
+        let old = "let dir = tempdir().unwrap();";
+        let new = "let dir = tempdir().unwrap();;";
+        let span = rep(0, old.len(), 0, new.len());
+        let trimmed = trim_shared_affixes(span, old, new);
+        // Common prefix runs up to index 28 (everything but the last `;`),
+        // leaving `;` on the input side and `;;` on the output side.
+        assert_eq!(trimmed, rep(28, 1, 28, 2));
+    }
+
+    #[test]
+    fn trim_shared_affixes_keeps_at_least_one_byte_per_side() {
+        // Input is a strict prefix of output: trimming naively would empty the
+        // input side. Helper must back off to leave one byte on each side.
+        let old = "abc";
+        let new = "abcd";
+        let trimmed = trim_shared_affixes(rep(0, 3, 0, 4), old, new);
+        assert_eq!(trimmed, rep(2, 1, 2, 2));
+    }
+
+    #[test]
+    fn trim_shared_affixes_strips_both_prefix_and_suffix() {
+        // Common "ab" prefix and "ef" suffix surrounding the actual edit.
+        let old = "abXYef";
+        let new = "abQRef";
+        let span = rep(0, old.len(), 0, new.len());
+        let trimmed = trim_shared_affixes(span, old, new);
+        assert_eq!(trimmed, rep(2, 2, 2, 2));
+    }
+
+    #[test]
+    fn trim_shared_affixes_strips_suffix_only_when_no_common_prefix() {
+        // First byte differs, so prefix is empty; suffix "bc" is shared but the
+        // helper must leave one byte on each side ("Xb" vs "Yb").
+        let old = "Xabc";
+        let new = "Yabc";
+        let span = rep(0, old.len(), 0, new.len());
+        let trimmed = trim_shared_affixes(span, old, new);
+        assert_eq!(trimmed, rep(0, 1, 0, 1));
+    }
+
+    #[test]
+    fn trim_shared_affixes_skips_multiline_spans() {
+        let old = "foo\nbar";
+        let new = "foo\nbaz";
+        let span = rep(0, old.len(), 0, new.len());
+        assert_eq!(trim_shared_affixes(span, old, new), span);
+    }
+
+    #[test]
+    fn trim_shared_affixes_respects_utf8_boundaries() {
+        // 'é' is two bytes (0xC3 0xA9) at offsets 3..5. Common prefix counted
+        // in bytes would land at offset 4 (mid-codepoint); helper backs off.
+        let old = "café!";
+        let new = "café?";
+        let span = rep(0, old.len(), 0, new.len());
+        let trimmed = trim_shared_affixes(span, old, new);
+        assert_eq!(trimmed, rep(5, 1, 5, 1));
+    }
+
+    #[test]
     fn group_spans_by_line_buckets_input_spans_per_line() {
         // "foo\nbar\nbaz\n" - replace "foo"@0 and "bar"@4.
         let text = "foo\nbar\nbaz\n";
@@ -1185,7 +1315,7 @@ mod tests {
         assert_eq!(map.get(&1).unwrap()[0].end, 3);
         assert_eq!(map.get(&2).unwrap()[0].start, 0);
         assert_eq!(map.get(&2).unwrap()[0].end, 3);
-        assert!(map.get(&3).is_none());
+        assert!(!map.contains_key(&3));
     }
 
     #[test]

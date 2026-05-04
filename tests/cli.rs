@@ -128,6 +128,45 @@ fn dry_run_only_highlights_changed_characters_inside_lines() {
 }
 
 #[test]
+fn colored_dry_run_trims_shared_affixes_to_actual_edit() {
+    // The literal pattern matches the entire expression but only the trailing
+    // `;` differs. Highlighting must underline just the punctuation rather
+    // than the whole match, so the diff communicates what actually changed.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "let dir = tempdir().unwrap();\n");
+
+    let output = Command::new(REP)
+        .args([
+            "--color=always",
+            "--hyperlink-format=",
+            "-n",
+            "let dir = tempdir().unwrap();",
+            "let dir = tempdir().unwrap();;",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
+\x1b[31m\x1b[2m1\x1b[m let dir = tempdir().unwrap()\x1b[31m\x1b[4m;\x1b[m
+\x1b[32m\x1b[2m1\x1b[m let dir = tempdir().unwrap()\x1b[32m\x1b[4m;;\x1b[m
+
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+"
+    );
+}
+
+#[test]
 fn dry_run_pairs_multiline_replacements_by_line() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");
