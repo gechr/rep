@@ -997,14 +997,19 @@ fn has_ambiguous_digit_group_separator(separator: &str) -> bool {
 }
 
 fn with_commas(n: usize) -> String {
-    let fallback = || format_count(n, &num_format::Locale::en);
-    let Ok(loc) = num_format::SystemLocale::default() else {
-        return fallback();
-    };
-    if has_ambiguous_digit_group_separator(loc.separator()) {
-        return fallback();
+    use std::sync::OnceLock;
+    static SYSTEM_LOCALE: OnceLock<Option<num_format::SystemLocale>> = OnceLock::new();
+    let cached = SYSTEM_LOCALE.get_or_init(|| {
+        let loc = num_format::SystemLocale::default().ok()?;
+        if has_ambiguous_digit_group_separator(loc.separator()) {
+            return None;
+        }
+        Some(loc)
+    });
+    match cached {
+        Some(loc) => format_count(n, loc),
+        None => format_count(n, &num_format::Locale::en),
     }
-    format_count(n, &loc)
 }
 
 fn summary_message_with_formatter<F>(
