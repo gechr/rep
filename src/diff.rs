@@ -25,28 +25,30 @@ pub(crate) struct DiffHints<'a> {
 
 #[derive(Clone, Copy)]
 struct Hyperlinks<'a> {
-    format: Option<&'a str>,
-    path: &'a str,
+    template: Option<&'a crate::HyperlinkTemplate<'a>>,
+    /// Pre-encoded path used by `{path}`. Empty when the template doesn't
+    /// reference `{path}` (caller skips the encoding work in that case).
+    encoded_path: &'a str,
     /// 1-indexed line -> first-match column. `None` when not tracked; lookups
-    /// for absent lines fall back to column 1 inside `hyperlink_url`.
+    /// for absent lines fall back to column 1 inside `HyperlinkTemplate::render`.
     columns: Option<&'a std::collections::HashMap<usize, usize>>,
 }
 
 impl<'a> Hyperlinks<'a> {
     const fn new(
-        format: Option<&'a str>,
-        path: &'a str,
+        template: Option<&'a crate::HyperlinkTemplate<'a>>,
+        encoded_path: &'a str,
         columns: Option<&'a std::collections::HashMap<usize, usize>>,
     ) -> Self {
         Self {
-            format,
-            path,
+            template,
+            encoded_path,
             columns,
         }
     }
 
     fn write(self, out: &mut String, line: usize, text: &str) {
-        let Some(format) = self.format else {
+        let Some(template) = self.template else {
             out.push_str(text);
             return;
         };
@@ -55,7 +57,7 @@ impl<'a> Hyperlinks<'a> {
             .and_then(|m| m.get(&line).copied())
             .unwrap_or(0);
         out.push_str(&crate::osc8(
-            &crate::hyperlink_url(format, self.path, line, column),
+            &template.render(self.encoded_path, line, column),
             text,
         ));
     }
@@ -66,12 +68,12 @@ pub(crate) fn print_file_line_diff(
     new: &str,
     hints: DiffHints<'_>,
     styles: Styles,
-    hyperlink_format: Option<&str>,
-    hyperlink_path: &str,
+    hyperlink_template: Option<&crate::HyperlinkTemplate<'_>>,
+    encoded_path: &str,
     columns: &std::collections::HashMap<usize, usize>,
 ) {
     let columns = (!columns.is_empty()).then_some(columns);
-    let hyperlinks = Hyperlinks::new(hyperlink_format, hyperlink_path, columns);
+    let hyperlinks = Hyperlinks::new(hyperlink_template, encoded_path, columns);
     let spans = hints.spans;
     let old_line_spans = group_spans_by_line(old, spans, SpanSide::Input);
     let new_line_spans = group_spans_by_line(new, spans, SpanSide::Output);

@@ -671,36 +671,113 @@ fn percent_encode_path(s: &str) -> String {
         .expect("UTF-8 by construction: input bytes preserved or replaced by ASCII")
 }
 
-pub(crate) fn hyperlink_url(format: &str, path: &str, line: usize, column: usize) -> String {
-    // 0 sentinels mean "no real value known" - default to 1.
-    // Each `replace` allocates a fresh String even when the placeholder is
-    // absent, so we gate every substitution on `contains` and start from a
-    // borrowed Cow. Per-line hyperlinks call this once per diff line; in
-    // formats that omit a placeholder, this avoids the corresponding alloc
-    // (and the `percent_encode_path` / `to_string` work that feeds it).
-    use std::borrow::Cow;
-    let mut out: Cow<str> = Cow::Borrowed(format);
-    if out.contains("{path}") {
-        out = Cow::Owned(out.replace("{path}", &percent_encode_path(path)));
-    }
-    if out.contains("{host}") {
-        out = Cow::Owned(out.replace("{host}", hostname().unwrap_or("")));
-    }
-    if out.contains("{line}") {
-        let line = if line == 0 { 1 } else { line };
-        out = Cow::Owned(out.replace("{line}", &line.to_string()));
-    }
-    if out.contains("{column}") {
-        let column = if column == 0 { 1 } else { column };
-        out = Cow::Owned(out.replace("{column}", &column.to_string()));
-    }
-    out.into_owned()
+#[derive(Clone, Copy)]
+enum HyperlinkSeg<'a> {
+    Lit(&'a str),
+    Path,
+    Host,
+    Line,
+    Column,
 }
 
-fn hyperlink(format: Option<&str>, path: &str, line: usize, text: &str) -> String {
-    format.map_or_else(
+/// Pre-parsed hyperlink format. The format is scanned once for the
+/// supported `{path}/{host}/{line}/{column}` placeholders and split into
+/// a sequence of literal slices and placeholder slots. Each render is a
+/// single linear pass over `segs` with one final `String` allocation.
+#[derive(Clone)]
+pub(crate) struct HyperlinkTemplate<'a> {
+    segs: Vec<HyperlinkSeg<'a>>,
+    has_path: bool,
+}
+
+impl<'a> HyperlinkTemplate<'a> {
+    pub(crate) fn parse(format: &'a str) -> Self {
+        let mut segs: Vec<HyperlinkSeg<'a>> = Vec::new();
+        let mut has_path = false;
+        let mut rest = format;
+        while let Some(open) = rest.find('{') {
+            let after_open = &rest[open + 1..];
+            let Some(close_rel) = after_open.find('}') else {
+                break;
+            };
+            let name = &after_open[..close_rel];
+            let consumed_to = open + 1 + close_rel + 1;
+            let seg = match name {
+                "path" => {
+                    has_path = true;
+                    HyperlinkSeg::Path
+                }
+                "host" => HyperlinkSeg::Host,
+                "line" => HyperlinkSeg::Line,
+                "column" => HyperlinkSeg::Column,
+                _ => {
+                    segs.push(HyperlinkSeg::Lit(&rest[..consumed_to]));
+                    rest = &rest[consumed_to..];
+                    continue;
+                }
+            };
+            if open > 0 {
+                segs.push(HyperlinkSeg::Lit(&rest[..open]));
+            }
+            segs.push(seg);
+            rest = &rest[consumed_to..];
+        }
+        if !rest.is_empty() {
+            segs.push(HyperlinkSeg::Lit(rest));
+        }
+        Self { segs, has_path }
+    }
+
+    pub(crate) const fn uses_path(&self) -> bool {
+        self.has_path
+    }
+
+    /// Render into a fresh `String`. `encoded_path` is the percent-encoded
+    /// path (caller-cached per file when the template uses `{path}`); pass
+    /// `""` when the template doesn't reference `{path}`. `line`/`column`
+    /// of `0` render as `1`.
+    pub(crate) fn render(&self, encoded_path: &str, line: usize, column: usize) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(encoded_path.len() + 32);
+        for seg in &self.segs {
+            match seg {
+                HyperlinkSeg::Lit(s) => out.push_str(s),
+                HyperlinkSeg::Path => out.push_str(encoded_path),
+                HyperlinkSeg::Host => out.push_str(hostname().unwrap_or("")),
+                HyperlinkSeg::Line => {
+                    let l = if line == 0 { 1 } else { line };
+                    let _ = write!(out, "{l}");
+                }
+                HyperlinkSeg::Column => {
+                    let c = if column == 0 { 1 } else { column };
+                    let _ = write!(out, "{c}");
+                }
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn hyperlink_url(format: &str, path: &str, line: usize, column: usize) -> String {
+    let template = HyperlinkTemplate::parse(format);
+    let encoded = if template.uses_path() {
+        percent_encode_path(path)
+    } else {
+        String::new()
+    };
+    template.render(&encoded, line, column)
+}
+
+fn hyperlink_with_template(
+    template: Option<&HyperlinkTemplate<'_>>,
+    encoded_path: &str,
+    line: usize,
+    text: &str,
+) -> String {
+    template.map_or_else(
         || text.to_string(),
-        |format| osc8(&hyperlink_url(format, path, line, 0), text),
+        |t| osc8(&t.render(encoded_path, line, 0), text),
     )
 }
 
@@ -1063,9 +1140,14 @@ fn print_results(
     let total_files = results.len();
     let total_matches: usize = results.iter().map(|result| result.count).sum();
     let styles = Styles::when(true);
+    let template = hyperlink_format.map(HyperlinkTemplate::parse);
     for (idx, result) in results.iter().enumerate() {
         let count = with_commas(result.count);
-        let path = hyperlink(hyperlink_format, &result.link_path, 0, &result.path);
+        let encoded_path = template
+            .as_ref()
+            .filter(|t| t.uses_path())
+            .map_or(String::new(), |_| percent_encode_path(&result.link_path));
+        let path = hyperlink_with_template(template.as_ref(), &encoded_path, 0, &result.path);
         println!(
             "{}{} {}({count}){}",
             if quiet { "" } else { styles.fg(Color::Magenta) },
@@ -1084,8 +1166,8 @@ fn print_results(
                     multiline_spans: result.multiline_span_diff,
                 },
                 styles,
-                hyperlink_format,
-                &result.link_path,
+                template.as_ref(),
+                &encoded_path,
                 &result.columns,
             );
         }
