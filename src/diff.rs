@@ -63,12 +63,27 @@ pub(crate) fn print_file_line_diff(
     hyperlink_path: &str,
     columns: &std::collections::HashMap<usize, usize>,
 ) {
-    let diffs = diff::lines(old, new);
     let columns = (!columns.is_empty()).then_some(columns);
     let hyperlinks = Hyperlinks::new(hyperlink_format, hyperlink_path, columns);
     let old_line_spans = group_spans_by_line(old, spans, SpanSide::Input);
     let new_line_spans = group_spans_by_line(new, spans, SpanSide::Output);
     let span_highlighting = !spans.is_empty();
+
+    if span_highlighting
+        && replacements_preserve_line_boundaries(old, new, spans)
+        && print_same_line_span_diff(
+            old,
+            new,
+            styles,
+            hyperlinks,
+            &old_line_spans,
+            &new_line_spans,
+        )
+    {
+        return;
+    }
+
+    let diffs = diff::lines(old, new);
     let mut old_line_no = 1;
     let mut new_line_no = 1;
     let mut i = 0;
@@ -125,6 +140,84 @@ pub(crate) fn print_file_line_diff(
         writer.write_block(&old_lines, &new_lines);
     }
     write_stdout(&out);
+}
+
+fn replacements_preserve_line_boundaries(old: &str, new: &str, spans: &[Replacement]) -> bool {
+    !spans.is_empty()
+        && spans.iter().all(|span| {
+            span.input_len > 0
+                && span.output_len > 0
+                && !old.as_bytes()[span.input_start..span.input_end()].contains(&b'\n')
+                && !new.as_bytes()[span.output_start..span.output_end()].contains(&b'\n')
+        })
+}
+
+fn print_same_line_span_diff(
+    old: &str,
+    new: &str,
+    styles: Styles,
+    hyperlinks: Hyperlinks<'_>,
+    old_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+    new_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+) -> bool {
+    let mut changed_lines: Vec<usize> = old_line_spans
+        .keys()
+        .chain(new_line_spans.keys())
+        .copied()
+        .collect();
+    changed_lines.sort_unstable();
+    changed_lines.dedup();
+    if changed_lines.is_empty() {
+        return false;
+    }
+
+    let Some(old_lines) = lines_for_numbers(old, &changed_lines) else {
+        return false;
+    };
+    let Some(new_lines) = lines_for_numbers(new, &changed_lines) else {
+        return false;
+    };
+
+    let width = changed_lines
+        .iter()
+        .map(|line_no| line_no.to_string().len())
+        .max()
+        .unwrap_or(1);
+    let mut out = String::new();
+    let mut writer = NumberedDiffWriter {
+        out: &mut out,
+        width,
+        styles,
+        hyperlinks,
+        span_highlighting: true,
+        old_line_spans,
+        new_line_spans,
+    };
+
+    let mut block_start = 0;
+    for idx in 1..=changed_lines.len() {
+        if idx == changed_lines.len() || changed_lines[idx] != changed_lines[idx - 1] + 1 {
+            writer.write_block(&old_lines[block_start..idx], &new_lines[block_start..idx]);
+            block_start = idx;
+        }
+    }
+    write_stdout(&out);
+    true
+}
+
+fn lines_for_numbers<'a>(text: &'a str, line_numbers: &[usize]) -> Option<Vec<(usize, &'a str)>> {
+    let mut out = Vec::with_capacity(line_numbers.len());
+    let mut wanted = line_numbers.iter().copied().peekable();
+    for (idx, line) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        while wanted.next_if_eq(&line_no).is_some() {
+            out.push((line_no, line));
+        }
+        if wanted.peek().is_none() {
+            return Some(out);
+        }
+    }
+    None
 }
 
 pub(crate) fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) {
