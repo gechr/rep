@@ -967,23 +967,20 @@ fn group_spans_by_line(
 
     let bytes = text.as_bytes();
     // Compute the start byte of each line lazily as we iterate spans in
-    // order. Because spans from `apply_compiled_expressions` are produced
-    // left-to-right by the regex engine, they're already sorted by start
-    // offset on both sides; we exploit that to walk the buffer once.
+    // order. `apply_compiled_expressions` pushes spans left-to-right, so
+    // `input_start` and `output_start` are both monotonically ascending;
+    // we walk the buffer once without sorting or collecting.
     let mut line_no: usize = 1;
     let mut line_start: usize = 0;
 
-    let mut sorted: Vec<(usize, usize)> = spans
-        .iter()
-        .map(|s| match side {
-            SpanSide::Input => (s.input_start, s.input_end()),
-            SpanSide::Output => (s.output_start, s.output_end()),
-        })
-        .filter(|(start, end)| end > start)
-        .collect();
-    sorted.sort_unstable_by_key(|&(start, _)| start);
-
-    for (mut start, end) in sorted {
+    for span in spans {
+        let (mut start, end) = match side {
+            SpanSide::Input => (span.input_start, span.input_end()),
+            SpanSide::Output => (span.output_start, span.output_end()),
+        };
+        if end <= start {
+            continue;
+        }
         // Advance past lines that end before the span starts.
         while line_start < bytes.len() {
             let nl = memchr::memchr(b'\n', &bytes[line_start..]).map(|i| line_start + i);
