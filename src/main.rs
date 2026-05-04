@@ -3,6 +3,7 @@ mod diff;
 mod expressions;
 mod interactive;
 mod scan;
+mod theme;
 mod ui;
 
 use std::io::IsTerminal as _;
@@ -248,6 +249,60 @@ struct Cli {
     quiet: bool,
 
     #[arg(
+        long = "style-added",
+        value_name = "style",
+        help = "Style for added lines",
+        help_heading = "Style",
+        display_order = 10
+    )]
+    style_added: Option<String>,
+
+    #[arg(
+        long = "style-removed",
+        value_name = "style",
+        help = "Style for removed lines",
+        help_heading = "Style",
+        display_order = 20
+    )]
+    style_removed: Option<String>,
+
+    #[arg(
+        long = "style-line-added",
+        value_name = "style",
+        help = "Style for added line numbers",
+        help_heading = "Style",
+        display_order = 30
+    )]
+    style_line_added: Option<String>,
+
+    #[arg(
+        long = "style-line-removed",
+        value_name = "style",
+        help = "Style for removed line numbers",
+        help_heading = "Style",
+        display_order = 40
+    )]
+    style_line_removed: Option<String>,
+
+    #[arg(
+        long = "marker-added",
+        value_name = "str",
+        help = "Marker before added lines",
+        help_heading = "Style",
+        display_order = 60
+    )]
+    marker_added: Option<String>,
+
+    #[arg(
+        long = "marker-removed",
+        value_name = "str",
+        help = "Marker before removed lines",
+        help_heading = "Style",
+        display_order = 70
+    )]
+    marker_removed: Option<String>,
+
+    #[arg(
         short = 'h',
         help = "Print short help",
         help_heading = "Miscellaneous",
@@ -268,6 +323,14 @@ struct Cli {
 }
 
 const HELP_SECTIONS: &[&str] = &["Filter", "Replace", "Regex", "Behavior", "Miscellaneous"];
+const LONG_HELP_SECTIONS: &[&str] = &[
+    "Filter",
+    "Replace",
+    "Regex",
+    "Behavior",
+    "Style",
+    "Miscellaneous",
+];
 const SECTION_SPACERS: &[&str] = &["list_files", "hyperlink_format", "version"];
 
 /// Clap auto-assigns a `value_name` to every arg, including bool flags. Gate on
@@ -320,6 +383,10 @@ fn colorize_help_metavars(help: &str, styles: Styles) -> String {
 }
 
 fn print_help() {
+    print_help_with(HELP_SECTIONS);
+}
+
+fn print_help_with(sections: &[&str]) {
     let styles = ui::Styles::when(std::io::stdout().is_terminal());
     let bold = styles.bold();
     let red = styles.fg(Color::Red);
@@ -357,6 +424,7 @@ fn print_help() {
         .get_arguments()
         .enumerate()
         .filter(|(_, a)| !a.is_hide_set())
+        .filter(|(_, a)| a.get_help_heading().is_none_or(|h| sections.contains(&h)))
         .collect();
     visible.push((visible.len(), &version_arg));
 
@@ -366,7 +434,7 @@ fn print_help() {
         .max()
         .unwrap_or(0);
 
-    for section in HELP_SECTIONS {
+    for section in sections {
         let mut rows: Vec<(usize, &clap::Arg)> = visible
             .iter()
             .filter(|(_, a)| a.get_help_heading() == Some(*section))
@@ -403,7 +471,7 @@ fn print_help_long() {
     let grey = styles.fg(Color::Grey);
     let reset = styles.reset();
 
-    print_help();
+    print_help_with(LONG_HELP_SECTIONS);
 
     let text = format!(
         "
@@ -1238,6 +1306,16 @@ fn run() -> Result<()> {
     }
     let cli = Cli::parse_from(preprocess_expression_args(argv));
     ui::set_color_choice(cli.color);
+    let theme = theme::Theme::from_overrides(theme::Overrides {
+        style_added: cli.style_added.as_deref(),
+        style_removed: cli.style_removed.as_deref(),
+        style_line_added: cli.style_line_added.as_deref(),
+        style_line_removed: cli.style_line_removed.as_deref(),
+        marker_added: cli.marker_added.clone(),
+        marker_removed: cli.marker_removed.clone(),
+    })
+    .map_err(|e| anyhow::anyhow!("invalid style: {e}"))?;
+    theme::set_theme(theme);
 
     if let Some(shell) = cli.completions {
         clap_complete::generate(shell, &mut Cli::command(), "rep", &mut std::io::stdout());

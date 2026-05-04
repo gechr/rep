@@ -93,10 +93,6 @@ impl Styles {
         if self.enabled { "\x1b[2m" } else { "" }
     }
 
-    pub(crate) const fn underline(self) -> &'static str {
-        if self.enabled { "\x1b[4m" } else { "" }
-    }
-
     pub(crate) const fn reset(self) -> &'static str {
         if self.enabled { "\x1b[m" } else { "" }
     }
@@ -113,13 +109,5 @@ impl Styles {
             text.as_ref(),
             self.reset()
         )
-    }
-
-    pub(crate) fn print_fg(self, color: Color) {
-        print!("{}", self.fg(color));
-    }
-
-    pub(crate) fn print_reset(self) {
-        print!("{}", self.reset());
     }
 }

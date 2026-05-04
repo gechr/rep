@@ -13,8 +13,38 @@ use std::io::Write as _;
 use diff::Result as DiffResult;
 
 use crate::expressions::Replacement;
+use crate::theme::{self, Side, StyleSpec};
 use crate::ui::Color;
 use crate::ui::Styles;
+
+/// Bridge between the local `Color` enum threaded through diff rendering and
+/// the configurable per-side palette. Diff code only ever passes `Red` (removed)
+/// or `Green` (added); the catch-all arm exists to satisfy exhaustiveness.
+const fn side_of(color: Color) -> Side {
+    match color {
+        Color::Red => Side::Removed,
+        Color::Green => Side::Added,
+        _ => Side::Added,
+    }
+}
+
+fn side_diff_style(color: Color) -> StyleSpec {
+    let t = theme::theme();
+    match color {
+        Color::Red => t.style_removed,
+        Color::Green => t.style_added,
+        _ => StyleSpec::default(),
+    }
+}
+
+fn side_line_style(color: Color) -> StyleSpec {
+    let t = theme::theme();
+    match color {
+        Color::Red => t.style_line_removed,
+        Color::Green => t.style_line_added,
+        _ => StyleSpec::default(),
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct DiffHints<'a> {
@@ -517,15 +547,17 @@ pub(crate) fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) {
                     i += 2;
                     continue;
                 }
-                styles.print_fg(Color::Red);
-                println!("- {old_line}");
-                styles.print_reset();
+                let style = side_diff_style(Color::Red).without_underline().open(styles);
+                let marker = theme::theme().marker_for(Side::Removed, true);
+                println!("{style}{marker} {old_line}{}", styles.reset());
                 i += 1;
             }
             DiffResult::Right(r) => {
-                styles.print_fg(Color::Green);
-                println!("+ {r}");
-                styles.print_reset();
+                let style = side_diff_style(Color::Green)
+                    .without_underline()
+                    .open(styles);
+                let marker = theme::theme().marker_for(Side::Added, true);
+                println!("{style}{marker} {r}{}", styles.reset());
                 i += 1;
             }
         }
@@ -535,11 +567,26 @@ pub(crate) fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) {
 fn print_inline_diff(old_line: &str, new_line: &str, styles: Styles) {
     let mut out = String::new();
     let inline = inline_token_diff(old_line, new_line);
-    let _ = write!(out, "{}- {}", styles.fg(Color::Red), styles.reset());
+    let t = theme::theme();
+    let _ = write!(
+        out,
+        "{}{} {}",
+        side_diff_style(Color::Red).without_underline().open(styles),
+        t.marker_for(Side::Removed, true),
+        styles.reset(),
+    );
     write_inline_chars(&mut out, &inline, InlineSide::Old, styles);
     out.push('\n');
 
-    let _ = write!(out, "{}+ {}", styles.fg(Color::Green), styles.reset());
+    let _ = write!(
+        out,
+        "{}{} {}",
+        side_diff_style(Color::Green)
+            .without_underline()
+            .open(styles),
+        t.marker_for(Side::Added, true),
+        styles.reset(),
+    );
     write_inline_chars(&mut out, &inline, InlineSide::New, styles);
     out.push('\n');
     write_stdout(&out);
@@ -578,42 +625,41 @@ impl NumberedDiffWriter<'_, '_> {
                 || old_spans.is_some_and(|spans| !spans.is_empty())
                 || new_spans.is_some_and(|spans| !spans.is_empty())
             {
-                self.write_line_with_spans(old_line_no, '-', old_line, Color::Red, old_spans);
-                self.write_line_with_spans(new_line_no, '+', new_line, Color::Green, new_spans);
+                self.write_line_with_spans(old_line_no, old_line, Color::Red, old_spans);
+                self.write_line_with_spans(new_line_no, new_line, Color::Green, new_spans);
             } else if should_inline_pair_diff(old_line, new_line) {
                 let inline = inline_token_diff(old_line, new_line);
-                self.write_inline_line(old_line_no, '-', Color::Red, InlineSide::Old, &inline);
-                self.write_inline_line(new_line_no, '+', Color::Green, InlineSide::New, &inline);
+                self.write_inline_line(old_line_no, Color::Red, InlineSide::Old, &inline);
+                self.write_inline_line(new_line_no, Color::Green, InlineSide::New, &inline);
             } else {
-                self.write_line_with_spans(old_line_no, '-', old_line, Color::Red, old_spans);
-                self.write_line_with_spans(new_line_no, '+', new_line, Color::Green, new_spans);
+                self.write_line_with_spans(old_line_no, old_line, Color::Red, old_spans);
+                self.write_line_with_spans(new_line_no, new_line, Color::Green, new_spans);
             }
         }
         for (line_no, line) in &old_lines[paired..] {
-            self.write_line(*line_no, '-', line, Color::Red, SpanSide::Input);
+            self.write_line(*line_no, line, Color::Red, SpanSide::Input);
         }
         for (line_no, line) in &new_lines[paired..] {
-            self.write_line(*line_no, '+', line, Color::Green, SpanSide::Output);
+            self.write_line(*line_no, line, Color::Green, SpanSide::Output);
         }
     }
 
-    fn write_line(&mut self, line_no: usize, sign: char, line: &str, color: Color, side: SpanSide) {
+    fn write_line(&mut self, line_no: usize, line: &str, color: Color, side: SpanSide) {
         let spans = match side {
             SpanSide::Input => self.old_line_spans.get(&line_no),
             SpanSide::Output => self.new_line_spans.get(&line_no),
         };
-        self.write_line_with_spans(line_no, sign, line, color, spans);
+        self.write_line_with_spans(line_no, line, color, spans);
     }
 
     fn write_line_with_spans(
         &mut self,
         line_no: usize,
-        sign: char,
         line: &str,
         color: Color,
         spans: Option<&Vec<LocalSpan>>,
     ) {
-        self.write_prefix(line_no, sign, color);
+        self.write_prefix(line_no, color);
         match spans {
             Some(spans) if !spans.is_empty() => {
                 render_line_with_spans(self.out, line, spans, color, self.styles);
@@ -625,7 +671,7 @@ impl NumberedDiffWriter<'_, '_> {
                 let _ = write!(
                     self.out,
                     "{}{line}{}",
-                    self.styles.fg(color),
+                    side_diff_style(color).without_underline().open(self.styles),
                     self.styles.reset(),
                 );
             }
@@ -636,32 +682,33 @@ impl NumberedDiffWriter<'_, '_> {
     fn write_inline_line(
         &mut self,
         line_no: usize,
-        sign: char,
         color: Color,
         side: InlineSide,
         inline: &[TokenDiff<'_>],
     ) {
-        self.write_prefix(line_no, sign, color);
+        self.write_prefix(line_no, color);
         write_inline_chars(self.out, inline, side, self.styles);
         self.out.push('\n');
     }
 
-    fn write_prefix(&mut self, line_no: usize, sign: char, line_color: Color) {
+    fn write_prefix(&mut self, line_no: usize, line_color: Color) {
         let line_no_text = line_no.to_string();
         let padding = " ".repeat(self.width.saturating_sub(line_no_text.len()));
         let _ = write!(
             self.out,
-            "{}{}{}",
-            self.styles.dim(),
-            self.styles.fg(line_color),
+            "{}{}",
+            side_line_style(line_color)
+                .without_underline()
+                .open(self.styles),
             padding,
         );
         self.hyperlinks.write(self.out, line_no, &line_no_text);
         self.out.push_str(self.styles.reset());
-        if self.styles.is_plain() {
-            let _ = write!(self.out, "{sign} ");
-        } else {
+        let marker = theme::theme().marker_for(side_of(line_color), self.styles.is_plain());
+        if marker.is_empty() {
             self.out.push(' ');
+        } else {
+            let _ = write!(self.out, "{marker} ");
         }
     }
 }
@@ -784,9 +831,8 @@ fn write_balanced_change_block(
         } else {
             let _ = write!(
                 out,
-                "{}{}{own_tok}{}",
-                styles.fg(own_color),
-                styles.underline(),
+                "{}{own_tok}{}",
+                side_diff_style(own_color).open(styles),
                 styles.reset(),
             );
         }
@@ -797,9 +843,8 @@ fn write_underlined_tokens(out: &mut String, tokens: &[&str], color: Color, styl
     for token in tokens {
         let _ = write!(
             out,
-            "{}{}{token}{}",
-            styles.fg(color),
-            styles.underline(),
+            "{}{token}{}",
+            side_diff_style(color).open(styles),
             styles.reset(),
         );
     }
@@ -823,7 +868,7 @@ fn write_char_diff(out: &mut String, old: &str, new: &str, side: InlineSide, sty
             }
             (InlineSide::Old, DiffResult::Left(ch)) | (InlineSide::New, DiffResult::Right(ch)) => {
                 if !highlighting {
-                    let _ = write!(out, "{}{}", styles.fg(color), styles.underline());
+                    let _ = write!(out, "{}", side_diff_style(color).open(styles));
                     highlighting = true;
                 }
                 out.push(ch);
@@ -1081,7 +1126,12 @@ fn render_line_with_spans(
         .iter()
         .all(|s| line.is_char_boundary(s.start) && line.is_char_boundary(s.end))
     {
-        let _ = write!(out, "{}{line}{}", styles.fg(color), styles.reset());
+        let _ = write!(
+            out,
+            "{}{line}{}",
+            side_diff_style(color).without_underline().open(styles),
+            styles.reset()
+        );
         return;
     }
 
@@ -1096,9 +1146,8 @@ fn render_line_with_spans(
         out.push_str(&line[cursor..span.start]);
         let _ = write!(
             out,
-            "{}{}{}{}",
-            styles.fg(color),
-            styles.underline(),
+            "{}{}{}",
+            side_diff_style(color).open(styles),
             &line[span.start..span.end],
             styles.reset(),
         );
@@ -1254,9 +1303,9 @@ mod tests {
             new_line_spans: &new_line_spans,
         };
 
-        writer.write_line(1, '-', "abc", Color::Red, SpanSide::Input);
+        writer.write_line(1, "abc", Color::Red, SpanSide::Input);
 
-        assert_eq!(out, "\x1b[2m\x1b[31m1\x1b[m abc\n");
+        assert_eq!(out, "\x1b[31m\x1b[2m1\x1b[m abc\n");
     }
 
     #[test]
@@ -1283,10 +1332,10 @@ mod tests {
         assert_eq!(
             out,
             "\
-\x1b[2m\x1b[31m1\x1b[m old one
-\x1b[2m\x1b[32m1\x1b[m new one
-\x1b[2m\x1b[31m2\x1b[m old two
-\x1b[2m\x1b[32m2\x1b[m new two
+\x1b[31m\x1b[2m1\x1b[m old one
+\x1b[32m\x1b[2m1\x1b[m new one
+\x1b[31m\x1b[2m2\x1b[m old two
+\x1b[32m\x1b[2m2\x1b[m new two
 "
         );
     }

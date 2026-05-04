@@ -898,12 +898,12 @@ fn color_always_forces_rich_layout_through_pipe() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m bar \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m bar \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m bar \x1b[31m\x1b[4mfoo\x1b[m
+\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m bar \x1b[32m\x1b[4mbar\x1b[m
 
 \x1b[35mb.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
+\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
 
 \x1b[1m\x1b[33mWould perform 3 replacements in 2 files\x1b[m
 "
@@ -934,8 +934,8 @@ fn color_always_wraps_diff_text_in_red_and_green() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m line
-\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m line
+\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m line
+\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m line
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
 "
@@ -966,8 +966,8 @@ fn color_always_highlights_merged_token_replacements_at_char_granularity() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m github\x1b[31m\x1b[4m.\x1b[mworkflow
-\x1b[2m\x1b[32m1\x1b[m github\x1b[32m\x1b[4mb\x1b[mworkflow
+\x1b[31m\x1b[2m1\x1b[m github\x1b[31m\x1b[4m.\x1b[mworkflow
+\x1b[32m\x1b[2m1\x1b[m github\x1b[32m\x1b[4mb\x1b[mworkflow
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
 "
@@ -1037,10 +1037,10 @@ fn color_always_fast_path_handles_utf8_non_adjacent_lines() {
         String::from_utf8(output.stdout).unwrap(),
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m café \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[2m\x1b[32m1\x1b[m café \x1b[32m\x1b[4mbar\x1b[m
-\x1b[2m\x1b[31m3\x1b[m naïve \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[2m\x1b[32m3\x1b[m naïve \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31m\x1b[2m1\x1b[m café \x1b[31m\x1b[4mfoo\x1b[m
+\x1b[32m\x1b[2m1\x1b[m café \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31m\x1b[2m3\x1b[m naïve \x1b[31m\x1b[4mfoo\x1b[m
+\x1b[32m\x1b[2m3\x1b[m naïve \x1b[32m\x1b[4mbar\x1b[m
 
 \x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
 "
@@ -1074,10 +1074,10 @@ fn color_always_multi_expression_linewise_fast_path_preserves_layout() {
         String::from_utf8(output.stdout).unwrap(),
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mstatic\x1b[m café
-\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mSTATIC\x1b[m café
-\x1b[2m\x1b[31m3\x1b[m \x1b[31m\x1b[4mconst\x1b[m naïve
-\x1b[2m\x1b[32m3\x1b[m \x1b[32m\x1b[4mCONST\x1b[m naïve
+\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mstatic\x1b[m café
+\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mSTATIC\x1b[m café
+\x1b[31m\x1b[2m3\x1b[m \x1b[31m\x1b[4mconst\x1b[m naïve
+\x1b[32m\x1b[2m3\x1b[m \x1b[32m\x1b[4mCONST\x1b[m naïve
 
 \x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
 "
@@ -1112,10 +1112,10 @@ fn color_always_multi_expression_symbols_only_highlights_replacements() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m alpha\x1b[31m\x1b[4m.\x1b[mfoo
-\x1b[2m\x1b[32m1\x1b[m alpha\x1b[32m\x1b[4m:\x1b[mfoo
-\x1b[2m\x1b[31m2\x1b[m beta\x1b[31m\x1b[4m—\x1b[mgamma
-\x1b[2m\x1b[32m2\x1b[m beta\x1b[32m\x1b[4m-\x1b[mgamma
+\x1b[31m\x1b[2m1\x1b[m alpha\x1b[31m\x1b[4m.\x1b[mfoo
+\x1b[32m\x1b[2m1\x1b[m alpha\x1b[32m\x1b[4m:\x1b[mfoo
+\x1b[31m\x1b[2m2\x1b[m beta\x1b[31m\x1b[4m—\x1b[mgamma
+\x1b[32m\x1b[2m2\x1b[m beta\x1b[32m\x1b[4m-\x1b[mgamma
 
 \x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
 "
@@ -1150,10 +1150,10 @@ fn color_always_apply_multi_expression_symbols_only_highlights_replacements() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m alpha\x1b[31m\x1b[4m.\x1b[mfoo
-\x1b[2m\x1b[32m1\x1b[m alpha\x1b[32m\x1b[4m:\x1b[mfoo
-\x1b[2m\x1b[31m2\x1b[m beta\x1b[31m\x1b[4m—\x1b[mgamma
-\x1b[2m\x1b[32m2\x1b[m beta\x1b[32m\x1b[4m-\x1b[mgamma
+\x1b[31m\x1b[2m1\x1b[m alpha\x1b[31m\x1b[4m.\x1b[mfoo
+\x1b[32m\x1b[2m1\x1b[m alpha\x1b[32m\x1b[4m:\x1b[mfoo
+\x1b[31m\x1b[2m2\x1b[m beta\x1b[31m\x1b[4m—\x1b[mgamma
+\x1b[32m\x1b[2m2\x1b[m beta\x1b[32m\x1b[4m-\x1b[mgamma
 
 \x1b[1m\x1b[32mPerformed 2 replacements in 1 file\x1b[m
 "
@@ -1184,12 +1184,12 @@ fn color_always_multiline_span_fast_path_preserves_chained_utf8_context() {
         String::from_utf8(output.stdout).unwrap(),
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m α \x1b[31m\x1b[4mstatic\x1b[m ω
-\x1b[2m\x1b[32m1\x1b[m α \x1b[32m\x1b[4mSTATIC\x1b[m
-\x1b[2m\x1b[31m2\x1b[m β \x1b[31m\x1b[4mstatic\x1b[m δ
-\x1b[2m\x1b[32m2\x1b[m  ω
-\x1b[2m\x1b[32m3\x1b[m β \x1b[32m\x1b[4mSTATIC\x1b[m
-\x1b[2m\x1b[32m4\x1b[m  δ
+\x1b[31m\x1b[2m1\x1b[m α \x1b[31m\x1b[4mstatic\x1b[m ω
+\x1b[32m\x1b[2m1\x1b[m α \x1b[32m\x1b[4mSTATIC\x1b[m
+\x1b[31m\x1b[2m2\x1b[m β \x1b[31m\x1b[4mstatic\x1b[m δ
+\x1b[32m\x1b[2m2\x1b[m  ω
+\x1b[32m\x1b[2m3\x1b[m β \x1b[32m\x1b[4mSTATIC\x1b[m
+\x1b[32m\x1b[2m4\x1b[m  δ
 
 \x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
 "
@@ -1310,8 +1310,8 @@ fn color_always_outranks_no_color_env() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
+\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
 "
@@ -1370,10 +1370,132 @@ fn colour_alias_behaves_like_color() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
+\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+"
+    );
+}
+
+#[test]
+fn style_added_overrides_diff_color() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("a.txt"), "foo line\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            "--style-added=blue bold",
+            "foo",
+            "bar",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
+\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m line
+\x1b[32m\x1b[2m1\x1b[m \x1b[34m\x1b[1mbar\x1b[m line
+
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+"
+    );
+}
+
+#[test]
+fn marker_added_shows_explicit_string_even_when_colored() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("a.txt"), "foo line\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            "--marker-added=>>",
+            "--marker-removed=<<",
+            "foo",
+            "bar",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
+\x1b[31m\x1b[2m1\x1b[m<< \x1b[31m\x1b[4mfoo\x1b[m line
+\x1b[32m\x1b[2m1\x1b[m>> \x1b[32m\x1b[4mbar\x1b[m line
+
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+"
+    );
+}
+
+#[test]
+fn invalid_style_value_is_rejected() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("a.txt"), "foo\n");
+
+    let output = Command::new(REP)
+        .args(["-n", "--style-added=boold", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr,
+        "error: invalid style: unknown color or attribute: \"boold\"\n"
+    );
+}
+
+#[test]
+fn short_help_hides_style_section() {
+    let output = Command::new(REP).arg("-h").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.contains("Style"),
+        "short help should omit Style heading"
+    );
+    assert!(!stdout.contains("--style-added"));
+    assert!(!stdout.contains("--marker-added"));
+}
+
+#[test]
+fn long_help_shows_style_section_before_miscellaneous() {
+    let output = Command::new(REP).arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let style_start = stdout.find("Style\n").expect("Style heading present");
+    let misc_start = stdout[style_start..]
+        .find("Miscellaneous\n")
+        .map(|i| style_start + i)
+        .expect("Miscellaneous heading after Style");
+    assert_eq!(
+        &stdout[style_start..misc_start],
+        "\
+Style
+
+      --style-added <style>         Style for added lines
+      --style-removed <style>       Style for removed lines
+      --style-line-added <style>    Style for added line numbers
+      --style-line-removed <style>  Style for removed line numbers
+      --marker-added <str>          Marker before added lines
+      --marker-removed <str>        Marker before removed lines
+
 "
     );
 }
