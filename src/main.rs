@@ -39,8 +39,8 @@ use clap_complete::Shell;
 use diffy::DiffOptions;
 
 use crate::expressions::{
-    CompiledExpression, EXPR_SEP, apply_compiled_expressions, build_pre_filter_matcher,
-    byte_offsets_to_line_first_column, compile_expressions,
+    CompiledExpression, EXPR_SEP, Replacement, apply_compiled_expressions,
+    build_pre_filter_matcher, byte_offsets_to_line_first_column, compile_expressions,
 };
 use crate::ui::Color;
 use crate::ui::ColorChoice;
@@ -55,6 +55,9 @@ struct ReplacementResult {
     /// fill `{column}` in per-line hyperlinks. Empty when position tracking
     /// was disabled (non-interactive output).
     columns: std::collections::HashMap<usize, usize>,
+    /// Per-replacement input/output spans, populated when span tracking is
+    /// enabled and the run uses a single expression. Drives inline highlight.
+    spans: Vec<Replacement>,
 }
 
 #[derive(Parser)]
@@ -783,14 +786,20 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
 
     let stdout_terminal = std::io::stdout().is_terminal();
+    let force_color = ui::color_choice() == ui::ColorChoice::Always;
+    let will_render_color = stdout_terminal || force_color;
     let hyperlink_format = cli.hyperlink_format.as_deref().and_then(hyperlink_format);
-    // Position tracking is paid for only when rendered hyperlinks can consume
-    // it. Line-only formats still get hyperlinks without the per-match Vec push.
-    let track_positions = stdout_terminal
-        && !cli.quiet
-        && hyperlink_format
-            .as_deref()
-            .is_some_and(hyperlink_format_uses_column);
+    // Span tracking pays for itself when (a) hyperlinks need a per-line
+    // first-column for `{column}` substitution, or (b) we'll render an inline
+    // diff and want span-driven highlighting. Spans from chained expressions
+    // are not valid against the final output buffer (later expressions shift
+    // earlier ones' offsets), so single-expression runs are the only ones
+    // that get inline highlighting from spans.
+    let needs_first_column = hyperlink_format
+        .as_deref()
+        .is_some_and(hyperlink_format_uses_column);
+    let render_inline_diff = will_render_color && !cli.quiet && expressions.len() == 1;
+    let track_spans = (stdout_terminal && !cli.quiet && needs_first_column) || render_inline_diff;
 
     let dirs = cli.dirs();
     let mut builder = scan::walk_builder_with_file_set(&dirs, cli.file_set())?;
@@ -831,12 +840,13 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 else {
                     return WalkState::Continue;
                 };
-                let (updated, count, positions) =
-                    apply_compiled_expressions(&contents, &expressions, track_positions);
+                let (updated, count, spans) =
+                    apply_compiled_expressions(&contents, &expressions, track_spans);
                 if count == 0 {
                     return WalkState::Continue;
                 }
-                let columns = byte_offsets_to_line_first_column(&contents, &positions);
+                let input_starts: Vec<usize> = spans.iter().map(|s| s.input_start).collect();
+                let columns = byte_offsets_to_line_first_column(&contents, &input_starts);
                 let diff = match (
                     String::from_utf8(contents.clone()),
                     String::from_utf8(updated.as_ref().to_vec()),
@@ -861,6 +871,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                         count,
                         diff,
                         columns,
+                        spans: if render_inline_diff { spans } else { Vec::new() },
                     })
                 };
                 if tx.send(payload).is_err() {
@@ -1023,6 +1034,7 @@ fn print_results(
             diff::print_file_line_diff(
                 old,
                 new,
+                &result.spans,
                 styles,
                 hyperlink_format,
                 &result.link_path,

@@ -1,14 +1,18 @@
-// Diff rendering: tokenization, inline char/word diff, numbered file diff.
+// Diff rendering: numbered file-level diff for the dry-run / apply path,
+// plus a hunk-level diff for the interactive preview.
 //
-// Used by both the dry-run path (`main.rs`) and the interactive patch
-// prompt (`interactive.rs`). Output is buffered into a single `String` per
-// file and emitted in one `print!` to amortize stdout-lock overhead.
+// Inline highlighting in the numbered diff is *span-driven*: the input and
+// output byte spans of every replacement are recorded by the replace step
+// (`apply_compiled_expressions`) and threaded through here verbatim. There is
+// no token-level or character-level guessing about what changed - the
+// replacer is the source of truth for that.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
 
 use diff::Result as DiffResult;
 
+use crate::expressions::Replacement;
 use crate::ui::Color;
 use crate::ui::Styles;
 
@@ -53,6 +57,7 @@ impl<'a> Hyperlinks<'a> {
 pub(crate) fn print_file_line_diff(
     old: &str,
     new: &str,
+    spans: &[Replacement],
     styles: Styles,
     hyperlink_format: Option<&str>,
     hyperlink_path: &str,
@@ -61,6 +66,9 @@ pub(crate) fn print_file_line_diff(
     let diffs = diff::lines(old, new);
     let columns = (!columns.is_empty()).then_some(columns);
     let hyperlinks = Hyperlinks::new(hyperlink_format, hyperlink_path, columns);
+    let old_line_spans = group_spans_by_line(old, spans, SpanSide::Input);
+    let new_line_spans = group_spans_by_line(new, spans, SpanSide::Output);
+    let span_highlighting = !spans.is_empty();
     let mut old_line_no = 1;
     let mut new_line_no = 1;
     let mut i = 0;
@@ -109,6 +117,9 @@ pub(crate) fn print_file_line_diff(
         width,
         styles,
         hyperlinks,
+        span_highlighting,
+        old_line_spans: &old_line_spans,
+        new_line_spans: &new_line_spans,
     };
     for (old_lines, new_lines) in blocks {
         writer.write_block(&old_lines, &new_lines);
@@ -173,6 +184,15 @@ struct NumberedDiffWriter<'a, 'b> {
     width: usize,
     styles: Styles,
     hyperlinks: Hyperlinks<'b>,
+    /// True when replacements were tracked for this file. Lines without a
+    /// visible span on this side are rendered plainly instead of whole-line
+    /// colored; that represents insertions on the output side and deletions on
+    /// the input side without emitting invisible zero-width highlights.
+    span_highlighting: bool,
+    /// 1-indexed line -> sorted local-byte spans for input (old) lines.
+    old_line_spans: &'a std::collections::HashMap<usize, Vec<LocalSpan>>,
+    /// 1-indexed line -> sorted local-byte spans for output (new) lines.
+    new_line_spans: &'a std::collections::HashMap<usize, Vec<LocalSpan>>,
 }
 
 impl NumberedDiffWriter<'_, '_> {
@@ -181,41 +201,39 @@ impl NumberedDiffWriter<'_, '_> {
         for idx in 0..paired {
             let (old_line_no, old_line) = old_lines[idx];
             let (new_line_no, new_line) = new_lines[idx];
-            self.write_inline(old_line_no, new_line_no, old_line, new_line);
+            self.write_line(old_line_no, '-', old_line, Color::Red, SpanSide::Input);
+            self.write_line(new_line_no, '+', new_line, Color::Green, SpanSide::Output);
         }
         for (line_no, line) in &old_lines[paired..] {
-            self.write_line(*line_no, '-', line, Color::Red);
+            self.write_line(*line_no, '-', line, Color::Red, SpanSide::Input);
         }
         for (line_no, line) in &new_lines[paired..] {
-            self.write_line(*line_no, '+', line, Color::Green);
+            self.write_line(*line_no, '+', line, Color::Green, SpanSide::Output);
         }
     }
 
-    fn write_inline(
-        &mut self,
-        old_line_no: usize,
-        new_line_no: usize,
-        old_line: &str,
-        new_line: &str,
-    ) {
-        let inline = inline_token_diff(old_line, new_line);
-        self.write_prefix(old_line_no, '-', Color::Red);
-        write_inline_chars(self.out, &inline, InlineSide::Old, self.styles);
-        self.out.push('\n');
-
-        self.write_prefix(new_line_no, '+', Color::Green);
-        write_inline_chars(self.out, &inline, InlineSide::New, self.styles);
-        self.out.push('\n');
-    }
-
-    fn write_line(&mut self, line_no: usize, sign: char, line: &str, diff_color: Color) {
-        self.write_prefix(line_no, sign, diff_color);
-        let _ = write!(
-            self.out,
-            "{}{line}{}",
-            self.styles.fg(diff_color),
-            self.styles.reset(),
-        );
+    fn write_line(&mut self, line_no: usize, sign: char, line: &str, color: Color, side: SpanSide) {
+        self.write_prefix(line_no, sign, color);
+        let spans = match side {
+            SpanSide::Input => self.old_line_spans.get(&line_no),
+            SpanSide::Output => self.new_line_spans.get(&line_no),
+        };
+        match spans {
+            Some(spans) if !spans.is_empty() => {
+                render_line_with_spans(self.out, line, spans, color, self.styles);
+            }
+            _ if self.span_highlighting => {
+                self.out.push_str(line);
+            }
+            _ => {
+                let _ = write!(
+                    self.out,
+                    "{}{line}{}",
+                    self.styles.fg(color),
+                    self.styles.reset(),
+                );
+            }
+        }
         self.out.push('\n');
     }
 
@@ -547,88 +565,289 @@ fn is_subword_boundary(prev: char, cur: char, next: Option<char>) -> bool {
     false
 }
 
+/// A span trimmed to a single line, expressed in line-local byte offsets
+/// relative to the start of the line text (which excludes the trailing `\n`).
+#[derive(Clone, Copy, Debug)]
+struct LocalSpan {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy)]
+enum SpanSide {
+    Input,
+    Output,
+}
+
+/// Walk `text` once, splitting each replacement span at every `\n` it crosses
+/// and bucketing per-line slices into a 1-indexed `line -> Vec<LocalSpan>`
+/// map. Empty spans (insertions on input side, deletions on output side) are
+/// dropped: an empty underline is invisible and would emit useless escapes.
+fn group_spans_by_line(
+    text: &str,
+    spans: &[Replacement],
+    side: SpanSide,
+) -> std::collections::HashMap<usize, Vec<LocalSpan>> {
+    let mut map: std::collections::HashMap<usize, Vec<LocalSpan>> =
+        std::collections::HashMap::new();
+    if spans.is_empty() {
+        return map;
+    }
+
+    let bytes = text.as_bytes();
+    // Compute the start byte of each line lazily as we iterate spans in
+    // order. Because spans from `apply_compiled_expressions` are produced
+    // left-to-right by the regex engine, they're already sorted by start
+    // offset on both sides; we exploit that to walk the buffer once.
+    let mut line_no: usize = 1;
+    let mut line_start: usize = 0;
+
+    let mut sorted: Vec<(usize, usize)> = spans
+        .iter()
+        .map(|s| match side {
+            SpanSide::Input => (s.input_start, s.input_end()),
+            SpanSide::Output => (s.output_start, s.output_end()),
+        })
+        .filter(|(start, end)| end > start)
+        .collect();
+    sorted.sort_unstable_by_key(|&(start, _)| start);
+
+    for (mut start, end) in sorted {
+        // Advance past lines that end before the span starts.
+        while line_start < bytes.len() {
+            let nl = memchr::memchr(b'\n', &bytes[line_start..]).map(|i| line_start + i);
+            match nl {
+                Some(nl_pos) if nl_pos < start => {
+                    line_no += 1;
+                    line_start = nl_pos + 1;
+                }
+                _ => break,
+            }
+        }
+        // Now `line_start <= start` and either there is no further newline
+        // before `start` or it sits past it. Slice the span line by line.
+        while start < end {
+            let nl = memchr::memchr(b'\n', &bytes[line_start..]).map(|i| line_start + i);
+            let line_end_byte = nl.unwrap_or(bytes.len());
+            let chunk_end = end.min(line_end_byte);
+            if chunk_end > start {
+                let local_start = start - line_start;
+                let local_end = chunk_end - line_start;
+                map.entry(line_no).or_default().push(LocalSpan {
+                    start: local_start,
+                    end: local_end,
+                });
+            }
+            if chunk_end == end {
+                break;
+            }
+            // Crossed a newline: advance to the next line and continue with
+            // whatever's left of the span.
+            debug_assert!(nl.is_some(), "chunk_end < end requires a newline ahead");
+            line_no += 1;
+            line_start = line_end_byte + 1;
+            start = line_start;
+        }
+    }
+
+    map
+}
+
+/// Render one line, underlining every span in `color`. Spans are assumed
+/// sorted and non-overlapping. UTF-8 boundaries are validated before
+/// slicing; if a span lands mid-codepoint (possible when `regex::bytes`
+/// matches non-UTF-8 byte sequences in a file that's otherwise valid UTF-8),
+/// we fall back to coloring the whole line so the user still sees that it
+/// changed - at the cost of inline precision on that one line.
+fn render_line_with_spans(
+    out: &mut String,
+    line: &str,
+    spans: &[LocalSpan],
+    color: Color,
+    styles: Styles,
+) {
+    if !spans
+        .iter()
+        .all(|s| line.is_char_boundary(s.start) && line.is_char_boundary(s.end))
+    {
+        let _ = write!(out, "{}{line}{}", styles.fg(color), styles.reset());
+        return;
+    }
+
+    let mut cursor = 0;
+    for span in spans {
+        if span.start < cursor {
+            // Defensive: overlapping or out-of-order spans shouldn't happen
+            // (the replace step produces left-to-right non-overlapping
+            // matches), but skip rather than panic if they do.
+            continue;
+        }
+        out.push_str(&line[cursor..span.start]);
+        let _ = write!(
+            out,
+            "{}{}{}{}",
+            styles.fg(color),
+            styles.underline(),
+            &line[span.start..span.end],
+            styles.reset(),
+        );
+        cursor = span.end;
+    }
+    out.push_str(&line[cursor..]);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        InlineSide, inline_token_diff, should_intra_word_diff, tokenize, write_inline_chars,
-    };
-    use crate::ui::Styles;
+    use super::*;
 
-    #[test]
-    fn tokenize_handles_empty_and_whitespace() {
-        assert!(tokenize("").is_empty());
-        assert_eq!(tokenize("   "), vec!["   "]);
-        assert_eq!(tokenize("a"), vec!["a"]);
+    fn rep(
+        input_start: usize,
+        input_len: usize,
+        output_start: usize,
+        output_len: usize,
+    ) -> Replacement {
+        Replacement {
+            input_start,
+            input_len,
+            output_start,
+            output_len,
+        }
     }
 
     #[test]
-    fn tokenize_splits_punctuation_each_to_its_own_token() {
-        assert_eq!(tokenize(".gitignore"), vec![".", "gitignore"]);
-        assert_eq!(tokenize("a/b"), vec!["a", "/", "b"]);
+    fn group_spans_by_line_buckets_input_spans_per_line() {
+        // "foo\nbar\nbaz\n" - replace "foo"@0 and "bar"@4.
+        let text = "foo\nbar\nbaz\n";
+        let spans = vec![rep(0, 3, 0, 3), rep(4, 3, 4, 3)];
+        let map = group_spans_by_line(text, &spans, SpanSide::Input);
+        assert_eq!(map.get(&1).unwrap().len(), 1);
+        assert_eq!(map.get(&1).unwrap()[0].start, 0);
+        assert_eq!(map.get(&1).unwrap()[0].end, 3);
+        assert_eq!(map.get(&2).unwrap()[0].start, 0);
+        assert_eq!(map.get(&2).unwrap()[0].end, 3);
+        assert!(map.get(&3).is_none());
+    }
+
+    #[test]
+    fn group_spans_by_line_handles_multi_line_match_by_splitting() {
+        // Span covers "oo\nba" (bytes 1..6 of "foo\nbar\nbaz") - two lines.
+        let text = "foo\nbar\nbaz";
+        let spans = vec![rep(1, 5, 1, 5)];
+        let map = group_spans_by_line(text, &spans, SpanSide::Input);
+        // line 1: "foo" - span covers bytes 1..3 locally.
+        let l1 = &map[&1];
+        assert_eq!(l1.len(), 1);
+        assert_eq!((l1[0].start, l1[0].end), (1, 3));
+        // line 2: "bar" - span covers bytes 0..2 locally.
+        let l2 = &map[&2];
+        assert_eq!(l2.len(), 1);
+        assert_eq!((l2[0].start, l2[0].end), (0, 2));
+    }
+
+    #[test]
+    fn group_spans_by_line_drops_zero_length_spans() {
+        let text = "foo\nbar";
+        // Pure deletion on input (output_len=0 doesn't matter for input side
+        // mapping); pure insertion on output side - both should drop because
+        // the relevant side has zero length.
+        let deletion = rep(0, 0, 0, 3); // input zero-length: skipped from input map
+        let insertion = rep(0, 3, 0, 0); // output zero-length: skipped from output map
+        let input_map = group_spans_by_line(text, &[deletion], SpanSide::Input);
+        assert!(input_map.is_empty());
+        let output_map = group_spans_by_line(text, &[insertion], SpanSide::Output);
+        assert!(output_map.is_empty());
+    }
+
+    #[test]
+    fn render_line_with_spans_underlines_each_span() {
+        let line = "output.status.success";
+        let spans = vec![
+            LocalSpan { start: 6, end: 7 },
+            LocalSpan { start: 13, end: 14 },
+        ];
+        let mut out = String::new();
+        render_line_with_spans(&mut out, line, &spans, Color::Red, Styles::ansi());
         assert_eq!(
-            tokenize(".git/info/exclude"),
-            vec![".", "git", "/", "info", "/", "exclude"],
+            out,
+            "output\x1b[31m\x1b[4m.\x1b[mstatus\x1b[31m\x1b[4m.\x1b[msuccess",
         );
     }
 
     #[test]
-    fn tokenize_splits_subwords() {
-        assert_eq!(tokenize("getUserName"), vec!["get", "User", "Name"]);
-        assert_eq!(tokenize("HTTPServer"), vec!["HTTP", "Server"]);
-        assert_eq!(tokenize("utf8"), vec!["utf", "8"]);
-        // Trailing-acronym oddity: lookahead splits before "Ps", so HTTPs
-        // tokenizes as ["HTT", "Ps"]. Documented limitation, not a regression.
-        assert_eq!(tokenize("HTTPs"), vec!["HTT", "Ps"]);
+    fn render_line_with_spans_falls_back_when_span_lands_mid_codepoint() {
+        // "café" - 'é' is 2 bytes (0xC3 0xA9) at byte offset 3..5.
+        // A span covering only byte 4 lands mid-codepoint and would panic
+        // when slicing as `&str`; instead we color the whole line.
+        let line = "café";
+        let spans = vec![LocalSpan { start: 4, end: 5 }];
+        let mut out = String::new();
+        render_line_with_spans(&mut out, line, &spans, Color::Red, Styles::ansi());
+        assert_eq!(out, "\x1b[31mcafé\x1b[m");
     }
 
     #[test]
-    fn tokenize_handles_multibyte_word_chars() {
-        // Each token slice must land on a UTF-8 boundary.
-        let toks = tokenize("café-naïve");
-        assert_eq!(toks, vec!["café", "-", "naïve"]);
+    fn render_line_with_spans_with_no_spans_writes_nothing_extra() {
+        let line = "unchanged";
+        let mut out = String::new();
+        render_line_with_spans(&mut out, line, &[], Color::Green, Styles::ansi());
+        assert_eq!(out, "unchanged");
     }
 
     #[test]
-    fn tokenize_keeps_leading_and_trailing_punctuation() {
-        assert_eq!(tokenize("(foo)"), vec!["(", "foo", ")"]);
-        assert_eq!(tokenize("  ,a"), vec!["  ", ",", "a"]);
+    fn numbered_writer_leaves_empty_side_plain_when_span_highlighting_is_active() {
+        let mut out = String::new();
+        let old_line_spans = std::collections::HashMap::new();
+        let new_line_spans = std::collections::HashMap::new();
+        let columns = std::collections::HashMap::new();
+        let mut writer = NumberedDiffWriter {
+            out: &mut out,
+            width: 1,
+            styles: Styles::ansi(),
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns)),
+            span_highlighting: true,
+            old_line_spans: &old_line_spans,
+            new_line_spans: &new_line_spans,
+        };
+
+        writer.write_line(1, '-', "abc", Color::Red, SpanSide::Input);
+
+        assert_eq!(out, "\x1b[2m\x1b[31m1\x1b[m abc\n");
     }
 
     #[test]
-    fn intra_word_diff_gate_accepts_clean_runs() {
-        // Single contiguous changed run on each side: char-diff is clean.
-        assert!(should_intra_word_diff("Id", "Ip")); // d -> p
-        assert!(should_intra_word_diff("a", "b")); // a -> b
-        assert!(should_intra_word_diff("for", "bar")); // fo -> ba, shared trailing r
-        assert!(should_intra_word_diff("Identifier", "Id")); // entifier dropped
-        assert!(should_intra_word_diff("Name", "Names")); // s appended
-        assert!(should_intra_word_diff("format", "barmat")); // fo -> ba, shared rmat
+    fn numbered_writer_pairs_old_and_new_lines_positionally() {
+        let mut out = String::new();
+        let old_line_spans = std::collections::HashMap::new();
+        let new_line_spans = std::collections::HashMap::new();
+        let columns = std::collections::HashMap::new();
+        let mut writer = NumberedDiffWriter {
+            out: &mut out,
+            width: 1,
+            styles: Styles::ansi(),
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns)),
+            span_highlighting: true,
+            old_line_spans: &old_line_spans,
+            new_line_spans: &new_line_spans,
+        };
+
+        writer.write_block(
+            &[(1, "old one"), (2, "old two")],
+            &[(1, "new one"), (2, "new two")],
+        );
+
+        assert_eq!(
+            out,
+            "\
+\x1b[2m\x1b[31m1\x1b[m old one
+\x1b[2m\x1b[32m1\x1b[m new one
+\x1b[2m\x1b[31m2\x1b[m old two
+\x1b[2m\x1b[32m2\x1b[m new two
+"
+        );
     }
 
     #[test]
-    fn intra_word_diff_gate_rejects_speckled_pairs() {
-        // `cursor` -> `code`: shared `c` and `o` form a speckled old side.
-        assert!(!should_intra_word_diff("cursor", "code"));
-    }
-
-    #[test]
-    fn intra_word_diff_gate_rejects_non_word_kinds() {
-        // Whitespace and symbols are never intra-word diffed.
-        assert!(!should_intra_word_diff(" ", " "));
-        assert!(!should_intra_word_diff(".", "."));
-        assert!(!should_intra_word_diff("foo", "."));
-    }
-
-    #[test]
-    fn intra_word_diff_gate_rejects_pathologically_long_tokens() {
-        // Length cap defangs O(n*m) on multi-KB single tokens.
-        let long_a = "a".repeat(2048);
-        let long_b = "a".repeat(2048);
-        assert!(!should_intra_word_diff(&long_a, &long_b));
-    }
-
-    #[test]
-    fn unbalanced_token_block_highlights_only_changed_chars_when_clean() {
+    fn interactive_inline_diff_helpers_still_highlight_small_token_changes() {
         let inline = inline_token_diff("github.workflow", "githubbworkflow");
 
         let mut old = String::new();

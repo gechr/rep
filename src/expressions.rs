@@ -53,53 +53,88 @@ pub(crate) enum BulkReplacer {
     Smart(std::sync::Arc<std::collections::HashMap<String, String>>),
 }
 
-/// Records the byte offset of each match against the input, when `Some`.
-/// Used by `apply_compiled_expressions` to thread match positions out for
-/// per-line `{column}` substitution in hyperlinks.
-fn record_position(positions: &mut Option<&mut Vec<usize>>, caps: &regex::bytes::Captures<'_>) {
-    if let Some(p) = positions {
-        p.push(caps.get(0).expect("full match present").start());
+/// Byte-level record of one replacement: the span it consumed in the input
+/// and the span it produced in the output. Drives inline highlighting in
+/// `print_file_line_diff` directly from the source-of-truth replace operation,
+/// avoiding any post-hoc diff guessing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Replacement {
+    pub(crate) input_start: usize,
+    pub(crate) input_len: usize,
+    pub(crate) output_start: usize,
+    pub(crate) output_len: usize,
+}
+
+impl Replacement {
+    pub(crate) const fn input_end(&self) -> usize {
+        self.input_start + self.input_len
+    }
+
+    pub(crate) const fn output_end(&self) -> usize {
+        self.output_start + self.output_len
+    }
+}
+
+/// Records the input and output spans of a single replacement, when `Some`.
+/// `dst_before` is `dst.len()` captured before the replacer wrote the
+/// replacement bytes; `dst.len()` after the write gives the output length.
+fn record_span(
+    spans: &mut Option<&mut Vec<Replacement>>,
+    caps: &regex::bytes::Captures<'_>,
+    dst_before: usize,
+    dst_after: usize,
+) {
+    if let Some(s) = spans {
+        let m = caps.get(0).expect("full match present");
+        s.push(Replacement {
+            input_start: m.start(),
+            input_len: m.end() - m.start(),
+            output_start: dst_before,
+            output_len: dst_after - dst_before,
+        });
     }
 }
 
 struct CountingLiteralReplacer<'a> {
     rep: &'a [u8],
     count: usize,
-    positions: Option<&'a mut Vec<usize>>,
+    spans: Option<&'a mut Vec<Replacement>>,
 }
 
 impl regex::bytes::Replacer for CountingLiteralReplacer<'_> {
     fn replace_append(&mut self, caps: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
         self.count += 1;
-        record_position(&mut self.positions, caps);
+        let before = dst.len();
         dst.extend_from_slice(self.rep);
+        record_span(&mut self.spans, caps, before, dst.len());
     }
 }
 
 struct CountingRegexReplacer<'a> {
     subst: &'a [u8],
     count: usize,
-    positions: Option<&'a mut Vec<usize>>,
+    spans: Option<&'a mut Vec<Replacement>>,
 }
 
 impl regex::bytes::Replacer for CountingRegexReplacer<'_> {
     fn replace_append(&mut self, caps: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
         self.count += 1;
-        record_position(&mut self.positions, caps);
+        let before = dst.len();
         caps.expand(self.subst, dst);
+        record_span(&mut self.spans, caps, before, dst.len());
     }
 }
 
 struct CountingSmartReplacer<'a> {
     map: &'a std::collections::HashMap<String, String>,
     count: usize,
-    positions: Option<&'a mut Vec<usize>>,
+    spans: Option<&'a mut Vec<Replacement>>,
 }
 
 impl regex::bytes::Replacer for CountingSmartReplacer<'_> {
     fn replace_append(&mut self, caps: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
         self.count += 1;
-        record_position(&mut self.positions, caps);
+        let before = dst.len();
         let matched = caps.get(0).expect("full regex match is always present");
         // Smart-replace patterns are built from case conversions of
         // the user's find string. Those are always valid UTF-8, so every
@@ -113,6 +148,7 @@ impl regex::bytes::Replacer for CountingSmartReplacer<'_> {
                 .expect("smart replacer map must contain every regex alternative")
                 .as_bytes(),
         );
+        record_span(&mut self.spans, caps, before, dst.len());
     }
 }
 
@@ -440,22 +476,27 @@ pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> 
 pub(crate) fn apply_compiled_expressions<'a>(
     contents: &'a [u8],
     expressions: &[CompiledExpression],
-    track_positions: bool,
-) -> (Cow<'a, [u8]>, usize, Vec<usize>) {
+    track_spans: bool,
+) -> (Cow<'a, [u8]>, usize, Vec<Replacement>) {
     use regex::bytes::Replacer as _;
     let mut current: Cow<'a, [u8]> = Cow::Borrowed(contents);
     let mut replacements = 0;
-    let mut positions: Vec<usize> = Vec::new();
+    let mut spans: Vec<Replacement> = Vec::new();
 
     for (idx, expr) in expressions.iter().enumerate() {
-        let positions_ref = (track_positions && idx == 0).then_some(&mut positions);
+        // Spans are captured only against the original input (`idx == 0`).
+        // Later expressions operate on the previous expression's output, so
+        // their spans are not directly meaningful against the final buffer.
+        // Callers that need fully accurate inline highlighting check
+        // `expressions.len() == 1` before consuming spans for that purpose.
+        let spans_ref = (track_spans && idx == 0).then_some(&mut spans);
 
         let (replaced, count) = match &expr.bulk {
             BulkReplacer::Literal(rep) => {
                 let mut rep = CountingLiteralReplacer {
                     rep: rep.as_bytes(),
                     count: 0,
-                    positions: positions_ref,
+                    spans: spans_ref,
                 };
                 let out = expr.bytes_regex.replace_all(&current, rep.by_ref());
                 (out, rep.count)
@@ -464,7 +505,7 @@ pub(crate) fn apply_compiled_expressions<'a>(
                 let mut rep = CountingRegexReplacer {
                     subst: subst.as_bytes(),
                     count: 0,
-                    positions: positions_ref,
+                    spans: spans_ref,
                 };
                 let out = expr.bytes_regex.replace_all(&current, rep.by_ref());
                 (out, rep.count)
@@ -473,7 +514,7 @@ pub(crate) fn apply_compiled_expressions<'a>(
                 let mut rep = CountingSmartReplacer {
                     map,
                     count: 0,
-                    positions: positions_ref,
+                    spans: spans_ref,
                 };
                 let out = expr.bytes_regex.replace_all(&current, rep.by_ref());
                 (out, rep.count)
@@ -485,7 +526,7 @@ pub(crate) fn apply_compiled_expressions<'a>(
         }
     }
 
-    (current, replacements, positions)
+    (current, replacements, spans)
 }
 
 /// Walks `input` once, mapping a sorted slice of byte offsets to the
@@ -577,24 +618,69 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_compiled_expressions_returns_positions_when_tracking_enabled() {
+    fn test_apply_compiled_expressions_returns_spans_when_tracking_enabled() {
         let cli = parse_cli(&["rep", "foo", "bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         // "foo" appears at byte offsets 0 and 8 in "foo bar\nfoo baz\n".
-        let (_out, count, positions) =
+        // Each match is 3 bytes ("foo") and produces 3 bytes ("bar"), so
+        // input/output offsets line up.
+        let (_out, count, spans) =
             apply_compiled_expressions(b"foo bar\nfoo baz\n", &expressions, true);
         assert_eq!(count, 2);
-        assert_eq!(positions, vec![0, 8]);
+        assert_eq!(
+            spans,
+            vec![
+                Replacement {
+                    input_start: 0,
+                    input_len: 3,
+                    output_start: 0,
+                    output_len: 3,
+                },
+                Replacement {
+                    input_start: 8,
+                    input_len: 3,
+                    output_start: 8,
+                    output_len: 3,
+                },
+            ]
+        );
     }
 
     #[test]
-    fn test_apply_compiled_expressions_skips_positions_when_tracking_disabled() {
+    fn test_apply_compiled_expressions_skips_spans_when_tracking_disabled() {
         let cli = parse_cli(&["rep", "foo", "bar"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (_out, count, positions) =
+        let (_out, count, spans) =
             apply_compiled_expressions(b"foo bar\nfoo baz\n", &expressions, false);
         assert_eq!(count, 2);
-        assert!(positions.is_empty());
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn test_apply_compiled_expressions_tracks_output_offsets_when_lengths_differ() {
+        // Replacement is longer than the match, so output offsets shift past
+        // the second match relative to input offsets.
+        let cli = parse_cli(&["rep", "ab", "xyz"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (_out, count, spans) = apply_compiled_expressions(b"ab cd ab", &expressions, true);
+        assert_eq!(count, 2);
+        assert_eq!(
+            spans,
+            vec![
+                Replacement {
+                    input_start: 0,
+                    input_len: 2,
+                    output_start: 0,
+                    output_len: 3,
+                },
+                Replacement {
+                    input_start: 6,
+                    input_len: 2,
+                    output_start: 7,
+                    output_len: 3,
+                },
+            ]
+        );
     }
 
     fn apply_str<'a>(

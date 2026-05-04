@@ -974,6 +974,83 @@ fn color_always_highlights_merged_token_replacements_at_char_granularity() {
     );
 }
 
+/// Multiple replacements on one line where the result fuses adjacent word
+/// tokens (e.g. `output.status.success` -> `outputbstatusbsuccess`). Inline
+/// highlight must mark only the actual replacement chars on each side, not
+/// the surrounding tokens, and must be symmetric across sides.
+#[test]
+fn color_always_highlights_only_changed_chars_for_multi_match_lines() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "output.status.success\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            ".",
+            "b",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("output\x1b[31m\x1b[4m.\x1b[mstatus\x1b[31m\x1b[4m.\x1b[msuccess",),
+        "old line should underline only the two replaced dots: {stdout:?}",
+    );
+    assert!(
+        stdout.contains("output\x1b[32m\x1b[4mb\x1b[mstatus\x1b[32m\x1b[4mb\x1b[msuccess",),
+        "new line should underline only the two replacement b's: {stdout:?}",
+    );
+    // Negative: the surrounding word tokens must remain uncolored - earlier
+    // LCS-based code colored the entire merged token on the new side.
+    assert!(
+        !stdout.contains("\x1b[32m\x1b[4moutputbstatusbsuccess"),
+        "new line must not highlight the whole merged word: {stdout:?}",
+    );
+}
+
+/// N-replacement symmetry: replacing `.` with `b` in `a.b.c.d.e.f` must
+/// produce five single-char highlights on each side. LCS-based highlighting
+/// would absorb a literal `b` into a "shared" run on the new side and mis-
+/// align the highlights, producing an asymmetric `bb` blob.
+#[test]
+fn color_always_highlights_each_replacement_symmetrically() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "a.b.c.d.e.f\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            ".",
+            "b",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // Five `.` underlines on the old line, five `b` underlines on the new.
+    let old_marks = stdout.matches("\x1b[31m\x1b[4m.\x1b[m").count();
+    let new_marks = stdout.matches("\x1b[32m\x1b[4mb\x1b[m").count();
+    assert_eq!(
+        old_marks, 5,
+        "expected 5 dot highlights, got {old_marks} in {stdout:?}"
+    );
+    assert_eq!(
+        new_marks, 5,
+        "expected 5 b highlights, got {new_marks} in {stdout:?}"
+    );
+}
+
 #[test]
 fn color_never_keeps_patch_format_through_pipe() {
     let dir = tempdir().unwrap();
