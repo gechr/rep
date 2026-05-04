@@ -1047,6 +1047,43 @@ fn color_always_fast_path_handles_utf8_non_adjacent_lines() {
     );
 }
 
+#[test]
+fn color_always_multi_expression_linewise_fast_path_preserves_layout() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "static café\nkeep\nconst naïve\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            "-e",
+            "static",
+            "STATIC",
+            "-e",
+            "const",
+            "CONST",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
+\x1b[2m\x1b[31m1\x1b[m \x1b[31mstatic café\x1b[m
+\x1b[2m\x1b[32m1\x1b[m \x1b[32mSTATIC café\x1b[m
+\x1b[2m\x1b[31m3\x1b[m \x1b[31mconst naïve\x1b[m
+\x1b[2m\x1b[32m3\x1b[m \x1b[32mCONST naïve\x1b[m
+
+\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
+"
+    );
+}
+
 /// N-replacement symmetry: replacing `.` with `b` in `a.b.c.d.e.f` must
 /// produce five single-char highlights on each side. LCS-based highlighting
 /// would absorb a literal `b` into a "shared" run on the new side and mis-

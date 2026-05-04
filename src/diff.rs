@@ -17,6 +17,12 @@ use crate::ui::Color;
 use crate::ui::Styles;
 
 #[derive(Clone, Copy)]
+pub(crate) struct DiffHints<'a> {
+    pub(crate) spans: &'a [Replacement],
+    pub(crate) linewise: bool,
+}
+
+#[derive(Clone, Copy)]
 struct Hyperlinks<'a> {
     format: Option<&'a str>,
     path: &'a str,
@@ -57,7 +63,7 @@ impl<'a> Hyperlinks<'a> {
 pub(crate) fn print_file_line_diff(
     old: &str,
     new: &str,
-    spans: &[Replacement],
+    hints: DiffHints<'_>,
     styles: Styles,
     hyperlink_format: Option<&str>,
     hyperlink_path: &str,
@@ -65,6 +71,7 @@ pub(crate) fn print_file_line_diff(
 ) {
     let columns = (!columns.is_empty()).then_some(columns);
     let hyperlinks = Hyperlinks::new(hyperlink_format, hyperlink_path, columns);
+    let spans = hints.spans;
     let old_line_spans = group_spans_by_line(old, spans, SpanSide::Input);
     let new_line_spans = group_spans_by_line(new, spans, SpanSide::Output);
     let span_highlighting = !spans.is_empty();
@@ -76,6 +83,19 @@ pub(crate) fn print_file_line_diff(
             new,
             styles,
             hyperlinks,
+            &old_line_spans,
+            &new_line_spans,
+        )
+    {
+        return;
+    }
+    if hints.linewise
+        && print_linewise_diff(
+            old,
+            new,
+            styles,
+            hyperlinks,
+            span_highlighting,
             &old_line_spans,
             &new_line_spans,
         )
@@ -198,6 +218,66 @@ fn print_same_line_span_diff(
     for idx in 1..=changed_lines.len() {
         if idx == changed_lines.len() || changed_lines[idx] != changed_lines[idx - 1] + 1 {
             writer.write_block(&old_lines[block_start..idx], &new_lines[block_start..idx]);
+            block_start = idx;
+        }
+    }
+    write_stdout(&out);
+    true
+}
+
+fn print_linewise_diff(
+    old: &str,
+    new: &str,
+    styles: Styles,
+    hyperlinks: Hyperlinks<'_>,
+    span_highlighting: bool,
+    old_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+    new_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+) -> bool {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    if old_lines.len() != new_lines.len() {
+        return false;
+    }
+
+    let mut changed_lines = Vec::new();
+    for (idx, (old_line, new_line)) in old_lines.iter().zip(&new_lines).enumerate() {
+        if old_line != new_line {
+            changed_lines.push(idx + 1);
+        }
+    }
+    if changed_lines.is_empty() {
+        return false;
+    }
+
+    let width = changed_lines
+        .iter()
+        .map(|line_no| line_no.to_string().len())
+        .max()
+        .unwrap_or(1);
+    let mut out = String::new();
+    let mut writer = NumberedDiffWriter {
+        out: &mut out,
+        width,
+        styles,
+        hyperlinks,
+        span_highlighting,
+        old_line_spans,
+        new_line_spans,
+    };
+
+    let mut block_start = 0;
+    for idx in 1..=changed_lines.len() {
+        if idx == changed_lines.len() || changed_lines[idx] != changed_lines[idx - 1] + 1 {
+            let old_block: Vec<_> = changed_lines[block_start..idx]
+                .iter()
+                .map(|line_no| (*line_no, old_lines[*line_no - 1]))
+                .collect();
+            let new_block: Vec<_> = changed_lines[block_start..idx]
+                .iter()
+                .map(|line_no| (*line_no, new_lines[*line_no - 1]))
+                .collect();
+            writer.write_block(&old_block, &new_block);
             block_start = idx;
         }
     }

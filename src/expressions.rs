@@ -36,6 +36,10 @@ pub(crate) struct CompiledExpression {
     /// `Replacer` impl that appends directly into the destination buffer
     /// instead of allocating a fresh `Vec<u8>` per match.
     pub(crate) bulk: BulkReplacer,
+    /// True when this expression cannot add, remove, or match across line
+    /// boundaries. Colored diff can then compare old/new lines by number
+    /// instead of running an LCS over the whole file.
+    pub(crate) preserves_line_boundaries: bool,
 }
 
 impl CompiledExpression {
@@ -334,6 +338,7 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
                 matcher,
                 replacer: Box::new(|_: &regex::Captures| String::new()),
                 bulk: BulkReplacer::Literal(String::new()),
+                preserves_line_boundaries: false,
             });
         }
         let variant_map = std::sync::Arc::new(variant_map);
@@ -355,6 +360,7 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
             matcher,
             replacer: Box::new(replacer),
             bulk: BulkReplacer::Smart(variant_map),
+            preserves_line_boundaries: !expr.find.contains('\n') && !expr.replace.contains('\n'),
         })
     } else {
         let pattern = build_pattern_for(cli, &expr.find);
@@ -394,6 +400,10 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
             matcher,
             replacer: Box::new(replacer),
             bulk,
+            preserves_line_boundaries: !cli.is_regex()
+                && !cli.delete
+                && !expr.find.contains('\n')
+                && !expr.replace.contains('\n'),
         })
     }
 }
@@ -1014,6 +1024,13 @@ mod tests {
         let (output, count) = apply_str("foo bar foo", &expressions);
         assert_eq!(output, "foo bar foo");
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_dotall_expression_does_not_claim_line_boundary_preservation() {
+        let cli = parse_cli(&["rep", "--dotall", "a.*b", "x"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        assert!(!expressions[0].preserves_line_boundaries);
     }
 
     #[test]

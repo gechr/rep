@@ -58,6 +58,10 @@ struct ReplacementResult {
     /// Per-replacement input/output spans, populated when span tracking is
     /// enabled and the run uses a single expression. Drives inline highlight.
     spans: Vec<Replacement>,
+    /// True when colored diff can compare old/new lines by number instead of
+    /// running a full LCS. Only enabled for replacements that cannot affect
+    /// line boundaries.
+    linewise_diff: bool,
 }
 
 #[derive(Parser)]
@@ -815,6 +819,11 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
         .is_some_and(hyperlink_format_uses_column);
     let render_inline_diff = will_render_color && !cli.quiet && expressions.len() == 1;
     let track_spans = (stdout_terminal && !cli.quiet && needs_first_column) || render_inline_diff;
+    let linewise_diff = will_render_color
+        && !cli.quiet
+        && expressions
+            .iter()
+            .all(|expr| expr.preserves_line_boundaries);
 
     let dirs = cli.dirs();
     let mut builder = scan::walk_builder_with_file_set(&dirs, cli.file_set())?;
@@ -886,6 +895,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                         diff,
                         columns,
                         spans: if render_inline_diff { spans } else { Vec::new() },
+                        linewise_diff,
                     })
                 };
                 if tx.send(payload).is_err() {
@@ -1048,7 +1058,10 @@ fn print_results(
             diff::print_file_line_diff(
                 old,
                 new,
-                &result.spans,
+                diff::DiffHints {
+                    spans: &result.spans,
+                    linewise: result.linewise_diff,
+                },
                 styles,
                 hyperlink_format,
                 &result.link_path,
