@@ -62,6 +62,9 @@ struct ReplacementResult {
     /// running a full LCS. Only enabled for replacements that cannot affect
     /// line boundaries.
     linewise_diff: bool,
+    /// True when colored diff can render newline-changing replacements from
+    /// replacement spans instead of falling back to a full LCS.
+    multiline_span_diff: bool,
 }
 
 #[derive(Parser)]
@@ -824,6 +827,17 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
         && expressions
             .iter()
             .all(|expr| expr.preserves_line_boundaries);
+    let multiline_span_diff = render_inline_diff
+        && !cli.regexp
+        && !cli.dotall
+        && !cli.ignore_case
+        && !cli.greedy
+        && !cli.word_regexp
+        && !cli.line_regexp
+        && !cli.delete
+        && expressions
+            .iter()
+            .any(|expr| !expr.preserves_line_boundaries);
 
     let dirs = cli.dirs();
     let mut builder = scan::walk_builder_with_file_set(&dirs, cli.file_set())?;
@@ -896,6 +910,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                         columns,
                         spans: if render_inline_diff { spans } else { Vec::new() },
                         linewise_diff,
+                        multiline_span_diff,
                     })
                 };
                 if tx.send(payload).is_err() {
@@ -1061,6 +1076,7 @@ fn print_results(
                 diff::DiffHints {
                     spans: &result.spans,
                     linewise: result.linewise_diff,
+                    multiline_spans: result.multiline_span_diff,
                 },
                 styles,
                 hyperlink_format,

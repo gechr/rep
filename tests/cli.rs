@@ -1084,6 +1084,42 @@ fn color_always_multi_expression_linewise_fast_path_preserves_layout() {
     );
 }
 
+#[test]
+fn color_always_multiline_span_fast_path_preserves_chained_utf8_context() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "α static ω\nβ static δ\nkeep\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            "-m",
+            "static",
+            "STATIC\n",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
+\x1b[2m\x1b[31m1\x1b[m α \x1b[31m\x1b[4mstatic\x1b[m ω
+\x1b[2m\x1b[32m1\x1b[m α \x1b[32m\x1b[4mSTATIC\x1b[m
+\x1b[2m\x1b[31m2\x1b[m β \x1b[31m\x1b[4mstatic\x1b[m δ
+\x1b[2m\x1b[32m2\x1b[m  ω
+\x1b[2m\x1b[32m3\x1b[m β \x1b[32m\x1b[4mSTATIC\x1b[m
+\x1b[2m\x1b[32m4\x1b[m  δ
+
+\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
+"
+    );
+}
+
 /// N-replacement symmetry: replacing `.` with `b` in `a.b.c.d.e.f` must
 /// produce five single-char highlights on each side. LCS-based highlighting
 /// would absorb a literal `b` into a "shared" run on the new side and mis-

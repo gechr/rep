@@ -20,6 +20,7 @@ use crate::ui::Styles;
 pub(crate) struct DiffHints<'a> {
     pub(crate) spans: &'a [Replacement],
     pub(crate) linewise: bool,
+    pub(crate) multiline_spans: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -96,6 +97,19 @@ pub(crate) fn print_file_line_diff(
             styles,
             hyperlinks,
             span_highlighting,
+            &old_line_spans,
+            &new_line_spans,
+        )
+    {
+        return;
+    }
+    if hints.multiline_spans
+        && print_multiline_span_diff(
+            old,
+            new,
+            spans,
+            styles,
+            hyperlinks,
             &old_line_spans,
             &new_line_spans,
         )
@@ -283,6 +297,188 @@ fn print_linewise_diff(
     }
     write_stdout(&out);
     true
+}
+
+fn print_multiline_span_diff(
+    old: &str,
+    new: &str,
+    spans: &[Replacement],
+    styles: Styles,
+    hyperlinks: Hyperlinks<'_>,
+    old_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+    new_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+) -> bool {
+    let Some(mut hunks) = multiline_span_hunks(old, new, spans) else {
+        return false;
+    };
+    if hunks.is_empty() {
+        return false;
+    }
+
+    let width = hunks
+        .iter()
+        .flat_map(|hunk| {
+            hunk.old_lines
+                .iter()
+                .chain(&hunk.new_lines)
+                .map(|(line_no, _)| line_no.to_string().len())
+        })
+        .max()
+        .unwrap_or(1);
+    let mut out = String::new();
+    let mut writer = NumberedDiffWriter {
+        out: &mut out,
+        width,
+        styles,
+        hyperlinks,
+        span_highlighting: true,
+        old_line_spans,
+        new_line_spans,
+    };
+    for hunk in &mut hunks {
+        writer.write_block(&hunk.old_lines, &hunk.new_lines);
+    }
+    write_stdout(&out);
+    true
+}
+
+struct SpanHunk<'a> {
+    old_lines: Vec<(usize, &'a str)>,
+    new_lines: Vec<(usize, &'a str)>,
+}
+
+fn multiline_span_hunks<'a>(
+    old: &'a str,
+    new: &'a str,
+    spans: &[Replacement],
+) -> Option<Vec<SpanHunk<'a>>> {
+    if spans.is_empty()
+        || spans
+            .iter()
+            .any(|span| span.input_len == 0 || span.output_len == 0)
+    {
+        return None;
+    }
+
+    let old_index = LineIndex::new(old);
+    let new_index = LineIndex::new(new);
+    let mut hunks = Vec::new();
+    let mut current: Option<HunkRange> = None;
+    let mut sorted: Vec<_> = spans.iter().collect();
+    sorted.sort_unstable_by_key(|span| span.input_start);
+
+    for span in sorted {
+        let old_start = old_index.line_start_for_byte(span.input_start)?;
+        let old_end = old_index.line_end_for_byte(span.input_end())?;
+        let new_start = span
+            .output_start
+            .checked_sub(span.input_start.checked_sub(old_start)?)?;
+        let new_end = span.output_end().checked_add(old_end - span.input_end())?;
+        if new_end > new.len() {
+            return None;
+        }
+
+        match &mut current {
+            Some(range) if old_start <= range.old_end.saturating_add(1) => {
+                range.old_end = old_end;
+                range.new_end = range.new_end.max(new_end);
+            }
+            Some(range) => {
+                hunks.push(range.to_hunk(old, new, &old_index, &new_index)?);
+                current = Some(HunkRange {
+                    old_start,
+                    old_end,
+                    new_start,
+                    new_end,
+                });
+            }
+            None => {
+                current = Some(HunkRange {
+                    old_start,
+                    old_end,
+                    new_start,
+                    new_end,
+                });
+            }
+        }
+    }
+    if let Some(range) = current {
+        hunks.push(range.to_hunk(old, new, &old_index, &new_index)?);
+    }
+    Some(hunks)
+}
+
+struct HunkRange {
+    old_start: usize,
+    old_end: usize,
+    new_start: usize,
+    new_end: usize,
+}
+
+impl HunkRange {
+    fn to_hunk<'a>(
+        &self,
+        old: &'a str,
+        new: &'a str,
+        old_index: &LineIndex,
+        new_index: &LineIndex,
+    ) -> Option<SpanHunk<'a>> {
+        Some(SpanHunk {
+            old_lines: numbered_lines(
+                &old[self.old_start..self.old_end],
+                old_index.line_no_for_byte(self.old_start)?,
+            ),
+            new_lines: numbered_lines(
+                &new[self.new_start..self.new_end],
+                new_index.line_no_for_byte(self.new_start)?,
+            ),
+        })
+    }
+}
+
+struct LineIndex {
+    starts: Vec<usize>,
+    len: usize,
+}
+
+impl LineIndex {
+    fn new(text: &str) -> Self {
+        let mut starts = vec![0];
+        for (idx, byte) in text.as_bytes().iter().enumerate() {
+            if *byte == b'\n' {
+                starts.push(idx + 1);
+            }
+        }
+        Self {
+            starts,
+            len: text.len(),
+        }
+    }
+
+    fn line_no_for_byte(&self, byte: usize) -> Option<usize> {
+        (byte <= self.len).then(|| self.starts.partition_point(|start| *start <= byte))
+    }
+
+    fn line_start_for_byte(&self, byte: usize) -> Option<usize> {
+        let line_no = self.line_no_for_byte(byte)?;
+        self.starts.get(line_no - 1).copied()
+    }
+
+    fn line_end_for_byte(&self, byte: usize) -> Option<usize> {
+        let line_no = self.line_no_for_byte(byte)?;
+        Some(
+            self.starts
+                .get(line_no)
+                .map_or(self.len, |next_start| next_start - 1),
+        )
+    }
+}
+
+fn numbered_lines(text: &str, start_line_no: usize) -> Vec<(usize, &str)> {
+    text.split('\n')
+        .enumerate()
+        .map(|(idx, line)| (start_line_no + idx, line))
+        .collect()
 }
 
 fn lines_for_numbers<'a>(text: &'a str, line_numbers: &[usize]) -> Option<Vec<(usize, &'a str)>> {
@@ -929,6 +1125,40 @@ mod tests {
         assert!(input_map.is_empty());
         let output_map = group_spans_by_line(text, &[insertion], SpanSide::Output);
         assert!(output_map.is_empty());
+    }
+
+    #[test]
+    fn multiline_span_hunks_merges_adjacent_lines_from_unsorted_spans() {
+        let old = "α static ω\nβ static δ\nkeep\n";
+        let new = "α STATIC\n ω\nβ STATIC\n δ\nkeep\n";
+        let spans = vec![rep(16, 6, 17, 7), rep(3, 6, 3, 7)];
+
+        let hunks = multiline_span_hunks(old, new, &spans).unwrap();
+
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(
+            hunks[0].old_lines,
+            vec![(1, "α static ω"), (2, "β static δ")]
+        );
+        assert_eq!(
+            hunks[0].new_lines,
+            vec![(1, "α STATIC"), (2, " ω"), (3, "β STATIC"), (4, " δ")]
+        );
+    }
+
+    #[test]
+    fn multiline_span_hunks_handles_file_edges_without_trailing_newline() {
+        let old = "static α\nkeep\nω static";
+        let new = "STATIC\n α\nkeep\nω STATIC\n";
+        let spans = vec![rep(0, 6, 0, 7), rep(18, 6, 19, 7)];
+
+        let hunks = multiline_span_hunks(old, new, &spans).unwrap();
+
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].old_lines, vec![(1, "static α")]);
+        assert_eq!(hunks[0].new_lines, vec![(1, "STATIC"), (2, " α")]);
+        assert_eq!(hunks[1].old_lines, vec![(3, "ω static")]);
+        assert_eq!(hunks[1].new_lines, vec![(4, "ω STATIC"), (5, "")]);
     }
 
     #[test]
