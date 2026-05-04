@@ -40,7 +40,7 @@ use diffy::DiffOptions;
 
 use crate::expressions::{
     CompiledExpression, EXPR_SEP, Replacement, apply_compiled_expressions,
-    build_pre_filter_matcher, byte_offsets_to_line_first_column, compile_expressions,
+    build_pre_filter_matcher, compile_expressions, first_column_map_if_needed,
 };
 use crate::ui::Color;
 use crate::ui::ColorChoice;
@@ -666,13 +666,28 @@ fn percent_encode_path(s: &str) -> String {
 
 pub(crate) fn hyperlink_url(format: &str, path: &str, line: usize, column: usize) -> String {
     // 0 sentinels mean "no real value known" - default to 1.
-    let line = if line == 0 { 1 } else { line };
-    let column = if column == 0 { 1 } else { column };
-    format
-        .replace("{path}", &percent_encode_path(path))
-        .replace("{host}", hostname().unwrap_or(""))
-        .replace("{line}", &line.to_string())
-        .replace("{column}", &column.to_string())
+    // Each `replace` allocates a fresh String even when the placeholder is
+    // absent, so we gate every substitution on `contains` and start from a
+    // borrowed Cow. Per-line hyperlinks call this once per diff line; in
+    // formats that omit a placeholder, this avoids the corresponding alloc
+    // (and the `percent_encode_path` / `to_string` work that feeds it).
+    use std::borrow::Cow;
+    let mut out: Cow<str> = Cow::Borrowed(format);
+    if out.contains("{path}") {
+        out = Cow::Owned(out.replace("{path}", &percent_encode_path(path)));
+    }
+    if out.contains("{host}") {
+        out = Cow::Owned(out.replace("{host}", hostname().unwrap_or("")));
+    }
+    if out.contains("{line}") {
+        let line = if line == 0 { 1 } else { line };
+        out = Cow::Owned(out.replace("{line}", &line.to_string()));
+    }
+    if out.contains("{column}") {
+        let column = if column == 0 { 1 } else { column };
+        out = Cow::Owned(out.replace("{column}", &column.to_string()));
+    }
+    out.into_owned()
 }
 
 fn hyperlink(format: Option<&str>, path: &str, line: usize, text: &str) -> String {
@@ -845,8 +860,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 if count == 0 {
                     return WalkState::Continue;
                 }
-                let input_starts: Vec<usize> = spans.iter().map(|s| s.input_start).collect();
-                let columns = byte_offsets_to_line_first_column(&contents, &input_starts);
+                let columns = first_column_map_if_needed(needs_first_column, &contents, &spans);
                 let diff = match (
                     String::from_utf8(contents.clone()),
                     String::from_utf8(updated.as_ref().to_vec()),
@@ -1378,6 +1392,37 @@ mod tests {
         let url = hyperlink_url("file://{host}{path}", "/tmp/a.txt", 0, 0);
         assert!(url.starts_with("file://"));
         assert!(url.ends_with("/tmp/a.txt"));
+    }
+
+    #[test]
+    fn test_hyperlink_url_passes_format_through_when_no_placeholders() {
+        // Format without placeholders is returned verbatim - the gating in
+        // `hyperlink_url` short-circuits all replace/encode/hostname calls.
+        assert_eq!(
+            hyperlink_url("https://example.com/static", "/tmp/a.txt", 42, 7),
+            "https://example.com/static"
+        );
+    }
+
+    #[test]
+    fn test_hyperlink_url_skips_unused_placeholders() {
+        // Format omitting `{line}`, `{column}`, and `{host}` produces output
+        // that contains no expansion of those placeholders even when the
+        // caller passes real values for them.
+        let url = hyperlink_url("file://{path}", "/tmp/a.txt", 42, 7);
+        assert_eq!(url, "file:///tmp/a.txt");
+        assert!(!url.contains("42"));
+        assert!(!url.contains(":7"));
+    }
+
+    #[test]
+    fn test_hyperlink_url_path_only_skips_line_substitution() {
+        // A format with `{path}` but no `{line}` should not append/inject
+        // a line number anywhere - confirms the `{line}` gate is correct.
+        assert_eq!(
+            hyperlink_url("vscode://file{path}", "/tmp/a.txt", 99, 0),
+            "vscode://file/tmp/a.txt"
+        );
     }
 
     #[test]

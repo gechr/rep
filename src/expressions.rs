@@ -529,6 +529,22 @@ pub(crate) fn apply_compiled_expressions<'a>(
     (current, replacements, spans)
 }
 
+/// Builds the per-line first-column map only when the caller's hyperlink
+/// format string actually consumes `{column}`. Returns an empty map otherwise,
+/// skipping the input scan entirely. This is the pay-for-what-you-use gate
+/// that keeps replacement runs cheap when the format omits `{column}`.
+pub(crate) fn first_column_map_if_needed(
+    needs_first_column: bool,
+    input: &[u8],
+    spans: &[Replacement],
+) -> std::collections::HashMap<usize, usize> {
+    if !needs_first_column {
+        return std::collections::HashMap::new();
+    }
+    let input_starts: Vec<usize> = spans.iter().map(|s| s.input_start).collect();
+    byte_offsets_to_line_first_column(input, &input_starts)
+}
+
 /// Walks `input` once, mapping a sorted slice of byte offsets to the
 /// 1-indexed `(line, column)` of the first match on each line. Single linear
 /// pass, `O(input.len() + offsets.len())`.
@@ -614,6 +630,39 @@ mod tests {
     #[test]
     fn test_byte_offsets_to_line_first_column_empty_offsets() {
         let map = byte_offsets_to_line_first_column(b"abc\ndef\n", &[]);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_first_column_map_skips_when_not_needed() {
+        // Even with real spans, an empty map is returned when the caller
+        // signals that `{column}` isn't in the hyperlink format.
+        let spans = [Replacement {
+            input_start: 6,
+            input_len: 3,
+            output_start: 6,
+            output_len: 3,
+        }];
+        let map = first_column_map_if_needed(false, b"abc\ndefoo\n", &spans);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_first_column_map_computes_when_needed() {
+        let spans = [Replacement {
+            input_start: 6,
+            input_len: 3,
+            output_start: 6,
+            output_len: 3,
+        }];
+        let map = first_column_map_if_needed(true, b"abc\ndefoo\n", &spans);
+        assert_eq!(map.get(&2), Some(&3));
+    }
+
+    #[test]
+    fn test_first_column_map_empty_spans_when_needed() {
+        // Needed but no spans -> nothing to record.
+        let map = first_column_map_if_needed(true, b"abc\ndef\n", &[]);
         assert!(map.is_empty());
     }
 
