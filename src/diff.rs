@@ -572,8 +572,22 @@ impl NumberedDiffWriter<'_, '_> {
         for idx in 0..paired {
             let (old_line_no, old_line) = old_lines[idx];
             let (new_line_no, new_line) = new_lines[idx];
-            self.write_line(old_line_no, '-', old_line, Color::Red, SpanSide::Input);
-            self.write_line(new_line_no, '+', new_line, Color::Green, SpanSide::Output);
+            let old_spans = self.old_line_spans.get(&old_line_no);
+            let new_spans = self.new_line_spans.get(&new_line_no);
+            if self.span_highlighting
+                || old_spans.is_some_and(|spans| !spans.is_empty())
+                || new_spans.is_some_and(|spans| !spans.is_empty())
+            {
+                self.write_line_with_spans(old_line_no, '-', old_line, Color::Red, old_spans);
+                self.write_line_with_spans(new_line_no, '+', new_line, Color::Green, new_spans);
+            } else if should_inline_pair_diff(old_line, new_line) {
+                let inline = inline_token_diff(old_line, new_line);
+                self.write_inline_line(old_line_no, '-', Color::Red, InlineSide::Old, &inline);
+                self.write_inline_line(new_line_no, '+', Color::Green, InlineSide::New, &inline);
+            } else {
+                self.write_line_with_spans(old_line_no, '-', old_line, Color::Red, old_spans);
+                self.write_line_with_spans(new_line_no, '+', new_line, Color::Green, new_spans);
+            }
         }
         for (line_no, line) in &old_lines[paired..] {
             self.write_line(*line_no, '-', line, Color::Red, SpanSide::Input);
@@ -584,11 +598,22 @@ impl NumberedDiffWriter<'_, '_> {
     }
 
     fn write_line(&mut self, line_no: usize, sign: char, line: &str, color: Color, side: SpanSide) {
-        self.write_prefix(line_no, sign, color);
         let spans = match side {
             SpanSide::Input => self.old_line_spans.get(&line_no),
             SpanSide::Output => self.new_line_spans.get(&line_no),
         };
+        self.write_line_with_spans(line_no, sign, line, color, spans);
+    }
+
+    fn write_line_with_spans(
+        &mut self,
+        line_no: usize,
+        sign: char,
+        line: &str,
+        color: Color,
+        spans: Option<&Vec<LocalSpan>>,
+    ) {
+        self.write_prefix(line_no, sign, color);
         match spans {
             Some(spans) if !spans.is_empty() => {
                 render_line_with_spans(self.out, line, spans, color, self.styles);
@@ -605,6 +630,19 @@ impl NumberedDiffWriter<'_, '_> {
                 );
             }
         }
+        self.out.push('\n');
+    }
+
+    fn write_inline_line(
+        &mut self,
+        line_no: usize,
+        sign: char,
+        color: Color,
+        side: InlineSide,
+        inline: &[TokenDiff<'_>],
+    ) {
+        self.write_prefix(line_no, sign, color);
+        write_inline_chars(self.out, inline, side, self.styles);
         self.out.push('\n');
     }
 
@@ -635,6 +673,11 @@ fn numbered_diff_block_width(old_lines: &[(usize, &str)], new_lines: &[(usize, &
         .map(|(line_no, _)| line_no.to_string().len())
         .max()
         .unwrap_or(1)
+}
+
+const fn should_inline_pair_diff(old_line: &str, new_line: &str) -> bool {
+    const MAX_INLINE_PAIR_DIFF_BYTES: usize = 8 * 1024;
+    old_line.len() <= MAX_INLINE_PAIR_DIFF_BYTES && new_line.len() <= MAX_INLINE_PAIR_DIFF_BYTES
 }
 
 #[derive(Clone, Copy)]

@@ -1074,12 +1074,88 @@ fn color_always_multi_expression_linewise_fast_path_preserves_layout() {
         String::from_utf8(output.stdout).unwrap(),
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[2m\x1b[31m1\x1b[m \x1b[31mstatic café\x1b[m
-\x1b[2m\x1b[32m1\x1b[m \x1b[32mSTATIC café\x1b[m
-\x1b[2m\x1b[31m3\x1b[m \x1b[31mconst naïve\x1b[m
-\x1b[2m\x1b[32m3\x1b[m \x1b[32mCONST naïve\x1b[m
+\x1b[2m\x1b[31m1\x1b[m \x1b[31m\x1b[4mstatic\x1b[m café
+\x1b[2m\x1b[32m1\x1b[m \x1b[32m\x1b[4mSTATIC\x1b[m café
+\x1b[2m\x1b[31m3\x1b[m \x1b[31m\x1b[4mconst\x1b[m naïve
+\x1b[2m\x1b[32m3\x1b[m \x1b[32m\x1b[4mCONST\x1b[m naïve
 
 \x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
+"
+    );
+}
+
+#[test]
+fn color_always_multi_expression_symbols_only_highlights_replacements() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "alpha.foo\nbeta—gamma\n");
+
+    let output = Command::new(REP)
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            "-e",
+            ".",
+            ":",
+            "-e",
+            "—",
+            "-",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
+\x1b[2m\x1b[31m1\x1b[m alpha\x1b[31m\x1b[4m.\x1b[mfoo
+\x1b[2m\x1b[32m1\x1b[m alpha\x1b[32m\x1b[4m:\x1b[mfoo
+\x1b[2m\x1b[31m2\x1b[m beta\x1b[31m\x1b[4m—\x1b[mgamma
+\x1b[2m\x1b[32m2\x1b[m beta\x1b[32m\x1b[4m-\x1b[mgamma
+
+\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
+"
+    );
+}
+
+#[test]
+fn color_always_apply_multi_expression_symbols_only_highlights_replacements() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "alpha.foo\nbeta—gamma\n");
+
+    let output = Command::new(REP)
+        .args([
+            "--color=always",
+            "--hyperlink-format=none",
+            "-e",
+            ".",
+            ":",
+            "-e",
+            "—",
+            "-",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(read(&file), "alpha:foo\nbeta-gamma\n");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
+\x1b[2m\x1b[31m1\x1b[m alpha\x1b[31m\x1b[4m.\x1b[mfoo
+\x1b[2m\x1b[32m1\x1b[m alpha\x1b[32m\x1b[4m:\x1b[mfoo
+\x1b[2m\x1b[31m2\x1b[m beta\x1b[31m\x1b[4m—\x1b[mgamma
+\x1b[2m\x1b[32m2\x1b[m beta\x1b[32m\x1b[4m-\x1b[mgamma
+
+\x1b[1m\x1b[32mPerformed 2 replacements in 1 file\x1b[m
 "
     );
 }
