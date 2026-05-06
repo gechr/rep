@@ -450,15 +450,13 @@ pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> 
         } else {
             parse_expressions(cli)?
         }
-    } else if cli.is_find_only() {
-        vec![Expression {
-            find: cli.pattern().to_string(),
-            replace: String::new(),
-        }]
     } else {
         vec![Expression {
             find: cli.pattern().to_string(),
-            replace: cli.replacement().to_string(),
+            replace: cli
+                .positional_replace()
+                .map(str::to_string)
+                .unwrap_or_default(),
         }]
     };
 

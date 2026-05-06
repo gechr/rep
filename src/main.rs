@@ -183,7 +183,7 @@ struct Cli {
     #[arg(
         short = 'l',
         long = "list-files",
-        help = "Print only file paths that contain matches",
+        help = "Print file paths that would be changed",
         help_heading = "Behavior"
     )]
     list_files: bool,
@@ -331,7 +331,7 @@ const LONG_HELP_SECTIONS: &[&str] = &[
     "Style",
     "Miscellaneous",
 ];
-const SECTION_SPACERS: &[&str] = &["list_files", "hyperlink_format", "version"];
+const SECTION_SPACERS: &[&str] = &["delete", "hyperlink_format", "version"];
 
 /// Clap auto-assigns a `value_name` to every arg, including bool flags. Gate on
 /// the action so `--quiet` doesn't render as `--quiet <QUIET>`.
@@ -526,13 +526,13 @@ impl Cli {
         !self.expressions.is_empty()
     }
 
-    /// True when the CLI takes only `<find>` (no `<replace>`).
+    /// True when the CLI cannot take a `<replace>` positional.
     ///
-    /// - `-d`/`--delete`: replacement is forbidden; trailing positionals are paths.
-    /// - `-l`/`--list-files` without `-e`: consumes only `<find>`; all remaining
-    ///   positionals are search roots.
+    /// `-d`/`--delete` forbids `<replace>`; trailing positionals are paths.
+    /// `-l` alone accepts an optional `<replace>`, so it is not find-only;
+    /// see [`Self::positional_skip`].
     const fn is_find_only(&self) -> bool {
-        !self.uses_expressions() && (self.delete || self.list_files)
+        !self.uses_expressions() && self.delete
     }
 
     fn preview_tool(&self) -> Option<String> {
@@ -562,11 +562,13 @@ impl Cli {
             || self.line_regexp
     }
 
-    const fn positional_skip(&self) -> usize {
+    fn positional_skip(&self) -> usize {
         if self.uses_expressions() {
             0
         } else if self.is_find_only() {
             1
+        } else if self.list_files {
+            self.args.len().min(2)
         } else {
             2
         }
@@ -606,6 +608,14 @@ impl Cli {
 
     fn replacement(&self) -> &str {
         &self.args[1]
+    }
+
+    /// Returns the positional `<replace>` if one was supplied. Distinguishes
+    /// `rep -l foo` (no replace, find-only listing) from `rep -l foo bar`
+    /// (replace present, list only files where the replacement would change
+    /// bytes).
+    fn positional_replace(&self) -> Option<&str> {
+        (!self.is_find_only() && self.args.len() >= 2).then(|| self.replacement())
     }
 }
 
@@ -907,8 +917,11 @@ fn run_list_files(cli: &Cli) -> Result<()> {
 
     use ignore::WalkState;
 
-    let expressions = compile_expressions(cli)?;
+    use std::sync::Arc;
+
+    let expressions = Arc::new(compile_expressions(cli)?);
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
+    let filter_by_change = cli.positional_replace().is_some();
 
     let dirs = cli.dirs();
     let mut builder = scan::walk_builder_with_file_set(&dirs, cli.file_set())?;
@@ -921,12 +934,14 @@ fn run_list_files(cli: &Cli) -> Result<()> {
         .build_parallel();
 
     let (tx, rx) = channel::<String>();
+    let walk_expressions = Arc::clone(&expressions);
 
     thread::spawn(move || {
         walk.run(|| {
             let mut searcher = scan::make_searcher();
             let tx = tx.clone();
             let pre_filter = pre_filter.clone();
+            let expressions = Arc::clone(&walk_expressions);
             Box::new(move |result| {
                 let dirent = match result {
                     Ok(d) => d,
@@ -942,9 +957,19 @@ fn run_list_files(cli: &Cli) -> Result<()> {
                 if !scan::is_candidate_path(path) {
                     return WalkState::Continue;
                 }
-                if scan::file_matches(&mut searcher, &pre_filter, path)
-                    && tx.send(display_path(path)).is_err()
-                {
+                let listed = if filter_by_change {
+                    let Some(contents) =
+                        scan::file_contents_if_matches(&mut searcher, &pre_filter, path)
+                    else {
+                        return WalkState::Continue;
+                    };
+                    let (updated, count, _) =
+                        apply_compiled_expressions(&contents, &expressions, false);
+                    count > 0 && *updated != *contents
+                } else {
+                    scan::file_matches(&mut searcher, &pre_filter, path)
+                };
+                if listed && tx.send(display_path(path)).is_err() {
                     return WalkState::Quit;
                 }
                 WalkState::Continue
@@ -1655,18 +1680,29 @@ mod tests {
         assert_eq!(Cli::parse_from(["rep", "a", "b"]).positional_skip(), 2);
         // expression mode: no positional find/replace
         assert_eq!(parse_cli(&["rep", "-e", "a", "b"]).positional_skip(), 0);
-        // -l always consumes only the find pattern.
+        // -l accepts an optional <replace>: 1 positional stays find-only,
+        // 2+ positionals consume both find and replace.
         assert_eq!(Cli::parse_from(["rep", "-l", "a"]).positional_skip(), 1);
         assert_eq!(
             Cli::parse_from(["rep", "-l", "a", "b"]).positional_skip(),
+            2
+        );
+        assert_eq!(
+            Cli::parse_from(["rep", "-l", "a", "b", "src"]).positional_skip(),
+            2
+        );
+        // -d -l keeps delete semantics (no <replace>).
+        assert_eq!(
+            Cli::parse_from(["rep", "-d", "-l", "a", "src"]).positional_skip(),
             1
         );
     }
 
     #[test]
     fn test_cli_is_find_only() {
-        assert!(Cli::parse_from(["rep", "-l", "a"]).is_find_only());
-        assert!(Cli::parse_from(["rep", "-l", "a", "b"]).is_find_only());
+        // -l is no longer find-only: it accepts an optional <replace>.
+        assert!(!Cli::parse_from(["rep", "-l", "a"]).is_find_only());
+        assert!(!Cli::parse_from(["rep", "-l", "a", "b"]).is_find_only());
         assert!(!Cli::parse_from(["rep", "a", "b"]).is_find_only());
         // -l with -e is expression mode, not find-only
         assert!(!parse_cli(&["rep", "-l", "-e", "a", "b"]).is_find_only());
@@ -1674,6 +1710,8 @@ mod tests {
         assert!(Cli::parse_from(["rep", "-d", "a"]).is_find_only());
         assert!(Cli::parse_from(["rep", "-d", "a", "src"]).is_find_only());
         assert!(Cli::parse_from(["rep", "-d", "a", "src", "tests"]).is_find_only());
+        // -d -l keeps delete's find-only semantics.
+        assert!(Cli::parse_from(["rep", "-d", "-l", "a", "src"]).is_find_only());
     }
 
     #[test]
@@ -1689,8 +1727,35 @@ mod tests {
     }
 
     #[test]
-    fn test_list_files_mode_treats_trailing_positionals_as_paths() {
-        let cli = Cli::parse_from(["rep", "-l", "TODO", "src", "tests"]);
+    fn test_list_files_mode_consumes_optional_replace() {
+        // 1 positional: find-only, default search root.
+        let cli = Cli::parse_from(["rep", "-l", "TODO"]);
+        assert_eq!(cli.positional_skip(), 1);
+        assert_eq!(cli.pattern(), "TODO");
+        assert_eq!(cli.paths(), Vec::<PathBuf>::new());
+
+        // 2 positionals: <find> <replace>, default search root.
+        let cli = Cli::parse_from(["rep", "-l", "foo", "bar"]);
+        assert_eq!(cli.positional_skip(), 2);
+        assert_eq!(cli.pattern(), "foo");
+        assert_eq!(cli.replacement(), "bar");
+        assert_eq!(cli.paths(), Vec::<PathBuf>::new());
+
+        // 3+ positionals: <find> <replace> followed by paths.
+        let cli = Cli::parse_from(["rep", "-l", "foo", "bar", "src", "tests"]);
+        assert_eq!(cli.positional_skip(), 2);
+        assert_eq!(cli.pattern(), "foo");
+        assert_eq!(cli.replacement(), "bar");
+        assert_eq!(
+            cli.paths(),
+            vec![PathBuf::from("src"), PathBuf::from("tests")]
+        );
+    }
+
+    #[test]
+    fn test_delete_list_files_mode_treats_trailing_positionals_as_paths() {
+        // -d -l keeps -d's parsing: no <replace>, all trailing positionals are paths.
+        let cli = Cli::parse_from(["rep", "-d", "-l", "TODO", "src", "tests"]);
         assert_eq!(cli.positional_skip(), 1);
         assert_eq!(cli.pattern(), "TODO");
         assert_eq!(

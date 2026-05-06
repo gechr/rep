@@ -507,11 +507,14 @@ fn list_files_prints_sorted_matching_paths() {
 #[test]
 fn list_files_respects_explicit_search_paths() {
     let dir = tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
     write(&dir.path().join("a.txt"), "foo");
-    write(&dir.path().join("b.txt"), "foo");
+    write(&sub.join("b.txt"), "foo");
 
+    // Path is supplied after <find> <replace> under `-l`.
     let output = Command::new(REP)
-        .args(["-l", "foo", "a.txt"])
+        .args(["-l", "foo", "bar", "sub"])
         .current_dir(dir.path())
         .output()
         .unwrap();
@@ -520,7 +523,39 @@ fn list_files_respects_explicit_search_paths() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "a.txt\n");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "sub/b.txt\n");
+}
+
+#[test]
+fn list_files_with_replace_lists_only_files_that_would_change() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("a.txt"), "foo bar");
+    write(&dir.path().join("b.txt"), "no match here");
+    // c.txt matches the pre-filter regex but the replacement is a no-op
+    // (find == replace), so the file would not change.
+    write(&dir.path().join("c.txt"), "foo");
+
+    let output = Command::new(REP)
+        .args(["-l", "foo", "foo"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+
+    // With a replacement that does change bytes, only the matching file is
+    // listed.
+    let output = Command::new(REP)
+        .args(["-l", "foo", "qux"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "a.txt\nc.txt\n");
 }
 
 #[test]
@@ -613,8 +648,8 @@ Regex
 Behavior
 
   -d, --delete                  Delete lines matching <find>
-  -l, --list-files              Print only file paths that contain matches
 
+  -l, --list-files              Print file paths that would be changed
   -n, --dry-run                 Show what would be changed without writing
   -p, --preview                 Preview the changes before applying them
       --preview-tool <cmd>      External diff tool for preview mode
