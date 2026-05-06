@@ -62,6 +62,9 @@ struct Hyperlinks<'a> {
     /// 1-indexed line -> first-match column. `None` when not tracked; lookups
     /// for absent lines fall back to column 1 inside `HyperlinkTemplate::render`.
     columns: Option<&'a std::collections::HashMap<usize, usize>>,
+    /// Cached `Styles::is_plain()`. Read once at construction so the per-line
+    /// emit doesn't re-touch the `OnceLock`-backed color choice on every line.
+    plain: bool,
 }
 
 impl<'a> Hyperlinks<'a> {
@@ -69,11 +72,13 @@ impl<'a> Hyperlinks<'a> {
         template: Option<&'a crate::HyperlinkTemplate<'a>>,
         encoded_path: &'a str,
         columns: Option<&'a std::collections::HashMap<usize, usize>>,
+        plain: bool,
     ) -> Self {
         Self {
             template,
             encoded_path,
             columns,
+            plain,
         }
     }
 
@@ -82,14 +87,19 @@ impl<'a> Hyperlinks<'a> {
             out.push_str(text);
             return;
         };
+        if self.plain {
+            out.push_str(text);
+            return;
+        }
         let column = self
             .columns
             .and_then(|m| m.get(&line).copied())
             .unwrap_or(0);
-        out.push_str(&crate::osc8(
-            &template.render(self.encoded_path, line, column),
-            text,
-        ));
+        out.push_str("\x1b]8;;");
+        template.render_into(out, self.encoded_path, line, column);
+        out.push_str("\x1b\\");
+        out.push_str(text);
+        out.push_str("\x1b]8;;\x1b\\");
     }
 }
 
@@ -103,7 +113,7 @@ pub(crate) fn print_file_line_diff(
     columns: &std::collections::HashMap<usize, usize>,
 ) {
     let columns = (!columns.is_empty()).then_some(columns);
-    let hyperlinks = Hyperlinks::new(hyperlink_template, encoded_path, columns);
+    let hyperlinks = Hyperlinks::new(hyperlink_template, encoded_path, columns, styles.is_plain());
     let trimmed: Vec<Replacement> = hints
         .spans
         .iter()
@@ -197,7 +207,14 @@ pub(crate) fn print_file_line_diff(
         }
     }
 
-    let mut out = String::new();
+    // Output is roughly the diff text plus per-line ANSI/OSC-8 overhead. The
+    // up-front capacity keeps the per-line `push_str` calls off the realloc
+    // path, capped to avoid pathologically large reservations on huge diffs.
+    let mut out = String::with_capacity(
+        (old.len() + new.len())
+            .saturating_mul(2)
+            .min(8 * 1024 * 1024),
+    );
     let mut writer = NumberedDiffWriter {
         out: &mut out,
         width,
@@ -206,6 +223,7 @@ pub(crate) fn print_file_line_diff(
         span_highlighting,
         old_line_spans: &old_line_spans,
         new_line_spans: &new_line_spans,
+        openers: Openers::new(styles),
     };
     for (old_lines, new_lines) in blocks {
         writer.write_block(&old_lines, &new_lines);
@@ -328,6 +346,7 @@ fn print_same_line_span_diff(
         span_highlighting: true,
         old_line_spans,
         new_line_spans,
+        openers: Openers::new(styles),
     };
 
     let mut block_start = 0;
@@ -380,6 +399,7 @@ fn print_linewise_diff(
         span_highlighting,
         old_line_spans,
         new_line_spans,
+        openers: Openers::new(styles),
     };
 
     let mut block_start = 0;
@@ -436,6 +456,7 @@ fn print_multiline_span_diff(
         span_highlighting: true,
         old_line_spans,
         new_line_spans,
+        openers: Openers::new(styles),
     };
     for hunk in &mut hunks {
         writer.write_block(&hunk.old_lines, &hunk.new_lines);
@@ -667,6 +688,43 @@ fn write_stdout(out: &str) {
     if stdout.write_all(out.as_bytes()).is_err() {}
 }
 
+/// Decimal digit count of `n`. `usize::ilog10` for non-zero, falling back to 1
+/// for `n == 0` so callers can use this as a width directly. Used to size the
+/// padding before the line number without first converting to a `String`.
+const fn digit_count(n: usize) -> usize {
+    if n == 0 { 1 } else { n.ilog10() as usize + 1 }
+}
+
+/// Push `count` spaces into `out` from a fixed `&'static str`. The line-number
+/// gutter is always small (single-digit-ish), so a 16-byte source string covers
+/// every realistic width without truncation; longer paddings fall back to a
+/// loop. Keeps the hot per-line path off the heap.
+fn push_spaces(out: &mut String, count: usize) {
+    const SPACES: &str = "                ";
+    if count <= SPACES.len() {
+        out.push_str(&SPACES[..count]);
+    } else {
+        for _ in 0..count {
+            out.push(' ');
+        }
+    }
+}
+
+/// Write `n` as decimal into `buf` and return the matching `&str` slice.
+fn format_usize(buf: &mut [u8; 20], mut n: usize) -> &str {
+    if n == 0 {
+        buf[0] = b'0';
+        return std::str::from_utf8(&buf[..1]).expect("digits are ASCII");
+    }
+    let mut i = buf.len();
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    std::str::from_utf8(&buf[i..]).expect("digits are ASCII")
+}
+
 struct NumberedDiffWriter<'a, 'b> {
     out: &'a mut String,
     width: usize,
@@ -681,6 +739,85 @@ struct NumberedDiffWriter<'a, 'b> {
     old_line_spans: &'a std::collections::HashMap<usize, Vec<LocalSpan>>,
     /// 1-indexed line -> sorted local-byte spans for output (new) lines.
     new_line_spans: &'a std::collections::HashMap<usize, Vec<LocalSpan>>,
+    /// Precomputed SGR opening sequences. Resolving the per-side `StyleSpec` and
+    /// emitting its SGR codes is invariant for the lifetime of the writer; doing
+    /// it once here turns each per-line emit into a single `push_str` of the
+    /// cached prefix rather than re-running the style pipeline.
+    openers: Openers,
+}
+
+/// Precomputed SGR opening sequences for the four colored states the diff
+/// writer emits. Built once per writer, used per line.
+struct Openers {
+    /// `style_line_<side>` with underline stripped - the line-number prefix
+    /// color applied to whole lines.
+    line_red: String,
+    line_green: String,
+    /// `style_<side>` with underline stripped - used for the no-span fallback
+    /// where the entire line gets the diff color.
+    diff_red_no_ul: String,
+    diff_green_no_ul: String,
+    /// `style_<side>` with underline preserved - wrapped around individual
+    /// matched spans inside otherwise-unstyled lines.
+    diff_red: String,
+    diff_green: String,
+}
+
+impl Openers {
+    fn new(styles: Styles) -> Self {
+        let mut line_red = String::new();
+        let mut line_green = String::new();
+        let mut diff_red_no_ul = String::new();
+        let mut diff_green_no_ul = String::new();
+        let mut diff_red = String::new();
+        let mut diff_green = String::new();
+        side_line_style(Color::Red)
+            .without_underline()
+            .open_into(&mut line_red, styles);
+        side_line_style(Color::Green)
+            .without_underline()
+            .open_into(&mut line_green, styles);
+        side_diff_style(Color::Red)
+            .without_underline()
+            .open_into(&mut diff_red_no_ul, styles);
+        side_diff_style(Color::Green)
+            .without_underline()
+            .open_into(&mut diff_green_no_ul, styles);
+        side_diff_style(Color::Red).open_into(&mut diff_red, styles);
+        side_diff_style(Color::Green).open_into(&mut diff_green, styles);
+        Self {
+            line_red,
+            line_green,
+            diff_red_no_ul,
+            diff_green_no_ul,
+            diff_red,
+            diff_green,
+        }
+    }
+
+    fn line_for(&self, color: Color) -> &str {
+        match color {
+            Color::Red => &self.line_red,
+            Color::Green => &self.line_green,
+            _ => "",
+        }
+    }
+
+    fn diff_no_ul_for(&self, color: Color) -> &str {
+        match color {
+            Color::Red => &self.diff_red_no_ul,
+            Color::Green => &self.diff_green_no_ul,
+            _ => "",
+        }
+    }
+
+    fn diff_for(&self, color: Color) -> &str {
+        match color {
+            Color::Red => &self.diff_red,
+            Color::Green => &self.diff_green,
+            _ => "",
+        }
+    }
 }
 
 impl NumberedDiffWriter<'_, '_> {
@@ -732,18 +869,22 @@ impl NumberedDiffWriter<'_, '_> {
         self.write_prefix(line_no, color);
         match spans {
             Some(spans) if !spans.is_empty() => {
-                render_line_with_spans(self.out, line, spans, color, self.styles);
+                render_line_with_spans(
+                    self.out,
+                    line,
+                    spans,
+                    self.openers.diff_for(color),
+                    self.openers.diff_no_ul_for(color),
+                    self.styles.reset(),
+                );
             }
             _ if self.span_highlighting => {
                 self.out.push_str(line);
             }
             _ => {
-                let _ = write!(
-                    self.out,
-                    "{}{line}{}",
-                    side_diff_style(color).without_underline().open(self.styles),
-                    self.styles.reset(),
-                );
+                self.out.push_str(self.openers.diff_no_ul_for(color));
+                self.out.push_str(line);
+                self.out.push_str(self.styles.reset());
             }
         }
         self.out.push('\n');
@@ -762,24 +903,25 @@ impl NumberedDiffWriter<'_, '_> {
     }
 
     fn write_prefix(&mut self, line_no: usize, line_color: Color) {
-        let line_no_text = line_no.to_string();
-        let padding = " ".repeat(self.width.saturating_sub(line_no_text.len()));
-        let _ = write!(
-            self.out,
-            "{}{}",
-            side_line_style(line_color)
-                .without_underline()
-                .open(self.styles),
-            padding,
-        );
-        self.hyperlinks.write(self.out, line_no, &line_no_text);
+        let line_digits = digit_count(line_no);
+        let pad_len = self.width.saturating_sub(line_digits);
+        self.out.push_str(self.openers.line_for(line_color));
+        push_spaces(self.out, pad_len);
+        if self.hyperlinks.template.is_some() && !self.hyperlinks.plain {
+            // OSC-8 needs the digits as a `&str` so it can wrap them between
+            // the link's open/close escapes. We materialize them on the stack.
+            let mut buf = [0u8; 20];
+            let line_no_text = format_usize(&mut buf, line_no);
+            self.hyperlinks.write(self.out, line_no, line_no_text);
+        } else {
+            crate::push_decimal(self.out, line_no);
+        }
         self.out.push_str(self.styles.reset());
         let marker = theme::theme().marker_for(side_of(line_color), self.styles.is_plain());
-        if marker.is_empty() {
-            self.out.push(' ');
-        } else {
-            let _ = write!(self.out, "{marker} ");
+        if !marker.is_empty() {
+            self.out.push_str(marker);
         }
+        self.out.push(' ');
     }
 }
 
@@ -1189,19 +1331,17 @@ fn render_line_with_spans(
     out: &mut String,
     line: &str,
     spans: &[LocalSpan],
-    color: Color,
-    styles: Styles,
+    opener_with_underline: &str,
+    opener_without_underline: &str,
+    reset: &str,
 ) {
     if !spans
         .iter()
         .all(|s| line.is_char_boundary(s.start) && line.is_char_boundary(s.end))
     {
-        let _ = write!(
-            out,
-            "{}{line}{}",
-            side_diff_style(color).without_underline().open(styles),
-            styles.reset()
-        );
+        out.push_str(opener_without_underline);
+        out.push_str(line);
+        out.push_str(reset);
         return;
     }
 
@@ -1214,13 +1354,9 @@ fn render_line_with_spans(
             continue;
         }
         out.push_str(&line[cursor..span.start]);
-        let _ = write!(
-            out,
-            "{}{}{}",
-            side_diff_style(color).open(styles),
-            &line[span.start..span.end],
-            styles.reset(),
-        );
+        out.push_str(opener_with_underline);
+        out.push_str(&line[span.start..span.end]);
+        out.push_str(reset);
         cursor = span.end;
     }
     out.push_str(&line[cursor..]);
@@ -1401,7 +1537,15 @@ mod tests {
             LocalSpan { start: 13, end: 14 },
         ];
         let mut out = String::new();
-        render_line_with_spans(&mut out, line, &spans, Color::Red, Styles::ansi());
+        let openers = Openers::new(Styles::ansi());
+        render_line_with_spans(
+            &mut out,
+            line,
+            &spans,
+            openers.diff_for(Color::Red),
+            openers.diff_no_ul_for(Color::Red),
+            Styles::ansi().reset(),
+        );
         assert_eq!(
             out,
             "output\x1b[31m\x1b[4m.\x1b[mstatus\x1b[31m\x1b[4m.\x1b[msuccess",
@@ -1416,7 +1560,15 @@ mod tests {
         let line = "café";
         let spans = vec![LocalSpan { start: 4, end: 5 }];
         let mut out = String::new();
-        render_line_with_spans(&mut out, line, &spans, Color::Red, Styles::ansi());
+        let openers = Openers::new(Styles::ansi());
+        render_line_with_spans(
+            &mut out,
+            line,
+            &spans,
+            openers.diff_for(Color::Red),
+            openers.diff_no_ul_for(Color::Red),
+            Styles::ansi().reset(),
+        );
         assert_eq!(out, "\x1b[31mcafé\x1b[m");
     }
 
@@ -1424,7 +1576,15 @@ mod tests {
     fn render_line_with_spans_with_no_spans_writes_nothing_extra() {
         let line = "unchanged";
         let mut out = String::new();
-        render_line_with_spans(&mut out, line, &[], Color::Green, Styles::ansi());
+        let openers = Openers::new(Styles::ansi());
+        render_line_with_spans(
+            &mut out,
+            line,
+            &[],
+            openers.diff_for(Color::Green),
+            openers.diff_no_ul_for(Color::Green),
+            Styles::ansi().reset(),
+        );
         assert_eq!(out, "unchanged");
     }
 
@@ -1438,10 +1598,11 @@ mod tests {
             out: &mut out,
             width: 1,
             styles: Styles::ansi(),
-            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns)),
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), false),
             span_highlighting: true,
             old_line_spans: &old_line_spans,
             new_line_spans: &new_line_spans,
+            openers: Openers::new(Styles::ansi()),
         };
 
         writer.write_line(1, "abc", Color::Red, SpanSide::Input);
@@ -1459,10 +1620,11 @@ mod tests {
             out: &mut out,
             width: 1,
             styles: Styles::ansi(),
-            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns)),
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), false),
             span_highlighting: true,
             old_line_spans: &old_line_spans,
             new_line_spans: &new_line_spans,
+            openers: Openers::new(Styles::ansi()),
         };
 
         writer.write_block(

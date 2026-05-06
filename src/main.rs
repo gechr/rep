@@ -800,30 +800,48 @@ impl<'a> HyperlinkTemplate<'a> {
         self.has_path
     }
 
-    /// Render into a fresh `String`. `encoded_path` is the percent-encoded
-    /// path (caller-cached per file when the template uses `{path}`); pass
-    /// `""` when the template doesn't reference `{path}`. `line`/`column`
+    /// Render directly into `out`. `encoded_path` is the percent-encoded path;
+    /// pass `""` when the template doesn't reference `{path}`. `line`/`column`
     /// of `0` render as `1`.
-    pub(crate) fn render(&self, encoded_path: &str, line: usize, column: usize) -> String {
-        use std::fmt::Write as _;
-        let mut out = String::with_capacity(encoded_path.len() + 32);
+    pub(crate) fn render_into(
+        &self,
+        out: &mut String,
+        encoded_path: &str,
+        line: usize,
+        column: usize,
+    ) {
         for seg in &self.segs {
             match seg {
                 HyperlinkSeg::Lit(s) => out.push_str(s),
                 HyperlinkSeg::Path => out.push_str(encoded_path),
                 HyperlinkSeg::Host => out.push_str(hostname().unwrap_or("")),
-                HyperlinkSeg::Line => {
-                    let l = if line == 0 { 1 } else { line };
-                    let _ = write!(out, "{l}");
-                }
-                HyperlinkSeg::Column => {
-                    let c = if column == 0 { 1 } else { column };
-                    let _ = write!(out, "{c}");
-                }
+                HyperlinkSeg::Line => push_decimal(out, if line == 0 { 1 } else { line }),
+                HyperlinkSeg::Column => push_decimal(out, if column == 0 { 1 } else { column }),
             }
         }
+    }
+
+    pub(crate) fn render(&self, encoded_path: &str, line: usize, column: usize) -> String {
+        let mut out = String::with_capacity(encoded_path.len() + 32);
+        self.render_into(&mut out, encoded_path, line, column);
         out
     }
+}
+
+/// Push `n` as decimal ASCII into `out` without going through `core::fmt`.
+pub(crate) fn push_decimal(out: &mut String, mut n: usize) {
+    if n == 0 {
+        out.push('0');
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    out.push_str(std::str::from_utf8(&buf[i..]).expect("digits are ASCII"));
 }
 
 #[cfg(test)]

@@ -30,25 +30,31 @@ impl StyleSpec {
     /// SGR opening sequence for this spec. Empty when `styles` is plain so the
     /// uncolored output path stays untouched.
     pub fn open(self, styles: Styles) -> String {
-        if styles.is_plain() {
-            return String::new();
-        }
         let mut out = String::new();
+        self.open_into(&mut out, styles);
+        out
+    }
+
+    /// Push the SGR opening sequence directly into `out`. The hot per-line
+    /// caller uses this to skip the owned-`String` return path entirely.
+    pub fn open_into(self, out: &mut String, styles: Styles) {
+        if styles.is_plain() {
+            return;
+        }
         if let Some(c) = self.fg {
-            out.push_str(&sgr_color(c, false));
+            sgr_color_into(out, c, false);
         }
         if let Some(c) = self.bg {
-            out.push_str(&sgr_color(c, true));
+            sgr_color_into(out, c, true);
         }
-        let _ = write!(out, "{}", emit_attr(1, self.bold));
-        let _ = write!(out, "{}", emit_attr(2, self.dim));
-        let _ = write!(out, "{}", emit_attr(3, self.italic));
-        let _ = write!(out, "{}", emit_attr(4, self.underline));
-        let _ = write!(out, "{}", emit_attr(5, self.blink));
-        let _ = write!(out, "{}", emit_attr(7, self.reverse));
-        let _ = write!(out, "{}", emit_attr(8, self.hidden));
-        let _ = write!(out, "{}", emit_attr(9, self.strike));
-        out
+        emit_attr_into(out, 1, self.bold);
+        emit_attr_into(out, 2, self.dim);
+        emit_attr_into(out, 3, self.italic);
+        emit_attr_into(out, 4, self.underline);
+        emit_attr_into(out, 5, self.blink);
+        emit_attr_into(out, 7, self.reverse);
+        emit_attr_into(out, 8, self.hidden);
+        emit_attr_into(out, 9, self.strike);
     }
 
     /// Drop the underline attribute. Used for whole-line emission, where
@@ -59,43 +65,85 @@ impl StyleSpec {
     }
 }
 
-fn emit_attr(code: u8, on: bool) -> String {
-    if on {
-        format!("\x1b[{code}m")
-    } else {
-        String::new()
+fn emit_attr_into(out: &mut String, code: u8, on: bool) {
+    if !on {
+        return;
+    }
+    let s = match code {
+        1 => "\x1b[1m",
+        2 => "\x1b[2m",
+        3 => "\x1b[3m",
+        4 => "\x1b[4m",
+        5 => "\x1b[5m",
+        7 => "\x1b[7m",
+        8 => "\x1b[8m",
+        9 => "\x1b[9m",
+        _ => {
+            let _ = write!(out, "\x1b[{code}m");
+            return;
+        }
+    };
+    out.push_str(s);
+}
+
+/// Push the short SGR form for `color` into `out`: `30`-`37` for the standard
+/// palette, `90`-`97` for the bright palette, `38;5;N` for indexed, `38;2;R;G;B`
+/// for truecolor (and `+10` for backgrounds).
+fn sgr_color_into(out: &mut String, color: Color, bg: bool) {
+    if let Some(s) = static_sgr_color(color, bg) {
+        out.push_str(s);
+        return;
+    }
+    match color {
+        Color::Rgb { r, g, b } => {
+            let extended: u32 = if bg { 48 } else { 38 };
+            let _ = write!(out, "\x1b[{extended};2;{r};{g};{b}m");
+        }
+        Color::AnsiValue(n) => {
+            let extended: u32 = if bg { 48 } else { 38 };
+            let _ = write!(out, "\x1b[{extended};5;{n}m");
+        }
+        Color::Reset => {}
+        _ => {}
     }
 }
 
-/// Map a crossterm `Color` to the short SGR form: `30`-`37` for the standard
-/// palette, `90`-`97` for the bright palette, `38;5;N` for indexed, `38;2;R;G;B`
-/// for truecolor (and `+10` for backgrounds).
-fn sgr_color(color: Color, bg: bool) -> String {
-    let std_base: u32 = if bg { 40 } else { 30 };
-    let bright_base: u32 = if bg { 100 } else { 90 };
-    let extended: u32 = if bg { 48 } else { 38 };
-    let n: u32 = match color {
-        Color::Black => std_base,
-        Color::DarkRed => std_base + 1,
-        Color::DarkGreen => std_base + 2,
-        Color::DarkYellow => std_base + 3,
-        Color::DarkBlue => std_base + 4,
-        Color::DarkMagenta => std_base + 5,
-        Color::DarkCyan => std_base + 6,
-        Color::Grey => std_base + 7,
-        Color::DarkGrey => bright_base,
-        Color::Red => bright_base + 1,
-        Color::Green => bright_base + 2,
-        Color::Yellow => bright_base + 3,
-        Color::Blue => bright_base + 4,
-        Color::Magenta => bright_base + 5,
-        Color::Cyan => bright_base + 6,
-        Color::White => bright_base + 7,
-        Color::Rgb { r, g, b } => return format!("\x1b[{extended};2;{r};{g};{b}m"),
-        Color::AnsiValue(n) => return format!("\x1b[{extended};5;{n}m"),
-        Color::Reset => return String::new(),
-    };
-    format!("\x1b[{n}m")
+const fn static_sgr_color(color: Color, bg: bool) -> Option<&'static str> {
+    Some(match (color, bg) {
+        (Color::Black, false) => "\x1b[30m",
+        (Color::DarkRed, false) => "\x1b[31m",
+        (Color::DarkGreen, false) => "\x1b[32m",
+        (Color::DarkYellow, false) => "\x1b[33m",
+        (Color::DarkBlue, false) => "\x1b[34m",
+        (Color::DarkMagenta, false) => "\x1b[35m",
+        (Color::DarkCyan, false) => "\x1b[36m",
+        (Color::Grey, false) => "\x1b[37m",
+        (Color::DarkGrey, false) => "\x1b[90m",
+        (Color::Red, false) => "\x1b[91m",
+        (Color::Green, false) => "\x1b[92m",
+        (Color::Yellow, false) => "\x1b[93m",
+        (Color::Blue, false) => "\x1b[94m",
+        (Color::Magenta, false) => "\x1b[95m",
+        (Color::Cyan, false) => "\x1b[96m",
+        (Color::White, false) => "\x1b[97m",
+        (Color::Black, true) => "\x1b[40m",
+        (Color::DarkRed, true) => "\x1b[41m",
+        (Color::DarkGreen, true) => "\x1b[42m",
+        (Color::DarkYellow, true) => "\x1b[43m",
+        (Color::DarkBlue, true) => "\x1b[44m",
+        (Color::DarkMagenta, true) => "\x1b[45m",
+        (Color::DarkCyan, true) => "\x1b[46m",
+        (Color::Grey, true) => "\x1b[47m",
+        (Color::DarkGrey, true) => "\x1b[100m",
+        (Color::Red, true) => "\x1b[101m",
+        (Color::Green, true) => "\x1b[102m",
+        (Color::Yellow, true) => "\x1b[103m",
+        (Color::Blue, true) => "\x1b[104m",
+        (Color::Magenta, true) => "\x1b[105m",
+        (Color::Cyan, true) => "\x1b[106m",
+        (Color::White, true) => "\x1b[107m",
+        _ => return None,
+    })
 }
 
 /// Resolved palette and marker config. `marker_*` are emitted verbatim when
