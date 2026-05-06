@@ -1545,8 +1545,8 @@ fn marker_added_shows_explicit_string_even_when_colored() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m<< \x1b[31m\x1b[4mfoo\x1b[m line
-\x1b[32m\x1b[2m1\x1b[m>> \x1b[32m\x1b[4mbar\x1b[m line
+\x1b[31m\x1b[2m1\x1b[m<<\x1b[31m\x1b[4mfoo\x1b[m line
+\x1b[32m\x1b[2m1\x1b[m>>\x1b[32m\x1b[4mbar\x1b[m line
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
 "

@@ -235,6 +235,13 @@ impl Theme {
             (None, false) => "",
         }
     }
+
+    pub const fn has_explicit_marker(&self, side: Side) -> bool {
+        match side {
+            Side::Added => self.marker_added.is_some(),
+            Side::Removed => self.marker_removed.is_some(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -541,18 +548,22 @@ mod tests {
     #[test]
     fn marker_for_added_truth_table() {
         let mut t = Theme::default();
+        assert!(!t.has_explicit_marker(Side::Added));
         assert_eq!(t.marker_for(Side::Added, true), "+");
         assert_eq!(t.marker_for(Side::Added, false), "");
 
         t.marker_added = Some(String::new());
+        assert!(t.has_explicit_marker(Side::Added));
         assert_eq!(t.marker_for(Side::Added, true), "");
         assert_eq!(t.marker_for(Side::Added, false), "");
 
         t.marker_added = Some(" ".into());
+        assert!(t.has_explicit_marker(Side::Added));
         assert_eq!(t.marker_for(Side::Added, true), " ");
         assert_eq!(t.marker_for(Side::Added, false), " ");
 
         t.marker_added = Some("▎".into());
+        assert!(t.has_explicit_marker(Side::Added));
         assert_eq!(t.marker_for(Side::Added, true), "▎");
         assert_eq!(t.marker_for(Side::Added, false), "▎");
     }
@@ -560,14 +571,17 @@ mod tests {
     #[test]
     fn marker_for_removed_truth_table() {
         let mut t = Theme::default();
+        assert!(!t.has_explicit_marker(Side::Removed));
         assert_eq!(t.marker_for(Side::Removed, true), "-");
         assert_eq!(t.marker_for(Side::Removed, false), "");
 
         t.marker_removed = Some(String::new());
+        assert!(t.has_explicit_marker(Side::Removed));
         assert_eq!(t.marker_for(Side::Removed, true), "");
         assert_eq!(t.marker_for(Side::Removed, false), "");
 
         t.marker_removed = Some(">>".into());
+        assert!(t.has_explicit_marker(Side::Removed));
         assert_eq!(t.marker_for(Side::Removed, true), ">>");
         assert_eq!(t.marker_for(Side::Removed, false), ">>");
     }

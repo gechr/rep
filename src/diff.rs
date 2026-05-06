@@ -639,16 +639,28 @@ pub(crate) fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) {
                     continue;
                 }
                 let style = side_diff_style(Color::Red).without_underline().open(styles);
-                let marker = theme::theme().marker_for(Side::Removed, true);
-                println!("{style}{marker} {old_line}{}", styles.reset());
+                let theme = theme::theme();
+                let marker = theme.marker_for(Side::Removed, true);
+                let separator = if theme.has_explicit_marker(Side::Removed) {
+                    ""
+                } else {
+                    " "
+                };
+                println!("{style}{marker}{separator}{old_line}{}", styles.reset());
                 i += 1;
             }
             DiffResult::Right(r) => {
                 let style = side_diff_style(Color::Green)
                     .without_underline()
                     .open(styles);
-                let marker = theme::theme().marker_for(Side::Added, true);
-                println!("{style}{marker} {r}{}", styles.reset());
+                let theme = theme::theme();
+                let marker = theme.marker_for(Side::Added, true);
+                let separator = if theme.has_explicit_marker(Side::Added) {
+                    ""
+                } else {
+                    " "
+                };
+                println!("{style}{marker}{separator}{r}{}", styles.reset());
                 i += 1;
             }
         }
@@ -659,23 +671,35 @@ fn print_inline_diff(old_line: &str, new_line: &str, styles: Styles) {
     let mut out = String::new();
     let inline = inline_token_diff(old_line, new_line);
     let t = theme::theme();
+    let removed_separator = if t.has_explicit_marker(Side::Removed) {
+        ""
+    } else {
+        " "
+    };
     let _ = write!(
         out,
-        "{}{} {}",
+        "{}{}{}{}",
         side_diff_style(Color::Red).without_underline().open(styles),
         t.marker_for(Side::Removed, true),
+        removed_separator,
         styles.reset(),
     );
     write_inline_chars(&mut out, &inline, InlineSide::Old, styles);
     out.push('\n');
 
+    let added_separator = if t.has_explicit_marker(Side::Added) {
+        ""
+    } else {
+        " "
+    };
     let _ = write!(
         out,
-        "{}{} {}",
+        "{}{}{}{}",
         side_diff_style(Color::Green)
             .without_underline()
             .open(styles),
         t.marker_for(Side::Added, true),
+        added_separator,
         styles.reset(),
     );
     write_inline_chars(&mut out, &inline, InlineSide::New, styles);
@@ -917,11 +941,17 @@ impl NumberedDiffWriter<'_, '_> {
             crate::push_decimal(self.out, line_no);
         }
         self.out.push_str(self.styles.reset());
-        let marker = theme::theme().marker_for(side_of(line_color), self.styles.is_plain());
-        if !marker.is_empty() {
+        let theme = theme::theme();
+        let side = side_of(line_color);
+        let marker = theme.marker_for(side, self.styles.is_plain());
+        if theme.has_explicit_marker(side) || self.styles.is_plain() {
             self.out.push_str(marker);
+        } else if marker.is_empty() {
+            self.out.push(' ');
+        } else {
+            self.out.push_str(marker);
+            self.out.push(' ');
         }
-        self.out.push(' ');
     }
 }
 
@@ -1608,6 +1638,28 @@ mod tests {
         writer.write_line(1, "abc", Color::Red, SpanSide::Input);
 
         assert_eq!(out, "\x1b[31m\x1b[2m1\x1b[m abc\n");
+    }
+
+    #[test]
+    fn numbered_writer_places_plain_markers_between_line_number_and_text() {
+        let mut out = String::new();
+        let old_line_spans = std::collections::HashMap::new();
+        let new_line_spans = std::collections::HashMap::new();
+        let columns = std::collections::HashMap::new();
+        let mut writer = NumberedDiffWriter {
+            out: &mut out,
+            width: 4,
+            styles: Styles::PLAIN,
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), true),
+            span_highlighting: true,
+            old_line_spans: &old_line_spans,
+            new_line_spans: &new_line_spans,
+            openers: Openers::new(Styles::PLAIN),
+        };
+
+        writer.write_block(&[(1589, "old")], &[(1589, "new")]);
+
+        assert_eq!(out, "1589-old\n1589+new\n");
     }
 
     #[test]
