@@ -219,12 +219,11 @@ pub(crate) fn print_file_line_diff(
 /// being replaced by the same pattern with `;;` should highlight just the
 /// trailing punctuation, not the whole expression.
 ///
-/// Always leaves at least one byte on each side: an empty span would be
-/// dropped by `group_spans_by_line` and the diff would render with no
-/// highlight at all. Bails out for spans that contain a newline (the
-/// multi-line and linewise paths assume span endpoints sit at the actual
-/// edit boundaries) and for very large spans where the trim scan would
-/// dominate per-match cost.
+/// Allows either side to become empty when the edit is a pure insertion or
+/// deletion after trimming shared context, but never trims both sides to
+/// empty. Bails out for spans that contain a newline (the multi-line and
+/// linewise paths assume span endpoints sit at the actual edit boundaries)
+/// and for very large spans where the trim scan would dominate per-match cost.
 fn trim_shared_affixes(span: Replacement, old: &str, new: &str) -> Replacement {
     const TRIM_AFFIX_LIMIT: usize = 64 * 1024;
 
@@ -240,7 +239,7 @@ fn trim_shared_affixes(span: Replacement, old: &str, new: &str) -> Replacement {
         return span;
     }
 
-    let prefix_max = in_bytes.len().min(out_bytes.len()) - 1;
+    let prefix_max = in_bytes.len().min(out_bytes.len());
     let mut prefix = 0;
     while prefix < prefix_max && in_bytes[prefix] == out_bytes[prefix] {
         prefix += 1;
@@ -254,7 +253,11 @@ fn trim_shared_affixes(span: Replacement, old: &str, new: &str) -> Replacement {
 
     let in_after = &in_bytes[prefix..];
     let out_after = &out_bytes[prefix..];
-    let suffix_max = in_after.len().min(out_after.len()) - 1;
+    if in_after.is_empty() && out_after.is_empty() {
+        return span;
+    }
+
+    let suffix_max = in_after.len().min(out_after.len());
     let mut suffix = 0;
     while suffix < suffix_max
         && in_after[in_after.len() - 1 - suffix] == out_after[out_after.len() - 1 - suffix]
@@ -279,8 +282,7 @@ fn trim_shared_affixes(span: Replacement, old: &str, new: &str) -> Replacement {
 fn replacements_preserve_line_boundaries(old: &str, new: &str, spans: &[Replacement]) -> bool {
     !spans.is_empty()
         && spans.iter().all(|span| {
-            span.input_len > 0
-                && span.output_len > 0
+            (span.input_len > 0 || span.output_len > 0)
                 && !old.as_bytes()[span.input_start..span.input_end()].contains(&b'\n')
                 && !new.as_bytes()[span.output_start..span.output_end()].contains(&b'\n')
         })
@@ -1249,19 +1251,28 @@ mod tests {
         let new = "let dir = tempdir().unwrap();;";
         let span = rep(0, old.len(), 0, new.len());
         let trimmed = trim_shared_affixes(span, old, new);
-        // Common prefix runs up to index 28 (everything but the last `;`),
-        // leaving `;` on the input side and `;;` on the output side.
-        assert_eq!(trimmed, rep(28, 1, 28, 2));
+        // Common prefix consumes the old span, leaving only the inserted `;`
+        // on the output side.
+        assert_eq!(trimmed, rep(old.len(), 0, old.len(), 1));
     }
 
     #[test]
-    fn trim_shared_affixes_keeps_at_least_one_byte_per_side() {
-        // Input is a strict prefix of output: trimming naively would empty the
-        // input side. Helper must back off to leave one byte on each side.
+    fn trim_shared_affixes_allows_one_empty_side() {
+        // Input is a strict prefix of output: after trimming shared context,
+        // only the inserted byte should remain highlighted.
         let old = "abc";
         let new = "abcd";
         let trimmed = trim_shared_affixes(rep(0, 3, 0, 4), old, new);
-        assert_eq!(trimmed, rep(2, 1, 2, 2));
+        assert_eq!(trimmed, rep(3, 0, 3, 1));
+    }
+
+    #[test]
+    fn trim_shared_affixes_trims_shared_prefix_that_consumes_one_side() {
+        let old = "\"prefix: ";
+        let new = "\"";
+        let span = rep(0, old.len(), 0, new.len());
+        let trimmed = trim_shared_affixes(span, old, new);
+        assert_eq!(trimmed, rep(1, old.len() - 1, 1, 0));
     }
 
     #[test]
