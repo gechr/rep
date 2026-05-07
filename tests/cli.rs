@@ -16,6 +16,15 @@ use tempfile::tempdir;
 
 const REP: &str = env!("CARGO_BIN_EXE_rep");
 
+/// Spawns the rep binary with `REP_CONFIG_PATH=""` so the user's `~/.reprc`
+/// doesn't bleed into snapshot assertions. Tests that exercise rc behavior
+/// can `.env("REP_CONFIG_PATH", path)` to override.
+fn rep_command() -> Command {
+    let mut cmd = Command::new(REP);
+    cmd.env("REP_CONFIG_PATH", "");
+    cmd
+}
+
 fn write(path: &Path, contents: &str) {
     fs::write(path, contents).unwrap();
 }
@@ -32,13 +41,95 @@ fn basic_replace_rewrites_file_contents() {
 
     // Pass `.` explicitly: when stdin isn't a TTY (as under `cargo test`),
     // `rep` would otherwise enter stdin mode because `paths.is_empty()`.
-    let status = Command::new(REP)
-        .args(["foo", "bar", "."])
+    let status = rep_command()
+        .args(["-W", "foo", "bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
     assert!(status.success());
     assert_eq!(read(&file), "the bar jumped over the bar");
+}
+
+#[test]
+fn no_mode_flag_defaults_to_dry_run() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    let original = "the foo jumped";
+    write(&file, original);
+
+    let output = rep_command()
+        .args(["--color=always", "--hyperlink-format=", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(read(&file), original, "no -W: file must not be written");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
+\x1b[31m\x1b[2m1\x1b[m the \x1b[31m\x1b[4mfoo\x1b[m jumped
+\x1b[32m\x1b[2m1\x1b[m the \x1b[32m\x1b[4mbar\x1b[m jumped
+
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
+"
+    );
+}
+
+#[test]
+fn no_hints_suppresses_apply_hint_in_dry_run() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "the foo jumped");
+
+    let output = rep_command()
+        .args([
+            "--color=always",
+            "--hyperlink-format=",
+            "--no-hints",
+            "foo",
+            "bar",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+\x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
+\x1b[31m\x1b[2m1\x1b[m the \x1b[31m\x1b[4mfoo\x1b[m jumped
+\x1b[32m\x1b[2m1\x1b[m the \x1b[32m\x1b[4mbar\x1b[m jumped
+
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+"
+    );
+}
+
+#[test]
+fn write_flag_overrides_dry_run_set_in_rc() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo");
+
+    let rc = dir.path().join("reprc");
+    write(&rc, "--dry-run\n");
+
+    let status = rep_command()
+        .env("REP_CONFIG_PATH", &rc)
+        .args(["-W", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        read(&file),
+        "bar",
+        "-W on the CLI must override --dry-run from the rc file"
+    );
 }
 
 #[test]
@@ -48,7 +139,7 @@ fn dry_run_leaves_file_untouched() {
     let original = "the foo jumped";
     write(&file, original);
 
-    let status = Command::new(REP)
+    let status = rep_command()
         .args(["-n", "foo", "bar", "."])
         .current_dir(dir.path())
         .status()
@@ -65,7 +156,7 @@ fn dry_run_prints_per_file_diffs() {
     write(&a, "alpha foo\nkeep\nfoo tail\n");
     write(&b, "foo only\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
@@ -104,7 +195,7 @@ fn dry_run_only_highlights_changed_characters_inside_lines() {
     let file = dir.path().join("a.txt");
     write(&file, "    assert!(status.success());\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "a", "b", "."])
         .current_dir(dir.path())
         .output()
@@ -136,7 +227,7 @@ fn colored_dry_run_trims_shared_affixes_to_actual_edit() {
     let file = dir.path().join("a.txt");
     write(&file, "let dir = tempdir().unwrap();\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "--color=always",
             "--hyperlink-format=",
@@ -161,7 +252,7 @@ fn colored_dry_run_trims_shared_affixes_to_actual_edit() {
 \x1b[31m\x1b[2m1\x1b[m let dir = tempdir().unwrap();
 \x1b[32m\x1b[2m1\x1b[m let dir = tempdir().unwrap();\x1b[32m\x1b[4m;\x1b[m
 
-\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -172,7 +263,7 @@ fn colored_dry_run_trims_shared_prefix_even_when_added_side_is_empty() {
     let file = dir.path().join("a.txt");
     write(&file, "return fmt.Errorf(\"prefix: %w\", err)\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "--color=always",
             "--hyperlink-format=",
@@ -197,7 +288,7 @@ fn colored_dry_run_trims_shared_prefix_even_when_added_side_is_empty() {
 \x1b[31m\x1b[2m1\x1b[m return fmt.Errorf(\"\x1b[31m\x1b[4mprefix: \x1b[m%w\", err)
 \x1b[32m\x1b[2m1\x1b[m return fmt.Errorf(\"%w\", err)
 
-\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -208,7 +299,7 @@ fn dry_run_pairs_multiline_replacements_by_line() {
     let file = dir.path().join("a.txt");
     write(&file, "one foo\ntwo foo\nthree foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
@@ -241,7 +332,7 @@ fn dry_run_preserves_new_line_numbers_for_line_expansion() {
     let file = dir.path().join("a.txt");
     write(&file, "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "foo", "bar\nbaz", "."])
         .current_dir(dir.path())
         .output()
@@ -270,7 +361,7 @@ fn dry_run_warns_when_diff_is_not_valid_utf8() {
     let file = dir.path().join("a.txt");
     fs::write(&file, b"pre\xfffoo\xfepost\n").unwrap();
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
@@ -289,7 +380,7 @@ fn dry_run_with_delete_mode_shows_diff_without_modifying() {
     let file = dir.path().join("a.txt");
     write(&file, "keep\nfoo\nkeep\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "-d", "foo", "."])
         .current_dir(dir.path())
         .output()
@@ -319,7 +410,7 @@ fn dry_run_with_regex_mode_shows_diff_without_modifying() {
     let file = dir.path().join("a.txt");
     write(&file, "hello world\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "-r", r"hello (\w+)", "hi $1", "."])
         .current_dir(dir.path())
         .output()
@@ -348,7 +439,7 @@ fn dry_run_with_smart_mode_shows_diff_without_modifying() {
     let file = dir.path().join("a.txt");
     write(&file, "foo_bar and FooBar\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "--smart", "foo_bar", "baz_qux", "."])
         .current_dir(dir.path())
         .output()
@@ -377,7 +468,7 @@ fn dry_run_two_separate_hunks_show_correct_line_numbers() {
     let file = dir.path().join("a.txt");
     write(&file, "foo\nkeep\nfoo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
@@ -410,7 +501,7 @@ fn dry_run_file_with_zero_matches_does_not_appear_in_output() {
     write(&a, "no match here\n");
     write(&b, "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
@@ -434,7 +525,7 @@ fn dry_run_quiet_with_zero_matches_produces_no_output() {
     let file = dir.path().join("a.txt");
     write(&file, "no match here\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "-q", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
@@ -449,8 +540,8 @@ fn quiet_suppresses_all_replace_output() {
     let file = dir.path().join("a.txt");
     write(&file, "foo\n");
 
-    let output = Command::new(REP)
-        .args(["-q", "foo", "bar", "."])
+    let output = rep_command()
+        .args(["-W", "-q", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
         .unwrap();
@@ -469,7 +560,7 @@ fn quiet_suppresses_dry_run_diff() {
     let file = dir.path().join("a.txt");
     write(&file, "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "-q", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
@@ -491,7 +582,7 @@ fn list_files_prints_sorted_matching_paths() {
     write(&dir.path().join("a.txt"), "foo");
     write(&dir.path().join("c.txt"), "no match here");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-l", "foo"])
         .current_dir(dir.path())
         .output()
@@ -513,7 +604,7 @@ fn list_files_respects_explicit_search_paths() {
     write(&sub.join("b.txt"), "foo");
 
     // Path is supplied after <find> <replace> under `-l`.
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-l", "foo", "bar", "sub"])
         .current_dir(dir.path())
         .output()
@@ -535,7 +626,7 @@ fn list_files_with_replace_lists_only_files_that_would_change() {
     // (find == replace), so the file would not change.
     write(&dir.path().join("c.txt"), "foo");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-l", "foo", "foo"])
         .current_dir(dir.path())
         .output()
@@ -549,7 +640,7 @@ fn list_files_with_replace_lists_only_files_that_would_change() {
 
     // With a replacement that does change bytes, only the matching file is
     // listed.
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-l", "foo", "qux"])
         .current_dir(dir.path())
         .output()
@@ -560,7 +651,7 @@ fn list_files_with_replace_lists_only_files_that_would_change() {
 
 #[test]
 fn stdin_mode_writes_replaced_text_to_stdout() {
-    let mut child = Command::new(REP)
+    let mut child = rep_command()
         .args(["foo", "bar"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -585,7 +676,7 @@ fn stdin_mode_writes_replaced_text_to_stdout() {
 
 #[test]
 fn explicit_stdin_path_reads_replaced_text_from_stdin() {
-    let mut child = Command::new(REP)
+    let mut child = rep_command()
         .args(["foo", "bar", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -609,7 +700,7 @@ fn explicit_stdin_path_reads_replaced_text_from_stdin() {
 
 #[test]
 fn explicit_help_writes_to_stdout() {
-    let output = Command::new(REP).arg("-h").output().unwrap();
+    let output = rep_command().arg("-h").output().unwrap();
     assert!(output.status.success());
     assert!(output.stderr.is_empty(), "stderr: {:?}", output.stderr);
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -628,14 +719,9 @@ Filter
 
   -f, --files <glob>            Smart glob patterns to match files against
   -H, --hidden                  Search hidden files and directories
-      --no-ignore               Don't respect ignore files
+      --no-ignore               Do not respect ignore files
 
-Replace
-
-  -e, --expression <f> <r>      Repeatable <find> <replace> expression
-  -S, --smart                   Replace all case variants of the pattern
-
-Regex
+Match
 
   -G, --greedy                  Use greedy matching for regular expressions
   -i, --ignore-case             Case-insensitive matching
@@ -645,14 +731,89 @@ Regex
   -w, --word-regexp             Match only whole words
   -x, --line-regexp             Match only whole lines
 
-Behavior
+Replace
 
+  -e, --expression <f> <r>      Repeatable <find> <replace> expression
+  -S, --smart                   Replace all case variants of the pattern
   -d, --delete                  Delete lines matching <find>
 
+Mode
+
+  -n, --dry-run                 Show what would be changed without writing (default)
+  -W, --write                   Apply changes to disk
+  -p, --preview                 Preview the changes before applying them
+      --preview-tool <cmd>      External diff tool for preview mode
+
   -l, --list-files              Print file paths that would be changed
+
+Miscellaneous
+
+      --color <when>            When to use color
+      --hyperlink-format <fmt>  Terminal hyperlink format
+
+  -q, --quiet                   Suppress summary output
+  -V, --version                 Print version
+
+  -h                            Print short help
+      --help                    Print long help with examples
+"
+    );
+}
+
+#[test]
+fn rc_write_promotes_write_above_dry_run_in_help() {
+    let dir = tempdir().unwrap();
+    let rc = dir.path().join("reprc");
+    write(&rc, "--write\n");
+
+    let output = rep_command()
+        .env("REP_CONFIG_PATH", &rc)
+        .arg("-h")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "\
+Usage
+
+  rep [options] <find> <replace> [<path>…]
+
+    <find>     String to find
+    <replace>  String to replace with
+    <path>…    Paths to search in (optional)
+
+Filter
+
+  -f, --files <glob>            Smart glob patterns to match files against
+  -H, --hidden                  Search hidden files and directories
+      --no-ignore               Do not respect ignore files
+
+Match
+
+  -G, --greedy                  Use greedy matching for regular expressions
+  -i, --ignore-case             Case-insensitive matching
+  -m, --multiline               Search across multiple lines
+      --dotall                  Allow dot to match newlines
+  -r, --regex                   Treat patterns as regular expressions
+  -w, --word-regexp             Match only whole words
+  -x, --line-regexp             Match only whole lines
+
+Replace
+
+  -e, --expression <f> <r>      Repeatable <find> <replace> expression
+  -S, --smart                   Replace all case variants of the pattern
+  -d, --delete                  Delete lines matching <find>
+
+Mode
+
+  -W, --write                   Apply changes to disk (default)
   -n, --dry-run                 Show what would be changed without writing
   -p, --preview                 Preview the changes before applying them
       --preview-tool <cmd>      External diff tool for preview mode
+
+  -l, --list-files              Print file paths that would be changed
 
 Miscellaneous
 
@@ -676,8 +837,8 @@ fn file_glob_limits_writes_to_matching_extension() {
     write(&txt, "foo");
     write(&md, "foo");
 
-    let status = Command::new(REP)
-        .args(["-f", "txt", "foo", "bar", "."])
+    let status = rep_command()
+        .args(["-W", "-f", "txt", "foo", "bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -696,8 +857,8 @@ fn hidden_mode_skips_gitignored_and_vcs_paths() {
     fs::create_dir(dir.path().join(".git")).unwrap();
     write(&dir.path().join(".git/config"), "foo");
 
-    let status = Command::new(REP)
-        .args(["--hidden", "foo", "bar", "."])
+    let status = rep_command()
+        .args(["-W", "--hidden", "foo", "bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -715,8 +876,8 @@ fn no_ignore_with_hidden_still_skips_vcs_paths() {
     write(&dir.path().join(".git/config"), "foo");
     write(&dir.path().join("file.txt"), "foo");
 
-    let status = Command::new(REP)
-        .args(["--no-ignore", "--hidden", "foo", "bar", "."])
+    let status = rep_command()
+        .args(["-W", "--no-ignore", "--hidden", "foo", "bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -751,8 +912,8 @@ Hello_World
 ";
     write(&file, input);
 
-    let status = Command::new(REP)
-        .args(["--smart", "foo_bar", "hello_world", "."])
+    let status = rep_command()
+        .args(["-W", "--smart", "foo_bar", "hello_world", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -768,7 +929,7 @@ fn smart_mode_rejects_multiple_paths_with_clear_error() {
     write(&a, "foo_bar");
     write(&b, "foo_bar");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["--smart", "foo_bar", "hello_world", "a.txt", "b.txt"])
         .current_dir(dir.path())
         .output()
@@ -790,8 +951,8 @@ fn delete_mode_removes_matching_lines_in_file() {
     let file = dir.path().join("a.txt");
     write(&file, "keep\nhas foo here\nkeep too\nanother foo\ntail\n");
 
-    let status = Command::new(REP)
-        .args(["-d", "foo", "."])
+    let status = rep_command()
+        .args(["-W", "-d", "foo", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -808,8 +969,8 @@ fn delete_mode_with_smart_removes_all_case_variants() {
         "hello_world here\nHelloWorld line\nhelloWorld line\nHELLO_WORLD line\nhello-world line\nkeep me\n",
     );
 
-    let status = Command::new(REP)
-        .args(["-d", "--smart", "hello_world", "."])
+    let status = rep_command()
+        .args(["-W", "-d", "--smart", "hello_world", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -825,7 +986,7 @@ fn delete_mode_with_list_files_prints_matching_paths_without_modifying() {
     write(&a, "has foo\nother\n");
     write(&b, "nothing here\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-d", "-l", "foo", "."])
         .current_dir(dir.path())
         .output()
@@ -847,8 +1008,8 @@ fn rewrites_file_with_invalid_utf8_preserving_non_utf8_bytes() {
     let input: &[u8] = b"pre\xfffoo\xfepost\n";
     fs::write(&file, input).unwrap();
 
-    let status = Command::new(REP)
-        .args(["foo", "bar", "."])
+    let status = rep_command()
+        .args(["-W", "foo", "bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -869,8 +1030,8 @@ fn delete_mode_with_expression_matches_raw_string_including_equals() {
         "keep\nconfig foo=bar here\nline with just foo\nline with just bar\ntail\n",
     );
 
-    let status = Command::new(REP)
-        .args(["-d", "-e", "foo=bar", "."])
+    let status = rep_command()
+        .args(["-W", "-d", "-e", "foo=bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -891,8 +1052,8 @@ fn delete_mode_with_expression_treats_trailing_arg_as_path_not_replace() {
     write(&inside, "keep\nfoo line\ntail\n");
     write(&outside, "keep\nfoo line\ntail\n");
 
-    let status = Command::new(REP)
-        .args(["-d", "-e", "foo", "sub"])
+    let status = rep_command()
+        .args(["-W", "-d", "-e", "foo", "sub"])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -914,9 +1075,9 @@ fn rc_file_flags_are_applied_via_config_path() {
     let rc = dir.path().join("reprc");
     write(&rc, "# enable hidden\n--hidden\n");
 
-    let status = Command::new(REP)
+    let status = rep_command()
         .env("REP_CONFIG_PATH", &rc)
-        .args(["foo", "bar", "."])
+        .args(["-W", "foo", "bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -938,9 +1099,9 @@ fn cli_args_override_rc_args() {
     let rc = dir.path().join("reprc");
     write(&rc, "--files=*.md\n");
 
-    let status = Command::new(REP)
+    let status = rep_command()
         .env("REP_CONFIG_PATH", &rc)
-        .args(["--files=*.txt", "foo", "bar", "."])
+        .args(["-W", "--files=*.txt", "foo", "bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -956,9 +1117,9 @@ fn empty_or_missing_rc_path_is_ignored() {
     write(&file, "foo");
 
     // Point at a non-existent file: rep should run normally.
-    let status = Command::new(REP)
+    let status = rep_command()
         .env("REP_CONFIG_PATH", dir.path().join("nope"))
-        .args(["foo", "bar", "."])
+        .args(["-W", "foo", "bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
@@ -986,7 +1147,7 @@ fn color_always_forces_rich_layout_through_pipe() {
     write(&a, "foo bar foo\n");
     write(&b, "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1015,7 +1176,7 @@ fn color_always_forces_rich_layout_through_pipe() {
 \x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
 \x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
 
-\x1b[1m\x1b[33mWould perform 3 replacements in 2 files\x1b[m
+\x1b[1m\x1b[33mWould perform 3 replacements in 2 files\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1026,7 +1187,7 @@ fn color_always_wraps_diff_text_in_red_and_green() {
     let file = dir.path().join("a.txt");
     write(&file, "foo line\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1047,7 +1208,7 @@ fn color_always_wraps_diff_text_in_red_and_green() {
 \x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m line
 \x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m line
 
-\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1058,7 +1219,7 @@ fn color_always_highlights_merged_token_replacements_at_char_granularity() {
     let file = dir.path().join("a.txt");
     write(&file, "github.workflow\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1079,7 +1240,7 @@ fn color_always_highlights_merged_token_replacements_at_char_granularity() {
 \x1b[31m\x1b[2m1\x1b[m github\x1b[31m\x1b[4m.\x1b[mworkflow
 \x1b[32m\x1b[2m1\x1b[m github\x1b[32m\x1b[4mb\x1b[mworkflow
 
-\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1094,7 +1255,7 @@ fn color_always_highlights_only_changed_chars_for_multi_match_lines() {
     let file = dir.path().join("a.txt");
     write(&file, "output.status.success\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1130,7 +1291,7 @@ fn color_always_fast_path_handles_utf8_non_adjacent_lines() {
     let file = dir.path().join("a.txt");
     write(&file, "café foo\nkeep\nnaïve foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1152,7 +1313,7 @@ fn color_always_fast_path_handles_utf8_non_adjacent_lines() {
 \x1b[31m\x1b[2m3\x1b[m naïve \x1b[31m\x1b[4mfoo\x1b[m
 \x1b[32m\x1b[2m3\x1b[m naïve \x1b[32m\x1b[4mbar\x1b[m
 
-\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1163,7 +1324,7 @@ fn color_always_multi_expression_linewise_fast_path_preserves_layout() {
     let file = dir.path().join("a.txt");
     write(&file, "static café\nkeep\nconst naïve\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1189,7 +1350,7 @@ fn color_always_multi_expression_linewise_fast_path_preserves_layout() {
 \x1b[31m\x1b[2m3\x1b[m \x1b[31m\x1b[4mconst\x1b[m naïve
 \x1b[32m\x1b[2m3\x1b[m \x1b[32m\x1b[4mCONST\x1b[m naïve
 
-\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1200,7 +1361,7 @@ fn color_always_multi_expression_symbols_only_highlights_replacements() {
     let file = dir.path().join("a.txt");
     write(&file, "alpha.foo\nbeta—gamma\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1227,7 +1388,7 @@ fn color_always_multi_expression_symbols_only_highlights_replacements() {
 \x1b[31m\x1b[2m2\x1b[m beta\x1b[31m\x1b[4m—\x1b[mgamma
 \x1b[32m\x1b[2m2\x1b[m beta\x1b[32m\x1b[4m-\x1b[mgamma
 
-\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1238,8 +1399,9 @@ fn color_always_apply_multi_expression_symbols_only_highlights_replacements() {
     let file = dir.path().join("a.txt");
     write(&file, "alpha.foo\nbeta—gamma\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
+            "-W",
             "--color=always",
             "--hyperlink-format=none",
             "-e",
@@ -1276,7 +1438,7 @@ fn color_always_multiline_span_fast_path_preserves_chained_utf8_context() {
     let file = dir.path().join("a.txt");
     write(&file, "α static ω\nβ static δ\nkeep\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1301,7 +1463,7 @@ fn color_always_multiline_span_fast_path_preserves_chained_utf8_context() {
 \x1b[32m\x1b[2m3\x1b[m β \x1b[32m\x1b[4mSTATIC\x1b[m
 \x1b[32m\x1b[2m4\x1b[m  δ
 
-\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1316,7 +1478,7 @@ fn color_always_highlights_each_replacement_symmetrically() {
     let file = dir.path().join("a.txt");
     write(&file, "a.b.c.d.e.f\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1349,7 +1511,7 @@ fn color_never_keeps_patch_format_through_pipe() {
     let file = dir.path().join("a.txt");
     write(&file, "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "--color=never", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
@@ -1374,7 +1536,7 @@ fn color_auto_under_pipe_keeps_patch_format() {
     let file = dir.path().join("a.txt");
     write(&file, "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
@@ -1401,7 +1563,7 @@ fn color_always_outranks_no_color_env() {
     let file = dir.path().join("a.txt");
     write(&file, "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .env("NO_COLOR", "1")
         .args([
             "-n",
@@ -1423,7 +1585,7 @@ fn color_always_outranks_no_color_env() {
 \x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
 \x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
 
-\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1436,7 +1598,7 @@ fn no_color_env_strips_ansi_under_auto() {
     let file = dir.path().join("a.txt");
     write(&file, "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .env("NO_COLOR", "1")
         .args(["-n", "foo", "bar", "."])
         .current_dir(dir.path())
@@ -1462,7 +1624,7 @@ fn colour_alias_behaves_like_color() {
     let file = dir.path().join("a.txt");
     write(&file, "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--colour=always",
@@ -1483,7 +1645,7 @@ fn colour_alias_behaves_like_color() {
 \x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
 \x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
 
-\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1493,7 +1655,7 @@ fn style_added_overrides_diff_color() {
     let dir = tempdir().unwrap();
     write(&dir.path().join("a.txt"), "foo line\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1515,7 +1677,7 @@ fn style_added_overrides_diff_color() {
 \x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m line
 \x1b[32m\x1b[2m1\x1b[m \x1b[34m\x1b[1mbar\x1b[m line
 
-\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1525,7 +1687,7 @@ fn marker_added_shows_explicit_string_even_when_colored() {
     let dir = tempdir().unwrap();
     write(&dir.path().join("a.txt"), "foo line\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args([
             "-n",
             "--color=always",
@@ -1548,7 +1710,7 @@ fn marker_added_shows_explicit_string_even_when_colored() {
 \x1b[31m\x1b[2m1\x1b[m<<\x1b[31m\x1b[4mfoo\x1b[m line
 \x1b[32m\x1b[2m1\x1b[m>>\x1b[32m\x1b[4mbar\x1b[m line
 
-\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
+\x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
 }
@@ -1558,7 +1720,7 @@ fn invalid_style_value_is_rejected() {
     let dir = tempdir().unwrap();
     write(&dir.path().join("a.txt"), "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "--style-added=boold", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()
@@ -1573,7 +1735,7 @@ fn invalid_style_value_is_rejected() {
 
 #[test]
 fn short_help_hides_style_section() {
-    let output = Command::new(REP).arg("-h").output().unwrap();
+    let output = rep_command().arg("-h").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -1586,7 +1748,7 @@ fn short_help_hides_style_section() {
 
 #[test]
 fn long_help_shows_style_section_before_miscellaneous() {
-    let output = Command::new(REP).arg("--help").output().unwrap();
+    let output = rep_command().arg("--help").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let style_start = stdout.find("Style\n").expect("Style heading present");
@@ -1615,7 +1777,7 @@ fn invalid_color_value_is_rejected() {
     let dir = tempdir().unwrap();
     write(&dir.path().join("a.txt"), "foo\n");
 
-    let output = Command::new(REP)
+    let output = rep_command()
         .args(["-n", "--color=bogus", "foo", "bar", "."])
         .current_dir(dir.path())
         .output()

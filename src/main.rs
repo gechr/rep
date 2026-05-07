@@ -94,7 +94,7 @@ struct Cli {
 
     #[arg(
         long = "no-ignore",
-        help = "Don't respect ignore files",
+        help = "Do not respect ignore files",
         help_heading = "Filter"
     )]
     no_ignore: bool,
@@ -120,7 +120,7 @@ struct Cli {
         short = 'G',
         long = "greedy",
         help = "Use greedy matching for regular expressions",
-        help_heading = "Regex"
+        help_heading = "Match"
     )]
     greedy: bool,
 
@@ -128,7 +128,7 @@ struct Cli {
         short = 'i',
         long = "ignore-case",
         help = "Case-insensitive matching",
-        help_heading = "Regex"
+        help_heading = "Match"
     )]
     ignore_case: bool,
 
@@ -136,14 +136,14 @@ struct Cli {
         short = 'm',
         long = "multiline",
         help = "Search across multiple lines",
-        help_heading = "Regex"
+        help_heading = "Match"
     )]
     multiline: bool,
 
     #[arg(
         long = "dotall",
         help = "Allow dot to match newlines",
-        help_heading = "Regex"
+        help_heading = "Match"
     )]
     dotall: bool,
 
@@ -152,7 +152,7 @@ struct Cli {
         long = "regex",
         alias = "regexp",
         help = "Treat patterns as regular expressions",
-        help_heading = "Regex"
+        help_heading = "Match"
     )]
     regexp: bool,
 
@@ -160,7 +160,7 @@ struct Cli {
         short = 'w',
         long = "word-regexp",
         help = "Match only whole words",
-        help_heading = "Regex"
+        help_heading = "Match"
     )]
     word_regexp: bool,
 
@@ -168,7 +168,7 @@ struct Cli {
         short = 'x',
         long = "line-regexp",
         help = "Match only whole lines",
-        help_heading = "Regex"
+        help_heading = "Match"
     )]
     line_regexp: bool,
 
@@ -176,33 +176,35 @@ struct Cli {
         short = 'd',
         long = "delete",
         help = "Delete lines matching <find>",
-        help_heading = "Behavior"
+        help_heading = "Replace"
     )]
     delete: bool,
-
-    #[arg(
-        short = 'l',
-        long = "list-files",
-        help = "Print file paths that would be changed",
-        help_heading = "Behavior"
-    )]
-    list_files: bool,
 
     #[arg(
         short = 'n',
         long = "dry-run",
         alias = "dry",
-        conflicts_with = "preview",
+        overrides_with_all = ["write", "preview"],
         help = "Show what would be changed without writing",
-        help_heading = "Behavior"
+        help_heading = "Mode"
     )]
     dry_run: bool,
 
     #[arg(
+        short = 'W',
+        long = "write",
+        overrides_with_all = ["dry_run", "preview"],
+        help = "Apply changes to disk",
+        help_heading = "Mode"
+    )]
+    write: bool,
+
+    #[arg(
         short = 'p',
         long = "preview",
+        overrides_with_all = ["dry_run", "write"],
         help = "Preview the changes before applying them",
-        help_heading = "Behavior"
+        help_heading = "Mode"
     )]
     preview: bool,
 
@@ -212,9 +214,17 @@ struct Cli {
         requires = "preview",
         overrides_with = "preview_tool",
         help = "External diff tool for preview mode",
-        help_heading = "Behavior"
+        help_heading = "Mode"
     )]
     preview_tool: Option<String>,
+
+    #[arg(
+        short = 'l',
+        long = "list-files",
+        help = "Print file paths that would be changed",
+        help_heading = "Mode"
+    )]
+    list_files: bool,
 
     #[arg(
         long = "hyperlink-format",
@@ -320,18 +330,24 @@ struct Cli {
 
     #[arg(long = "completions", value_name = "shell", hide = true)]
     completions: Option<Shell>,
+
+    #[arg(long = "no-hints", overrides_with_all = ["hints", "no_hints"], hide = true)]
+    no_hints: bool,
+
+    #[arg(long = "hints", overrides_with_all = ["no_hints", "hints"], hide = true)]
+    hints: bool,
 }
 
-const HELP_SECTIONS: &[&str] = &["Filter", "Replace", "Regex", "Behavior", "Miscellaneous"];
+const HELP_SECTIONS: &[&str] = &["Filter", "Match", "Replace", "Mode", "Miscellaneous"];
 const LONG_HELP_SECTIONS: &[&str] = &[
     "Filter",
+    "Match",
     "Replace",
-    "Regex",
-    "Behavior",
+    "Mode",
     "Style",
     "Miscellaneous",
 ];
-const SECTION_SPACERS: &[&str] = &["delete", "hyperlink_format", "version"];
+const SECTION_SPACERS: &[&str] = &["preview_tool", "hyperlink_format", "version"];
 
 /// Clap auto-assigns a `value_name` to every arg, including bool flags. Gate on
 /// the action so `--quiet` doesn't render as `--quiet <QUIET>`.
@@ -382,6 +398,22 @@ fn colorize_help_metavars(help: &str, styles: Styles) -> String {
         .replace("<replace>", &format!("{blue}<replace>{reset}"))
 }
 
+/// The id of the mode flag that "wins" given rc state - i.e. the flag that
+/// would be active if no mode flag is passed on the CLI. Mirrors the dispatch
+/// in `run`: `cli.write` first, then `cli.preview`, fallthrough to dry-run.
+fn current_default_mode_id() -> &'static str {
+    let mut id = "dry_run";
+    for arg in config::rc_args() {
+        match arg.to_str() {
+            Some("-n" | "--dry-run" | "--dry") => id = "dry_run",
+            Some("-W" | "--write") => id = "write",
+            Some("-p" | "--preview") => id = "preview",
+            _ => {}
+        }
+    }
+    id
+}
+
 fn print_help() {
     print_help_with(HELP_SECTIONS);
 }
@@ -410,6 +442,7 @@ fn print_help_with(sections: &[&str]) {
     );
 
     let cmd = Cli::command();
+    let default_mode = current_default_mode_id();
 
     // Synthesized for the renderer: the real `--version` is added by clap's
     // build pass, which `Cli::command()` doesn't trigger.
@@ -440,7 +473,11 @@ fn print_help_with(sections: &[&str]) {
             .filter(|(_, a)| a.get_help_heading() == Some(*section))
             .copied()
             .collect();
-        rows.sort_by_key(|(idx, a)| (a.get_display_order(), *idx));
+        // Promote the active default mode flag to the top of its section.
+        rows.sort_by_key(|(idx, a)| {
+            let is_default = a.get_id().as_str() == default_mode;
+            (!is_default, a.get_display_order(), *idx)
+        });
         if rows.is_empty() {
             continue;
         }
@@ -454,7 +491,12 @@ fn print_help_with(sections: &[&str]) {
             let pad = (cell + 2).saturating_sub(arg_body_width(arg)).max(2);
             let help_text = arg.get_help().map(ToString::to_string).unwrap_or_default();
             let help = colorize_help_metavars(&help_text, styles);
-            println!("  {body}{}{help}", " ".repeat(pad));
+            let suffix = if arg.get_id().as_str() == default_mode {
+                format!(" {grey}(default){reset}")
+            } else {
+                String::new()
+            };
+            println!("  {body}{}{help}{suffix}", " ".repeat(pad));
 
             if SECTION_SPACERS.contains(&arg.get_id().as_str()) {
                 println!();
@@ -1120,6 +1162,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
         cli.quiet,
         cli.delete,
         !write,
+        cli.no_hints,
         hyperlink_format.as_deref(),
     );
     Ok(())
@@ -1233,6 +1276,7 @@ fn print_results(
     quiet: bool,
     delete: bool,
     dry: bool,
+    no_hints: bool,
     hyperlink_format: Option<&str>,
 ) {
     if !dry && quiet {
@@ -1291,8 +1335,19 @@ fn print_results(
     if total_files > 0 {
         let color = if dry { Color::Yellow } else { Color::Green };
         let msg = summary_message(total_files, total_matches, delete, dry);
+        let hint = if dry && !no_hints {
+            let yellow = styles.fg(Color::Yellow);
+            let green = styles.fg(Color::Green);
+            let dim = styles.dim();
+            let reset = styles.reset();
+            format!(
+                " {yellow}{dim}(pass {reset}{green}{dim}--write{reset}{yellow}{dim} to apply){reset}"
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "\n{}{}{}{}",
+            "\n{}{}{}{}{hint}",
             styles.bold(),
             styles.fg(color),
             msg,
@@ -1424,12 +1479,12 @@ fn run() -> Result<()> {
 
     if is_stdin_mode {
         run_stdin(&cli)
-    } else if cli.dry_run {
-        run_walk_and_apply(&cli, false)
+    } else if cli.write {
+        run_walk_and_apply(&cli, true)
     } else if cli.preview {
         run_preview(&cli)
     } else {
-        run_walk_and_apply(&cli, true)
+        run_walk_and_apply(&cli, false)
     }
 }
 
@@ -1476,6 +1531,35 @@ mod tests {
             parse_file_globs("rs, =Dockerfile, !txt"),
             vec!["*.rs", "Dockerfile", "!*.txt"]
         );
+    }
+
+    #[test]
+    fn test_write_overrides_dry_run_last_wins() {
+        let cli = parse_cli(&["rep", "--dry-run", "-W", "a", "b"]);
+        assert!(!cli.dry_run);
+        assert!(cli.write);
+        assert!(!cli.preview);
+    }
+
+    #[test]
+    fn test_dry_run_overrides_write_last_wins() {
+        let cli = parse_cli(&["rep", "-W", "--dry-run", "a", "b"]);
+        assert!(cli.dry_run);
+        assert!(!cli.write);
+    }
+
+    #[test]
+    fn test_preview_overrides_dry_run_last_wins() {
+        let cli = parse_cli(&["rep", "--dry-run", "--preview", "a", "b"]);
+        assert!(!cli.dry_run);
+        assert!(cli.preview);
+    }
+
+    #[test]
+    fn test_dry_run_overrides_preview_last_wins() {
+        let cli = parse_cli(&["rep", "--preview", "--dry-run", "a", "b"]);
+        assert!(cli.dry_run);
+        assert!(!cli.preview);
     }
 
     #[test]
