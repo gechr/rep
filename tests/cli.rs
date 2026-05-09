@@ -1789,3 +1789,72 @@ fn invalid_color_value_is_rejected() {
         "error: invalid value 'bogus' for '--color <when>'\n  [possible values: auto, always, never]\n"
     );
 }
+
+/// Set up a directory with two matching lines and run `rep` with the given
+/// `--hyperlink-limit`. Returns the diff portion of stdout (everything before
+/// the trailing summary), so tests can assert on hyperlink presence.
+fn run_hyperlink_limit(limit: &str) -> String {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\nfoo\n");
+    let output = rep_command()
+        .args([
+            "--color=always",
+            "--hyperlink-format=vscode",
+            "--hyperlink-limit",
+            limit,
+            "foo",
+            "bar",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn hyperlink_limit_at_threshold_keeps_osc8() {
+    let stdout = run_hyperlink_limit("2");
+    assert!(
+        stdout.contains("\x1b]8;;"),
+        "exactly at limit should still emit OSC 8: {stdout:?}"
+    );
+}
+
+#[test]
+fn hyperlink_limit_above_threshold_suppresses_osc8() {
+    let stdout = run_hyperlink_limit("1");
+    assert!(
+        !stdout.contains("\x1b]8;;"),
+        "limit + 1 should suppress OSC 8: {stdout:?}"
+    );
+}
+
+#[test]
+fn hyperlink_limit_zero_is_unlimited() {
+    let stdout = run_hyperlink_limit("0");
+    assert!(
+        stdout.contains("\x1b]8;;"),
+        "0 means unlimited and should keep OSC 8: {stdout:?}"
+    );
+}
+
+#[test]
+fn hyperlink_limit_rejects_negative_value() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo\n");
+    let output = rep_command()
+        .args(["--hyperlink-limit", "-1", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "negative limit must be rejected");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr,
+        "error: invalid value '-1' for '--hyperlink-limit <n>': invalid digit found in string\n",
+    );
+}

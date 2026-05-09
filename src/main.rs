@@ -237,6 +237,19 @@ struct Cli {
     hyperlink_format: Option<String>,
 
     #[arg(
+        long = "hyperlink-limit",
+        value_name = "n",
+        default_value_t = DEFAULT_HYPERLINK_LIMIT,
+        overrides_with = "hyperlink_limit",
+        allow_negative_numbers = true,
+        hide_short_help = true,
+        help = "Disable hyperlinks above this many matches (0 = unlimited)",
+        help_heading = "Miscellaneous",
+        display_order = 101
+    )]
+    hyperlink_limit: u64,
+
+    #[arg(
         long = "color",
         alias = "colour",
         value_name = "when",
@@ -338,6 +351,8 @@ struct Cli {
     hints: bool,
 }
 
+const DEFAULT_HYPERLINK_LIMIT: u64 = 50_000;
+
 const HELP_SECTIONS: &[&str] = &["Filter", "Match", "Replace", "Mode", "Miscellaneous"];
 const LONG_HELP_SECTIONS: &[&str] = &[
     "Filter",
@@ -347,7 +362,12 @@ const LONG_HELP_SECTIONS: &[&str] = &[
     "Style",
     "Miscellaneous",
 ];
-const SECTION_SPACERS: &[&str] = &["preview_tool", "hyperlink_format", "version"];
+const SECTION_SPACERS: &[&str] = &[
+    "preview_tool",
+    "hyperlink_format",
+    "hyperlink_limit",
+    "version",
+];
 
 /// Clap auto-assigns a `value_name` to every arg, including bool flags. Gate on
 /// the action so `--quiet` doesn't render as `--quiet <QUIET>`.
@@ -393,9 +413,20 @@ fn render_arg_body(arg: &clap::Arg, styles: Styles) -> String {
 
 fn colorize_help_metavars(help: &str, styles: Styles) -> String {
     let blue = styles.fg(Color::Blue);
+    let grey = styles.fg(Color::Grey);
     let reset = styles.reset();
-    help.replace("<find>", &format!("{blue}<find>{reset}"))
-        .replace("<replace>", &format!("{blue}<replace>{reset}"))
+    let mut out = help
+        .replace("<find>", &format!("{blue}<find>{reset}"))
+        .replace("<replace>", &format!("{blue}<replace>{reset}"));
+    if let Some(open) = out.rfind(" (")
+        && out.ends_with(')')
+    {
+        let tail = &out[open + 1..];
+        let styled = format!(" {grey}{tail}{reset}");
+        out.truncate(open);
+        out.push_str(&styled);
+    }
+    out
 }
 
 /// The id of the mode flag that "wins" given rc state - i.e. the flag that
@@ -415,10 +446,10 @@ fn current_default_mode_id() -> &'static str {
 }
 
 fn print_help() {
-    print_help_with(HELP_SECTIONS);
+    print_help_with(HELP_SECTIONS, false);
 }
 
-fn print_help_with(sections: &[&str]) {
+fn print_help_with(sections: &[&str], long: bool) {
     let styles = ui::Styles::when(std::io::stdout().is_terminal());
     let bold = styles.bold();
     let red = styles.fg(Color::Red);
@@ -457,6 +488,7 @@ fn print_help_with(sections: &[&str]) {
         .get_arguments()
         .enumerate()
         .filter(|(_, a)| !a.is_hide_set())
+        .filter(|(_, a)| long || !a.is_hide_short_help_set())
         .filter(|(_, a)| a.get_help_heading().is_none_or(|h| sections.contains(&h)))
         .collect();
     visible.push((visible.len(), &version_arg));
@@ -486,7 +518,8 @@ fn print_help_with(sections: &[&str]) {
         println!("{yellow}{bold}{section}{reset}");
         println!();
 
-        for (_, arg) in &rows {
+        let mut iter = rows.iter().peekable();
+        while let Some((_, arg)) = iter.next() {
             let body = render_arg_body(arg, styles);
             let pad = (cell + 2).saturating_sub(arg_body_width(arg)).max(2);
             let help_text = arg.get_help().map(ToString::to_string).unwrap_or_default();
@@ -498,7 +531,15 @@ fn print_help_with(sections: &[&str]) {
             };
             println!("  {body}{}{help}{suffix}", " ".repeat(pad));
 
-            if SECTION_SPACERS.contains(&arg.get_id().as_str()) {
+            // Suppress the blank when the next visible row is itself a
+            // spacer entry: this keeps tight groups (e.g. --hyperlink-format
+            // and --hyperlink-limit) visually together while still inserting
+            // a single blank after the group ends.
+            if SECTION_SPACERS.contains(&arg.get_id().as_str())
+                && iter
+                    .peek()
+                    .is_none_or(|(_, next)| !SECTION_SPACERS.contains(&next.get_id().as_str()))
+            {
                 println!();
             }
         }
@@ -513,7 +554,7 @@ fn print_help_long() {
     let grey = styles.fg(Color::Grey);
     let reset = styles.reset();
 
-    print_help_with(LONG_HELP_SECTIONS);
+    print_help_with(LONG_HELP_SECTIONS, true);
 
     let text = format!(
         "
@@ -1164,6 +1205,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
         !write,
         cli.no_hints,
         hyperlink_format.as_deref(),
+        cli.hyperlink_limit,
     );
     Ok(())
 }
@@ -1278,6 +1320,7 @@ fn print_results(
     dry: bool,
     no_hints: bool,
     hyperlink_format: Option<&str>,
+    hyperlink_limit: u64,
 ) {
     if !dry && quiet {
         return;
@@ -1295,7 +1338,18 @@ fn print_results(
     let total_files = results.len();
     let total_matches: usize = results.iter().map(|result| result.count).sum();
     let styles = Styles::when(true);
-    let template = hyperlink_format.map(HyperlinkTemplate::parse);
+    // When the match count blows past the configured limit, the per-line
+    // OSC 8 sequences become a tax on the terminal (parsing, scrollback
+    // tracking) without any practical benefit - users can't click through
+    // thousands of links anyway. A limit of 0 means "always render".
+    let hyperlinks_disabled_by_limit = hyperlink_limit > 0
+        && total_matches > usize::try_from(hyperlink_limit).unwrap_or(usize::MAX);
+    let effective_format = if hyperlinks_disabled_by_limit {
+        None
+    } else {
+        hyperlink_format
+    };
+    let template = effective_format.map(HyperlinkTemplate::parse);
     for (idx, result) in results.iter().enumerate() {
         let count = with_commas(result.count);
         let encoded_path = template
