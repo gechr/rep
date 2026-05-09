@@ -2,7 +2,9 @@
 
 `rep` is a fast find-and-replace tool, based on [fastmod](https://github.com/facebookincubator/fastmod).
 
-Features plain and regex replacement, case-aware rewrites (`--smart` for identifiers, `--preserve` for mirroring source case), interactive preview, line deletion, file listing, dry runs, stdin mode, and multiple `-e/--expression` replacements in one pass.
+Features plain and regex replacement, case-aware rewrites (`--smart` for identifiers, `--preserve` for mirroring source case), interactive preview, line deletion, file listing, stdin mode, and multiple `-e/--expression` replacements in one pass.
+
+By default `rep` prints a diff without touching the filesystem; pass `-W` to apply changes or `-p` to step through them interactively.
 
 ## Install
 
@@ -63,6 +65,8 @@ rep -e foo bar -e baz qux src
 # Delete every line containing "TODO"
 rep -d TODO
 ```
+
+Run `rep --help` for the full reference, including the styling and hyperlink flags.
 
 ## Case-aware replacement
 
