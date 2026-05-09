@@ -2,7 +2,7 @@
 
 `rep` is a fast find-and-replace tool, based on [fastmod](https://github.com/facebookincubator/fastmod).
 
-Features plain and regex replacement, smart preserve-case rewrites, interactive preview, line deletion, file listing, dry runs, stdin mode, and multiple `-e/--expression` replacements in one pass.
+Features plain and regex replacement, case-aware rewrites (`--smart` for identifiers, `--preserve` for mirroring source case), interactive preview, line deletion, file listing, dry runs, stdin mode, and multiple `-e/--expression` replacements in one pass.
 
 ## Install
 
@@ -63,6 +63,45 @@ rep -e foo bar -e baz qux src
 # Delete every line containing "TODO"
 rep -d TODO
 ```
+
+## Case-aware replacement
+
+`rep` offers two strategies for case-aware replacement. They solve different problems and are mutually exclusive - passing both makes the later flag win (so a flag in `~/.reprc` can be overridden on the command line).
+
+### `-S, --smart` - identifier renames across naming conventions
+
+Generates the standard identifier case variants of `<find>` and `<replace>` (snake_case, camelCase, PascalCase, kebab-case, SCREAMING_SNAKE_CASE, Train-Case, Ada_Case) and rewrites whichever variant appears in the source to the matching variant of the replacement.
+
+```sh
+rep --smart foo_bar hello_world
+```
+
+| Source    | Output        |
+| --------- | ------------- |
+| `foo_bar` | `hello_world` |
+| `fooBar`  | `helloWorld`  |
+| `FooBar`  | `HelloWorld`  |
+| `FOO_BAR` | `HELLO_WORLD` |
+| `foo-bar` | `hello-world` |
+
+Use `--smart` when renaming an identifier across a codebase that uses several naming conventions for the same logical concept.
+
+### `-P, --preserve` - mirror the source's letter case
+
+Matches the pattern case-insensitively as a literal string, then projects the source's letter-case shape onto the replacement: `lowercase`, `Titlecase`, `UPPERCASE`. Anything else (mixed case) falls back to the replacement as authored.
+
+```sh
+rep --preserve colour color
+```
+
+| Source   | Output  | Shape               |
+| -------- | ------- | ------------------- |
+| `colour` | `color` | lowercase           |
+| `Colour` | `Color` | Titlecase           |
+| `COLOUR` | `COLOR` | UPPERCASE           |
+| `cOlOuR` | `color` | mixed → as-authored |
+
+Use `--preserve` for prose, docs, or string-literal rewrites where the same word appears in different case shapes and you want the replacement to follow each one.
 
 ## Configuration
 

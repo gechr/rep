@@ -55,6 +55,62 @@ pub(crate) enum BulkReplacer {
     Literal(String),
     Regex(String),
     Smart(std::sync::Arc<std::collections::HashMap<String, String>>),
+    Preserve(String),
+}
+
+/// Letter-case shape of a matched substring, used by `--preserve` to
+/// project the source's casing onto the replacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaseShape {
+    Lower,
+    Upper,
+    Title,
+    Mixed,
+}
+
+fn detect_case_shape(s: &str) -> CaseShape {
+    let mut letters = s.chars().filter(|c| c.is_alphabetic());
+    let Some(first) = letters.next() else {
+        return CaseShape::Mixed;
+    };
+    let first_upper = first.is_uppercase();
+    let mut has_upper = first_upper;
+    let mut has_lower = !first_upper;
+    let mut rest_upper = false;
+    for c in letters {
+        if c.is_uppercase() {
+            has_upper = true;
+            rest_upper = true;
+        } else if c.is_lowercase() {
+            has_lower = true;
+        }
+    }
+    if !has_upper {
+        CaseShape::Lower
+    } else if !has_lower {
+        CaseShape::Upper
+    } else if first_upper && !rest_upper {
+        CaseShape::Title
+    } else {
+        CaseShape::Mixed
+    }
+}
+
+fn project_case(source: &str, replacement: &str) -> String {
+    match detect_case_shape(source) {
+        CaseShape::Lower => replacement.to_lowercase(),
+        CaseShape::Upper => replacement.to_uppercase(),
+        CaseShape::Title => {
+            let mut chars = replacement.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first
+                    .to_uppercase()
+                    .chain(chars.flat_map(char::to_lowercase))
+                    .collect()
+            })
+        }
+        CaseShape::Mixed => replacement.to_string(),
+    }
 }
 
 /// Byte-level record of one replacement: the span it consumed in the input
@@ -125,6 +181,27 @@ impl regex::bytes::Replacer for CountingRegexReplacer<'_> {
         self.count += 1;
         let before = dst.len();
         caps.expand(self.subst, dst);
+        record_span(&mut self.spans, caps, before, dst.len());
+    }
+}
+
+struct CountingPreserveReplacer<'a> {
+    replacement: &'a str,
+    count: usize,
+    spans: Option<&'a mut Vec<Replacement>>,
+}
+
+impl regex::bytes::Replacer for CountingPreserveReplacer<'_> {
+    fn replace_append(&mut self, caps: &regex::bytes::Captures<'_>, dst: &mut Vec<u8>) {
+        self.count += 1;
+        let before = dst.len();
+        let matched = caps.get(0).expect("full regex match is always present");
+        // The pattern compiled for `--preserve` is `regex::escape`d from a
+        // user-supplied UTF-8 string, so every match is a UTF-8 substring of
+        // the haystack. A non-UTF-8 substring could never have matched.
+        let source = std::str::from_utf8(matched.as_bytes())
+            .expect("preserve pattern matches are always UTF-8");
+        dst.extend_from_slice(project_case(source, self.replacement).as_bytes());
         record_span(&mut self.spans, caps, before, dst.len());
     }
 }
@@ -303,6 +380,64 @@ fn parse_expressions(cli: &Cli) -> Result<Vec<Expression>> {
 }
 
 fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression> {
+    if cli.preserve {
+        // Literal pattern, case-insensitive via embedded `(?i:...)` so the
+        // case-folding stays scoped when this pattern is later joined into
+        // an alternation by `build_pre_filter_matcher`.
+        let escaped = format!("(?i:{})", regex::escape(&expr.find));
+        let wrapped = if cli.line_regexp {
+            format!("^(?:{escaped})$")
+        } else if cli.word_regexp {
+            format!(r"\b(?:{escaped})\b")
+        } else {
+            escaped
+        };
+        let pattern = if cli.delete {
+            wrap_delete_pattern(&wrapped, cli.line_regexp)
+        } else {
+            wrapped
+        };
+        let regex = RegexBuilder::new(&pattern)
+            .multi_line(true)
+            .build()
+            .with_context(|| format!("Invalid pattern: {}", expr.find))?;
+        let bytes_regex = BytesRegexBuilder::new(&pattern)
+            .multi_line(true)
+            .build()
+            .with_context(|| format!("Invalid pattern: {}", expr.find))?;
+        let matcher = RegexMatcherBuilder::new()
+            .multi_line(true)
+            .build(&pattern)?;
+        if cli.delete {
+            return Ok(CompiledExpression {
+                pattern,
+                regex,
+                bytes_regex,
+                matcher,
+                replacer: Box::new(|_: &regex::Captures| String::new()),
+                bulk: BulkReplacer::Literal(String::new()),
+                preserves_line_boundaries: false,
+            });
+        }
+        let replacement = expr.replace.clone();
+        let closure_replacement = replacement.clone();
+        let replacer = move |caps: &regex::Captures| -> String {
+            let matched = caps
+                .get(0)
+                .expect("full regex match is always present")
+                .as_str();
+            project_case(matched, &closure_replacement)
+        };
+        return Ok(CompiledExpression {
+            pattern,
+            regex,
+            bytes_regex,
+            matcher,
+            replacer: Box::new(replacer),
+            bulk: BulkReplacer::Preserve(replacement),
+            preserves_line_boundaries: !expr.find.contains('\n') && !expr.replace.contains('\n'),
+        });
+    }
     if cli.smart {
         let (variant_map, variant_pattern) = build_case_variants(&expr.find, &expr.replace);
         let wrapped = if cli.line_regexp {
@@ -521,6 +656,15 @@ pub(crate) fn apply_compiled_expressions<'a>(
             BulkReplacer::Smart(map) => {
                 let mut rep = CountingSmartReplacer {
                     map,
+                    count: 0,
+                    spans: spans_ref,
+                };
+                let out = expr.bytes_regex.replace_all(&current, rep.by_ref());
+                (out, rep.count)
+            }
+            BulkReplacer::Preserve(replacement) => {
+                let mut rep = CountingPreserveReplacer {
+                    replacement,
                     count: 0,
                     spans: spans_ref,
                 };
@@ -879,6 +1023,220 @@ mod tests {
     fn test_build_pattern_line_regexp() {
         let cli = Cli::parse_from(["rep", "-x", "foo", "bar"]);
         assert_eq!(build_pattern(&cli), "(?U)^(?:foo)$");
+    }
+
+    #[test]
+    fn test_detect_case_shape_classifies_each_shape() {
+        assert_eq!(detect_case_shape("colour"), CaseShape::Lower);
+        assert_eq!(detect_case_shape("Colour"), CaseShape::Title);
+        assert_eq!(detect_case_shape("COLOUR"), CaseShape::Upper);
+        assert_eq!(detect_case_shape("cOlOuR"), CaseShape::Mixed);
+        assert_eq!(detect_case_shape("CoLoUr"), CaseShape::Mixed);
+        // Single-letter sources: one upper char is unambiguously Upper, one
+        // lower char is Lower. Both project to the same string regardless,
+        // but the classification still has to round-trip.
+        assert_eq!(detect_case_shape("F"), CaseShape::Upper);
+        assert_eq!(detect_case_shape("f"), CaseShape::Lower);
+        // Non-letters and empty inputs: nothing to project, falls into Mixed
+        // (the safe passthrough bucket).
+        assert_eq!(detect_case_shape(""), CaseShape::Mixed);
+        assert_eq!(detect_case_shape("123"), CaseShape::Mixed);
+        assert_eq!(detect_case_shape("___"), CaseShape::Mixed);
+    }
+
+    #[test]
+    fn test_detect_case_shape_ignores_non_letters_for_classification() {
+        // Hyphens, digits, and underscores don't carry case, so they don't
+        // promote a clean shape into Mixed.
+        assert_eq!(detect_case_shape("foo-bar"), CaseShape::Lower);
+        assert_eq!(detect_case_shape("Foo-bar"), CaseShape::Title);
+        assert_eq!(detect_case_shape("FOO-BAR"), CaseShape::Upper);
+        assert_eq!(detect_case_shape("foo_123"), CaseShape::Lower);
+    }
+
+    #[test]
+    fn test_project_case_applies_each_shape() {
+        // Lower / Title / Upper override the replacement's authored case.
+        assert_eq!(project_case("foo", "BaR"), "bar");
+        assert_eq!(project_case("Foo", "BaR"), "Bar");
+        assert_eq!(project_case("FOO", "BaR"), "BAR");
+        // Mixed source preserves whatever the user wrote in the replacement.
+        assert_eq!(project_case("fOo", "BaR"), "BaR");
+    }
+
+    #[test]
+    fn test_project_case_handles_empty_and_non_letter_replacements() {
+        assert_eq!(project_case("Foo", ""), "");
+        assert_eq!(project_case("FOO", "123"), "123");
+        // Title-casing a replacement whose first char is not a letter leaves
+        // it unchanged (digits don't have a case).
+        assert_eq!(project_case("Foo", "1bar"), "1bar");
+    }
+
+    #[test]
+    fn test_preserve_projects_source_case_shape() {
+        let cli = Cli::parse_from(["rep", "--preserve", "colour", "color"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("colour\nColour\nCOLOUR\n", &expressions);
+        assert_eq!(output, "color\nColor\nCOLOR\n");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_preserve_passes_replacement_through_for_mixed_source() {
+        let cli = Cli::parse_from(["rep", "--preserve", "colour", "BaR"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("cOlOuR\n", &expressions);
+        // Mixed source: replacement passes through as authored.
+        assert_eq!(output, "BaR\n");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_preserve_replacement_authored_case_is_normalized_for_clean_shapes() {
+        // Even when the user writes the replacement in mixed/explicit case,
+        // a clean source-shape overrides it. This is the load-bearing
+        // guarantee: --preserve hands case decisions to the source.
+        let cli = Cli::parse_from(["rep", "--preserve", "colour", "BaR"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, _) = apply_str("colour Colour COLOUR\n", &expressions);
+        assert_eq!(output, "bar Bar BAR\n");
+    }
+
+    #[test]
+    fn test_preserve_pattern_is_case_insensitive_by_default() {
+        // No -i flag needed - --preserve always matches case-insensitively.
+        let cli = Cli::parse_from(["rep", "--preserve", "foo", "bar"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("foo Foo FOO fOO\n", &expressions);
+        assert_eq!(output, "bar Bar BAR bar\n");
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn test_preserve_handles_multiple_matches_per_line_and_adjacency() {
+        let cli = Cli::parse_from(["rep", "--preserve", "ab", "xy"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("ababAB AbABab\n", &expressions);
+        // Each two-letter window is matched and projected independently.
+        assert_eq!(output, "xyxyXY XyXYxy\n");
+        assert_eq!(count, 6);
+    }
+
+    #[test]
+    fn test_preserve_escapes_regex_metacharacters_in_pattern() {
+        let cli = Cli::parse_from(["rep", "--preserve", "a.b+c", "x.y+z"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("a.b+c A.B+C aXb+c\n", &expressions);
+        // `a.b+c` is matched literally, not as the regex `a.b+c` (which
+        // would also match `aXb+c`).
+        assert_eq!(output, "x.y+z X.Y+Z aXb+c\n");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_preserve_handles_unicode_letters() {
+        let cli = Cli::parse_from(["rep", "--preserve", "café", "kafe"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("café Café CAFÉ\n", &expressions);
+        assert_eq!(output, "kafe Kafe KAFE\n");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_preserve_word_regexp_anchors_at_word_boundaries() {
+        let cli = Cli::parse_from(["rep", "-w", "--preserve", "colour", "color"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("colourful Colour\n", &expressions);
+        // `colourful` is not a whole word; only `Colour` matches.
+        assert_eq!(output, "colourful Color\n");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_preserve_line_regexp_anchors_to_whole_lines() {
+        let cli = Cli::parse_from(["rep", "-x", "--preserve", "colour", "color"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("Colour\nColours\n COLOUR\nCOLOUR\n", &expressions);
+        assert_eq!(output, "Color\nColours\n COLOUR\nCOLOR\n");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_preserve_delete_removes_matching_lines_case_insensitively() {
+        let cli = Cli::parse_from(["rep", "-d", "--preserve", "todo"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str(
+            "real line\n# TODO: fix\n# Todo: review\n# todo: done\nkeep\n",
+            &expressions,
+        );
+        assert_eq!(output, "real line\nkeep\n");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_preserve_multi_expression_chain() {
+        let cli = parse_cli(&[
+            "rep",
+            "--preserve",
+            "-e",
+            "colour",
+            "color",
+            "-e",
+            "favour",
+            "favor",
+        ]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("Colour and FAVOUR\n", &expressions);
+        assert_eq!(output, "Color and FAVOR\n");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_preserve_filters_out_no_op_when_find_equals_replace() {
+        let cli = Cli::parse_from(["rep", "--preserve", "foo", "foo"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        // Per the existing filter in `compile_expressions`, find == replace
+        // is treated as a no-op and produces no compiled expressions.
+        assert!(expressions.is_empty());
+    }
+
+    #[test]
+    fn test_preserve_word_regexp_does_not_match_inside_identifier() {
+        let cli = Cli::parse_from(["rep", "-w", "--preserve", "log", "trace"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("log Log LOG logger Logger LOGGER_KEY\n", &expressions);
+        // Only the whole-word matches are rewritten; `logger`, `Logger`, and
+        // `LOGGER_KEY` are left alone.
+        assert_eq!(output, "trace Trace TRACE logger Logger LOGGER_KEY\n");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_smart_and_preserve_preserve_wins_when_listed_last() {
+        // Mimics rc-then-CLI: rc had `--smart`, CLI passes `--preserve`. The
+        // last flag wins, so --preserve takes effect and the mixed-shape row
+        // matches (smart would have skipped it).
+        let cli = Cli::parse_from(["rep", "--smart", "--preserve", "colour", "color"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let (output, count) = apply_str("cOlOuR\n", &expressions);
+        assert_eq!(output, "color\n");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_smart_and_preserve_smart_wins_when_listed_last() {
+        let cli = Cli::parse_from(["rep", "--preserve", "--smart", "colour", "color"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        // --smart only matches identifier-shape variants; mixed source goes
+        // untouched.
+        let (output, count) = apply_str("cOlOuR\n", &expressions);
+        assert_eq!(output, "cOlOuR\n");
+        assert_eq!(count, 0);
+        // And smart's identifier variants are still active.
+        let (output, count) = apply_str("colour Colour COLOUR\n", &expressions);
+        assert_eq!(output, "color Color COLOR\n");
+        assert_eq!(count, 3);
     }
 
     #[test]

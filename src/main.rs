@@ -111,10 +111,20 @@ struct Cli {
     #[arg(
         short = 'S',
         long = "smart",
+        overrides_with = "preserve",
         help = "Replace all case variants of the pattern",
         help_heading = "Replace"
     )]
     smart: bool,
+
+    #[arg(
+        short = 'P',
+        long = "preserve",
+        overrides_with = "smart",
+        help = "Mirror the <find> case onto the <replace>",
+        help_heading = "Replace"
+    )]
+    preserve: bool,
 
     #[arg(
         short = 'G',

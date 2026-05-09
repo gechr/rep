@@ -735,6 +735,7 @@ Replace
 
   -e, --expression <f> <r>      Repeatable <find> <replace> expression
   -S, --smart                   Replace all case variants of the pattern
+  -P, --preserve                Mirror the <find> case onto the <replace>
   -d, --delete                  Delete lines matching <find>
 
 Mode
@@ -804,6 +805,7 @@ Replace
 
   -e, --expression <f> <r>      Repeatable <find> <replace> expression
   -S, --smart                   Replace all case variants of the pattern
+  -P, --preserve                Mirror the <find> case onto the <replace>
   -d, --delete                  Delete lines matching <find>
 
 Mode
