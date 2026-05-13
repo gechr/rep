@@ -114,11 +114,16 @@ pub(crate) fn print_file_line_diff(
 ) {
     let columns = (!columns.is_empty()).then_some(columns);
     let hyperlinks = Hyperlinks::new(hyperlink_template, encoded_path, columns, styles.is_plain());
-    let trimmed: Vec<Replacement> = hints
-        .spans
-        .iter()
-        .map(|s| trim_shared_affixes(*s, old, new))
-        .collect();
+    let mut trimmed: Vec<Replacement> = Vec::with_capacity(hints.spans.len());
+    for &span in hints.spans {
+        let t = trim_shared_affixes(span, old, new);
+        if let Some((left, right)) = split_inner_substring(t, old, new) {
+            trimmed.push(left);
+            trimmed.push(right);
+        } else {
+            trimmed.push(t);
+        }
+    }
     let spans = trimmed.as_slice();
     let old_line_spans = group_spans_by_line(old, spans, SpanSide::Input);
     let new_line_spans = group_spans_by_line(new, spans, SpanSide::Output);
@@ -294,6 +299,75 @@ fn trim_shared_affixes(span: Replacement, old: &str, new: &str) -> Replacement {
         input_len: span.input_len - prefix - suffix,
         output_start: span.output_start + prefix,
         output_len: span.output_len - prefix - suffix,
+    }
+}
+
+/// Refines a trimmed span when one side appears verbatim inside the other:
+/// splits the larger side into two pure insertion (or deletion) spans wrapping
+/// the shared substring, so wrap-style edits like `a` -> `` `a` `` highlight
+/// only the inserted delimiters rather than re-marking the preserved content.
+///
+/// Pure byte-level substring lookup via `memchr::memmem` - no LCS pass and no
+/// per-span allocation. `trim_shared_affixes` has already bounded both sides
+/// by `TRIM_AFFIX_LIMIT` and aligned them to char boundaries, so a `memmem`
+/// match position is also at a char boundary (valid UTF-8 can't contain a
+/// multi-byte char's bytes except as that complete char).
+fn split_inner_substring(
+    span: Replacement,
+    old: &str,
+    new: &str,
+) -> Option<(Replacement, Replacement)> {
+    let in_bytes = &old.as_bytes()[span.input_start..span.input_end()];
+    let out_bytes = &new.as_bytes()[span.output_start..span.output_end()];
+
+    if in_bytes.is_empty() || out_bytes.is_empty() || in_bytes.len() == out_bytes.len() {
+        return None;
+    }
+
+    if in_bytes.len() < out_bytes.len() {
+        let pos = memchr::memmem::find(out_bytes, in_bytes)?;
+        let right_start = pos + in_bytes.len();
+        // `trim_shared_affixes` already consumed any shared prefix/suffix, so
+        // a flush-to-edge match would leave a zero-length flank - guard so we
+        // never emit an invisible span and never re-derive an edge case the
+        // edge trim already handled.
+        if pos == 0 || right_start == out_bytes.len() {
+            return None;
+        }
+        Some((
+            Replacement {
+                input_start: span.input_start,
+                input_len: 0,
+                output_start: span.output_start,
+                output_len: pos,
+            },
+            Replacement {
+                input_start: span.input_end(),
+                input_len: 0,
+                output_start: span.output_start + right_start,
+                output_len: out_bytes.len() - right_start,
+            },
+        ))
+    } else {
+        let pos = memchr::memmem::find(in_bytes, out_bytes)?;
+        let right_start = pos + out_bytes.len();
+        if pos == 0 || right_start == in_bytes.len() {
+            return None;
+        }
+        Some((
+            Replacement {
+                input_start: span.input_start,
+                input_len: pos,
+                output_start: span.output_start,
+                output_len: 0,
+            },
+            Replacement {
+                input_start: span.input_start + right_start,
+                input_len: in_bytes.len() - right_start,
+                output_start: span.output_end(),
+                output_len: 0,
+            },
+        ))
     }
 }
 
@@ -1479,6 +1553,72 @@ mod tests {
         let span = rep(0, old.len(), 0, new.len());
         let trimmed = trim_shared_affixes(span, old, new);
         assert_eq!(trimmed, rep(5, 1, 5, 1));
+    }
+
+    #[test]
+    fn split_inner_substring_wraps_match_with_inserted_delimiters() {
+        // " a " -> " `a` ": after edge trim, "a" vs "`a`". The shared `a` sits
+        // in the interior of the new side; split into two insertions flanking
+        // it so the diff only highlights the two backticks on the new line.
+        let old = " a ";
+        let new = " `a` ";
+        let trimmed = trim_shared_affixes(rep(0, 3, 0, 5), old, new);
+        let (left, right) = split_inner_substring(trimmed, old, new).unwrap();
+        assert_eq!(left, rep(1, 0, 1, 1));
+        assert_eq!(right, rep(2, 0, 3, 1));
+    }
+
+    #[test]
+    fn split_inner_substring_handles_deletion_wrapping() {
+        // "[abc]" -> "abc": old side is the larger; split into two deletions
+        // flanking the preserved `abc`, so only the brackets get highlighted.
+        let old = "[abc]";
+        let new = "abc";
+        let trimmed = trim_shared_affixes(rep(0, 5, 0, 3), old, new);
+        let (left, right) = split_inner_substring(trimmed, old, new).unwrap();
+        assert_eq!(left, rep(0, 1, 0, 0));
+        assert_eq!(right, rep(4, 1, 3, 0));
+    }
+
+    #[test]
+    fn split_inner_substring_returns_none_when_neither_side_contains_the_other() {
+        // After edge trim: "X" vs "Y" - no substring alignment exists.
+        let old = "aXc";
+        let new = "aYc";
+        let trimmed = trim_shared_affixes(rep(0, 3, 0, 3), old, new);
+        assert!(split_inner_substring(trimmed, old, new).is_none());
+    }
+
+    #[test]
+    fn split_inner_substring_returns_none_for_pure_insertion() {
+        // "abc" -> "abcd": edge trim collapses input to empty already - the
+        // splitter must leave that alone rather than fabricate a flank.
+        let old = "abc";
+        let new = "abcd";
+        let trimmed = trim_shared_affixes(rep(0, 3, 0, 4), old, new);
+        assert!(split_inner_substring(trimmed, old, new).is_none());
+    }
+
+    #[test]
+    fn split_inner_substring_returns_none_when_sides_have_equal_length() {
+        // "ab" -> "cd": same length means neither can strictly contain the
+        // other; skip without invoking memmem.
+        let old = "ab";
+        let new = "cd";
+        let trimmed = trim_shared_affixes(rep(0, 2, 0, 2), old, new);
+        assert!(split_inner_substring(trimmed, old, new).is_none());
+    }
+
+    #[test]
+    fn split_inner_substring_handles_multibyte_substring() {
+        // "é" wraps cleanly with backticks: memmem matches the two-byte UTF-8
+        // sequence at offset 1 of "`é`", which is a valid char boundary.
+        let old = "é";
+        let new = "`é`";
+        let trimmed = trim_shared_affixes(rep(0, old.len(), 0, new.len()), old, new);
+        let (left, right) = split_inner_substring(trimmed, old, new).unwrap();
+        assert_eq!(left, rep(0, 0, 0, 1));
+        assert_eq!(right, rep(old.len(), 0, 1 + "é".len(), 1));
     }
 
     #[test]
