@@ -1222,16 +1222,16 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     }
 
     ok_results.sort_by(|a, b| natord::compare(&a.path, &b.path));
-    print_results(
-        &ok_results,
-        cli.quiet,
-        cli.delete,
-        !write,
-        cli.no_hints,
-        hyperlink_format.as_deref(),
-        cli.hyperlink_limit,
-        cli.context,
-    );
+    ResultPrinter {
+        quiet: cli.quiet,
+        delete: cli.delete,
+        dry: !write,
+        no_hints: cli.no_hints,
+        hyperlink_format: hyperlink_format.as_deref(),
+        hyperlink_limit: cli.hyperlink_limit,
+        context_lines: cli.context,
+    }
+    .print(&ok_results);
     Ok(())
 }
 
@@ -1336,119 +1336,134 @@ fn summary_message(total_files: usize, total_matches: usize, delete: bool, dry: 
     summary_message_with_formatter(total_files, total_matches, delete, dry, with_commas)
 }
 
+/// Renders replacement results, dispatching between a colored terminal view
+/// and a plain unified-diff patch view based on whether stdout is a TTY.
+///
 /// `dry=true` -> yellow "Would perform"; `dry=false` -> green "Performed".
 /// Write + `quiet` -> silence all output. Dry-run + `quiet` -> suppress diff only.
-#[allow(clippy::too_many_arguments)]
-fn print_results(
-    results: &[ReplacementResult],
+struct ResultPrinter<'a> {
     quiet: bool,
     delete: bool,
     dry: bool,
     no_hints: bool,
-    hyperlink_format: Option<&str>,
+    hyperlink_format: Option<&'a str>,
     hyperlink_limit: u64,
     context_lines: usize,
-) {
-    if !dry && quiet {
-        return;
-    }
-
-    let stdout_is_terminal = std::io::stdout().is_terminal();
-    let force_color = ui::color_choice() == ui::ColorChoice::Always;
-    if !stdout_is_terminal && !force_color {
-        if !quiet {
-            print_patch_results(results, context_lines);
-        }
-        return;
-    }
-
-    let total_files = results.len();
-    let total_matches: usize = results.iter().map(|result| result.count).sum();
-    let styles = Styles::when(true);
-    // When the match count blows past the configured limit, the per-line
-    // OSC 8 sequences become a tax on the terminal (parsing, scrollback
-    // tracking) without any practical benefit - users can't click through
-    // thousands of links anyway. A limit of 0 means "always render".
-    let hyperlinks_disabled_by_limit = hyperlink_limit > 0
-        && total_matches > usize::try_from(hyperlink_limit).unwrap_or(usize::MAX);
-    let effective_format = if hyperlinks_disabled_by_limit {
-        None
-    } else {
-        hyperlink_format
-    };
-    let template = effective_format.map(HyperlinkTemplate::parse);
-    for (idx, result) in results.iter().enumerate() {
-        let count = with_commas(result.count);
-        let encoded_path = template
-            .as_ref()
-            .filter(|t| t.uses_path())
-            .map_or(String::new(), |_| percent_encode_path(&result.link_path));
-        let path = hyperlink_with_template(template.as_ref(), &encoded_path, 0, &result.path);
-        println!(
-            "{}{} {}({count}){}",
-            if quiet { "" } else { styles.fg(Color::Magenta) },
-            path,
-            styles.fg(Color::Grey),
-            styles.reset()
-        );
-
-        if !quiet && let Some((old, new)) = &result.diff {
-            diff::print_file_line_diff(
-                old,
-                new,
-                diff::DiffHints {
-                    spans: &result.spans,
-                    linewise: result.linewise_diff,
-                    multiline_spans: result.multiline_span_diff,
-                },
-                styles,
-                template.as_ref(),
-                &encoded_path,
-                &result.columns,
-            );
-        }
-
-        if !quiet && idx + 1 < results.len() {
-            println!();
-        }
-    }
-
-    if total_files > 0 {
-        let color = if dry { Color::Yellow } else { Color::Green };
-        let msg = summary_message(total_files, total_matches, delete, dry);
-        let hint = if dry && !no_hints {
-            let yellow = styles.fg(Color::Yellow);
-            let green = styles.fg(Color::Green);
-            let dim = styles.dim();
-            let reset = styles.reset();
-            format!(
-                " {yellow}{dim}(pass {reset}{green}{dim}--write{reset}{yellow}{dim} to apply){reset}"
-            )
-        } else {
-            String::new()
-        };
-        println!(
-            "\n{}{}{}{}{hint}",
-            styles.bold(),
-            styles.fg(color),
-            msg,
-            styles.reset()
-        );
-    }
 }
 
-fn print_patch_results(results: &[ReplacementResult], context_lines: usize) {
-    for result in results {
-        let Some((old, new)) = &result.diff else {
-            continue;
+impl ResultPrinter<'_> {
+    fn print(&self, results: &[ReplacementResult]) {
+        if !self.dry && self.quiet {
+            return;
+        }
+
+        let stdout_is_terminal = std::io::stdout().is_terminal();
+        let force_color = ui::color_choice() == ui::ColorChoice::Always;
+        if !stdout_is_terminal && !force_color {
+            if !self.quiet {
+                self.print_patch_results(results);
+            }
+            return;
+        }
+
+        let total_files = results.len();
+        let total_matches: usize = results.iter().map(|result| result.count).sum();
+        let styles = Styles::when(true);
+        // When the match count blows past the configured limit, the per-line
+        // OSC 8 sequences become a tax on the terminal (parsing, scrollback
+        // tracking) without any practical benefit - users can't click through
+        // thousands of links anyway. A limit of 0 means "always render".
+        let hyperlinks_disabled_by_limit = self.hyperlink_limit > 0
+            && total_matches > usize::try_from(self.hyperlink_limit).unwrap_or(usize::MAX);
+        let effective_format = if hyperlinks_disabled_by_limit {
+            None
+        } else {
+            self.hyperlink_format
         };
-        let mut options = DiffOptions::new();
-        options
-            .set_context_len(context_lines)
-            .set_original_filename(format!("a/{}", result.path))
-            .set_modified_filename(format!("b/{}", result.path));
-        let patch = options.create_patch(old, new);
-        print!("{patch}");
+        let template = effective_format.map(HyperlinkTemplate::parse);
+        for (idx, result) in results.iter().enumerate() {
+            let count = with_commas(result.count);
+            let encoded_path = template
+                .as_ref()
+                .filter(|t| t.uses_path())
+                .map_or(String::new(), |_| percent_encode_path(&result.link_path));
+            let path = hyperlink_with_template(template.as_ref(), &encoded_path, 0, &result.path);
+            println!(
+                "{}{} {}({count}){}",
+                if self.quiet {
+                    ""
+                } else {
+                    styles.fg(Color::Magenta)
+                },
+                path,
+                styles.fg(Color::Grey),
+                styles.reset()
+            );
+
+            if !self.quiet
+                && let Some((old, new)) = &result.diff
+            {
+                diff::print_file_line_diff(
+                    old,
+                    new,
+                    diff::DiffHints {
+                        spans: &result.spans,
+                        linewise: result.linewise_diff,
+                        multiline_spans: result.multiline_span_diff,
+                    },
+                    styles,
+                    template.as_ref(),
+                    &encoded_path,
+                    &result.columns,
+                );
+            }
+
+            if !self.quiet && idx + 1 < results.len() {
+                println!();
+            }
+        }
+
+        if total_files > 0 {
+            let color = if self.dry {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            let msg = summary_message(total_files, total_matches, self.delete, self.dry);
+            let hint = if self.dry && !self.no_hints {
+                let yellow = styles.fg(Color::Yellow);
+                let green = styles.fg(Color::Green);
+                let dim = styles.dim();
+                let reset = styles.reset();
+                format!(
+                    " {yellow}{dim}(pass {reset}{green}{dim}--write{reset}{yellow}{dim} to apply){reset}"
+                )
+            } else {
+                String::new()
+            };
+            println!(
+                "\n{}{}{}{}{hint}",
+                styles.bold(),
+                styles.fg(color),
+                msg,
+                styles.reset()
+            );
+        }
+    }
+
+    fn print_patch_results(&self, results: &[ReplacementResult]) {
+        for result in results {
+            let Some((old, new)) = &result.diff else {
+                continue;
+            };
+            let mut options = DiffOptions::new();
+            options
+                .set_context_len(self.context_lines)
+                .set_original_filename(format!("a/{}", result.path))
+                .set_modified_filename(format!("b/{}", result.path));
+            let patch = options.create_patch(old, new);
+            print!("{patch}");
+        }
     }
 }
 
