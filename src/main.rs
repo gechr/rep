@@ -237,6 +237,19 @@ struct Cli {
     list_files: bool,
 
     #[arg(
+        short = 'C',
+        long = "context",
+        value_name = "n",
+        default_value_t = DEFAULT_CONTEXT_LINES,
+        overrides_with = "context",
+        hide_short_help = true,
+        help = "Lines of context in patch output and preview",
+        help_heading = "Miscellaneous",
+        display_order = 90
+    )]
+    context: usize,
+
+    #[arg(
         long = "hyperlink-format",
         value_name = "fmt",
         overrides_with = "hyperlink_format",
@@ -361,6 +374,7 @@ struct Cli {
     hints: bool,
 }
 
+const DEFAULT_CONTEXT_LINES: usize = 3;
 const DEFAULT_HYPERLINK_LIMIT: u64 = 50_000;
 
 const HELP_SECTIONS: &[&str] = &["Filter", "Match", "Replace", "Mode", "Miscellaneous"];
@@ -1216,6 +1230,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
         cli.no_hints,
         hyperlink_format.as_deref(),
         cli.hyperlink_limit,
+        cli.context,
     );
     Ok(())
 }
@@ -1227,7 +1242,7 @@ fn run_preview(cli: &Cli) -> Result<()> {
         .iter()
         .map(CompiledExpression::preview_expr)
         .collect();
-    let mut fm = interactive::InteractivePatcher::new(false, cli.preview_tool());
+    let mut fm = interactive::InteractivePatcher::new(false, cli.preview_tool(), cli.context);
     let dirs = cli.dirs();
     for (path, contents) in scan::matching_files_parallel(
         &dirs,
@@ -1323,6 +1338,7 @@ fn summary_message(total_files: usize, total_matches: usize, delete: bool, dry: 
 
 /// `dry=true` -> yellow "Would perform"; `dry=false` -> green "Performed".
 /// Write + `quiet` -> silence all output. Dry-run + `quiet` -> suppress diff only.
+#[allow(clippy::too_many_arguments)]
 fn print_results(
     results: &[ReplacementResult],
     quiet: bool,
@@ -1331,6 +1347,7 @@ fn print_results(
     no_hints: bool,
     hyperlink_format: Option<&str>,
     hyperlink_limit: u64,
+    context_lines: usize,
 ) {
     if !dry && quiet {
         return;
@@ -1340,7 +1357,7 @@ fn print_results(
     let force_color = ui::color_choice() == ui::ColorChoice::Always;
     if !stdout_is_terminal && !force_color {
         if !quiet {
-            print_patch_results(results);
+            print_patch_results(results, context_lines);
         }
         return;
     }
@@ -1420,13 +1437,14 @@ fn print_results(
     }
 }
 
-fn print_patch_results(results: &[ReplacementResult]) {
+fn print_patch_results(results: &[ReplacementResult], context_lines: usize) {
     for result in results {
         let Some((old, new)) = &result.diff else {
             continue;
         };
         let mut options = DiffOptions::new();
         options
+            .set_context_len(context_lines)
             .set_original_filename(format!("a/{}", result.path))
             .set_modified_filename(format!("b/{}", result.path));
         let patch = options.create_patch(old, new);

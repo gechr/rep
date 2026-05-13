@@ -183,13 +183,19 @@ struct PatchPrompt<'a> {
 pub(crate) struct InteractivePatcher {
     yes_to_all: bool,
     preview_tool: Option<String>,
+    context_lines: usize,
 }
 
 impl InteractivePatcher {
-    pub(crate) const fn new(accept_all: bool, preview_tool: Option<String>) -> Self {
+    pub(crate) const fn new(
+        accept_all: bool,
+        preview_tool: Option<String>,
+        context_lines: usize,
+    ) -> Self {
         Self {
             yes_to_all: accept_all,
             preview_tool,
+            context_lines,
         }
     }
 
@@ -368,7 +374,7 @@ impl InteractivePatcher {
             match_total,
             has_history,
         } = patch;
-        let diffs = Self::diffs_to_print(old, new);
+        let diffs = Self::diffs_to_print(old, new, self.context_lines);
         if diffs.is_empty() {
             return Ok(PatchAction::Skip);
         }
@@ -442,7 +448,11 @@ impl InteractivePatcher {
         }
     }
 
-    fn diffs_to_print<'a>(orig: &'a str, edit: &'a str) -> Vec<DiffResult<&'a str>> {
+    fn diffs_to_print<'a>(
+        orig: &'a str,
+        edit: &'a str,
+        context_lines: usize,
+    ) -> Vec<DiffResult<&'a str>> {
         const fn is_same(x: &DiffResult<&str>) -> bool {
             matches!(x, DiffResult::Both(..))
         }
@@ -463,8 +473,8 @@ impl InteractivePatcher {
 
         let size_of_diff = diffs.len() - num_prefix_lines - num_suffix_lines;
         let size_of_context = lines_to_print.saturating_sub(size_of_diff);
-        let size_of_up_context = size_of_context / 2;
-        let size_of_down_context = size_of_context / 2 + size_of_context % 2;
+        let size_of_up_context = min(size_of_context / 2, context_lines);
+        let size_of_down_context = min(size_of_context / 2 + size_of_context % 2, context_lines);
 
         let start_offset = num_prefix_lines.saturating_sub(size_of_up_context);
         let end_offset = min(
