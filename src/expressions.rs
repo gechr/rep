@@ -743,6 +743,7 @@ mod tests {
     use super::*;
 
     fn parse_cli(args: &[&str]) -> Cli {
+        let _lock = crate::test_env::lock_for_parse();
         let processed = crate::preprocess_expression_args(
             args.iter().map(std::string::ToString::to_string).collect(),
         );
@@ -985,43 +986,43 @@ mod tests {
 
     #[test]
     fn test_build_subst_escapes_dollar_in_literal_mode() {
-        let cli = Cli::parse_from(["rep", "foo", "$1"]);
+        let cli = parse_cli(&["rep", "foo", "$1"]);
         assert_eq!(build_subst(&cli), "$$1");
     }
 
     #[test]
     fn test_build_subst_preserves_dollar_in_regex_mode() {
-        let cli = Cli::parse_from(["rep", "-r", "(foo)", "$1"]);
+        let cli = parse_cli(&["rep", "-r", "(foo)", "$1"]);
         assert_eq!(build_subst(&cli), "$1");
     }
 
     #[test]
     fn test_build_pattern_escapes_metacharacters() {
-        let cli = Cli::parse_from(["rep", "1.2.3", "4.5.6"]);
+        let cli = parse_cli(&["rep", "1.2.3", "4.5.6"]);
         assert_eq!(build_pattern(&cli), r"1\.2\.3");
     }
 
     #[test]
     fn test_build_pattern_regex_non_greedy_by_default() {
-        let cli = Cli::parse_from(["rep", "-r", "a.*b", "x"]);
+        let cli = parse_cli(&["rep", "-r", "a.*b", "x"]);
         assert_eq!(build_pattern(&cli), "(?U)a.*b");
     }
 
     #[test]
     fn test_build_pattern_regex_greedy() {
-        let cli = Cli::parse_from(["rep", "-r", "-G", "a.*b", "x"]);
+        let cli = parse_cli(&["rep", "-r", "-G", "a.*b", "x"]);
         assert_eq!(build_pattern(&cli), "a.*b");
     }
 
     #[test]
     fn test_build_pattern_word_boundary() {
-        let cli = Cli::parse_from(["rep", "-w", "foo", "bar"]);
+        let cli = parse_cli(&["rep", "-w", "foo", "bar"]);
         assert_eq!(build_pattern(&cli), r"(?U)\b(?:foo)\b");
     }
 
     #[test]
     fn test_build_pattern_line_regexp() {
-        let cli = Cli::parse_from(["rep", "-x", "foo", "bar"]);
+        let cli = parse_cli(&["rep", "-x", "foo", "bar"]);
         assert_eq!(build_pattern(&cli), "(?U)^(?:foo)$");
     }
 
@@ -1075,7 +1076,7 @@ mod tests {
 
     #[test]
     fn test_preserve_projects_source_case_shape() {
-        let cli = Cli::parse_from(["rep", "--preserve", "colour", "color"]);
+        let cli = parse_cli(&["rep", "--preserve", "colour", "color"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("colour\nColour\nCOLOUR\n", &expressions);
         assert_eq!(output, "color\nColor\nCOLOR\n");
@@ -1084,7 +1085,7 @@ mod tests {
 
     #[test]
     fn test_preserve_passes_replacement_through_for_mixed_source() {
-        let cli = Cli::parse_from(["rep", "--preserve", "colour", "BaR"]);
+        let cli = parse_cli(&["rep", "--preserve", "colour", "BaR"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("cOlOuR\n", &expressions);
         // Mixed source: replacement passes through as authored.
@@ -1097,7 +1098,7 @@ mod tests {
         // Even when the user writes the replacement in mixed/explicit case,
         // a clean source-shape overrides it. This is the load-bearing
         // guarantee: --preserve hands case decisions to the source.
-        let cli = Cli::parse_from(["rep", "--preserve", "colour", "BaR"]);
+        let cli = parse_cli(&["rep", "--preserve", "colour", "BaR"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, _) = apply_str("colour Colour COLOUR\n", &expressions);
         assert_eq!(output, "bar Bar BAR\n");
@@ -1106,7 +1107,7 @@ mod tests {
     #[test]
     fn test_preserve_pattern_is_case_insensitive_by_default() {
         // No -i flag needed - --preserve always matches case-insensitively.
-        let cli = Cli::parse_from(["rep", "--preserve", "foo", "bar"]);
+        let cli = parse_cli(&["rep", "--preserve", "foo", "bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("foo Foo FOO fOO\n", &expressions);
         assert_eq!(output, "bar Bar BAR bar\n");
@@ -1115,7 +1116,7 @@ mod tests {
 
     #[test]
     fn test_preserve_handles_multiple_matches_per_line_and_adjacency() {
-        let cli = Cli::parse_from(["rep", "--preserve", "ab", "xy"]);
+        let cli = parse_cli(&["rep", "--preserve", "ab", "xy"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("ababAB AbABab\n", &expressions);
         // Each two-letter window is matched and projected independently.
@@ -1125,7 +1126,7 @@ mod tests {
 
     #[test]
     fn test_preserve_escapes_regex_metacharacters_in_pattern() {
-        let cli = Cli::parse_from(["rep", "--preserve", "a.b+c", "x.y+z"]);
+        let cli = parse_cli(&["rep", "--preserve", "a.b+c", "x.y+z"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("a.b+c A.B+C aXb+c\n", &expressions);
         // `a.b+c` is matched literally, not as the regex `a.b+c` (which
@@ -1136,7 +1137,7 @@ mod tests {
 
     #[test]
     fn test_preserve_handles_unicode_letters() {
-        let cli = Cli::parse_from(["rep", "--preserve", "café", "kafe"]);
+        let cli = parse_cli(&["rep", "--preserve", "café", "kafe"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("café Café CAFÉ\n", &expressions);
         assert_eq!(output, "kafe Kafe KAFE\n");
@@ -1145,7 +1146,7 @@ mod tests {
 
     #[test]
     fn test_preserve_word_regexp_anchors_at_word_boundaries() {
-        let cli = Cli::parse_from(["rep", "-w", "--preserve", "colour", "color"]);
+        let cli = parse_cli(&["rep", "-w", "--preserve", "colour", "color"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("colourful Colour\n", &expressions);
         // `colourful` is not a whole word; only `Colour` matches.
@@ -1155,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_preserve_line_regexp_anchors_to_whole_lines() {
-        let cli = Cli::parse_from(["rep", "-x", "--preserve", "colour", "color"]);
+        let cli = parse_cli(&["rep", "-x", "--preserve", "colour", "color"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("Colour\nColours\n COLOUR\nCOLOUR\n", &expressions);
         assert_eq!(output, "Color\nColours\n COLOUR\nCOLOR\n");
@@ -1164,7 +1165,7 @@ mod tests {
 
     #[test]
     fn test_preserve_delete_removes_matching_lines_case_insensitively() {
-        let cli = Cli::parse_from(["rep", "-d", "--preserve", "todo"]);
+        let cli = parse_cli(&["rep", "-d", "--preserve", "todo"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str(
             "real line\n# TODO: fix\n# Todo: review\n# todo: done\nkeep\n",
@@ -1194,7 +1195,7 @@ mod tests {
 
     #[test]
     fn test_preserve_filters_out_no_op_when_find_equals_replace() {
-        let cli = Cli::parse_from(["rep", "--preserve", "foo", "foo"]);
+        let cli = parse_cli(&["rep", "--preserve", "foo", "foo"]);
         let expressions = compile_expressions(&cli).unwrap();
         // Per the existing filter in `compile_expressions`, find == replace
         // is treated as a no-op and produces no compiled expressions.
@@ -1203,7 +1204,7 @@ mod tests {
 
     #[test]
     fn test_preserve_word_regexp_does_not_match_inside_identifier() {
-        let cli = Cli::parse_from(["rep", "-w", "--preserve", "log", "trace"]);
+        let cli = parse_cli(&["rep", "-w", "--preserve", "log", "trace"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("log Log LOG logger Logger LOGGER_KEY\n", &expressions);
         // Only the whole-word matches are rewritten; `logger`, `Logger`, and
@@ -1213,35 +1214,8 @@ mod tests {
     }
 
     #[test]
-    fn test_smart_and_preserve_preserve_wins_when_listed_last() {
-        // Mimics rc-then-CLI: rc had `--smart`, CLI passes `--preserve`. The
-        // last flag wins, so --preserve takes effect and the mixed-shape row
-        // matches (smart would have skipped it).
-        let cli = Cli::parse_from(["rep", "--smart", "--preserve", "colour", "color"]);
-        let expressions = compile_expressions(&cli).unwrap();
-        let (output, count) = apply_str("cOlOuR\n", &expressions);
-        assert_eq!(output, "color\n");
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn test_smart_and_preserve_smart_wins_when_listed_last() {
-        let cli = Cli::parse_from(["rep", "--preserve", "--smart", "colour", "color"]);
-        let expressions = compile_expressions(&cli).unwrap();
-        // --smart only matches identifier-shape variants; mixed source goes
-        // untouched.
-        let (output, count) = apply_str("cOlOuR\n", &expressions);
-        assert_eq!(output, "cOlOuR\n");
-        assert_eq!(count, 0);
-        // And smart's identifier variants are still active.
-        let (output, count) = apply_str("colour Colour COLOUR\n", &expressions);
-        assert_eq!(output, "color Color COLOR\n");
-        assert_eq!(count, 3);
-    }
-
-    #[test]
     fn test_smart_replaces_case_variants() {
-        let cli = Cli::parse_from(["rep", "foo_bar", "hello_world", "--smart"]);
+        let cli = parse_cli(&["rep", "foo_bar", "hello_world", "--smart"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, _) = apply_str("FooBar\nfoo_bar\nFOO_BAR\n", &expressions);
         assert_eq!(output, "HelloWorld\nhello_world\nHELLO_WORLD\n");
@@ -1249,7 +1223,7 @@ mod tests {
 
     #[test]
     fn test_smart_word_regexp_anchors_case_variants_at_word_boundaries() {
-        let cli = Cli::parse_from(["rep", "-S", "-w", "Repo", "Repository"]);
+        let cli = parse_cli(&["rep", "-S", "-w", "Repo", "Repository"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("Reports Repo repo REPO", &expressions);
         assert_eq!(output, "Reports Repository repository REPOSITORY");
@@ -1258,7 +1232,7 @@ mod tests {
 
     #[test]
     fn test_smart_line_regexp_anchors_case_variants_to_whole_lines() {
-        let cli = Cli::parse_from(["rep", "-S", "-x", "Repo", "Repository"]);
+        let cli = parse_cli(&["rep", "-S", "-x", "Repo", "Repository"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("Repo\nReports\nfoo Repo bar\n", &expressions);
         assert_eq!(output, "Repository\nReports\nfoo Repo bar\n");
@@ -1287,7 +1261,7 @@ mod tests {
 
     #[test]
     fn test_delete_smart_matches_kebab_variant_inside_larger_token() {
-        let cli = Cli::parse_from(["rep", "-d", "foo_bar", "--smart"]);
+        let cli = parse_cli(&["rep", "-d", "foo_bar", "--smart"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("keep\nprefix-foo-bar-suffix\nkeep\n", &expressions);
         assert_eq!(output, "keep\nkeep\n");
@@ -1362,7 +1336,7 @@ mod tests {
     /// if it ever got routed through `caps.expand`, this test would fail.
     #[test]
     fn test_literal_mode_preserves_dollar_references() {
-        let cli = Cli::parse_from(["rep", "foo", "$1bar"]);
+        let cli = parse_cli(&["rep", "foo", "$1bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("foo baz", &expressions);
         assert_eq!(output, "$1bar baz");
@@ -1399,7 +1373,7 @@ mod tests {
 
     #[test]
     fn test_dotall_allows_dot_to_match_newline() {
-        let cli = Cli::parse_from(["rep", "-r", "--dotall", "a.b", "X"]);
+        let cli = parse_cli(&["rep", "-r", "--dotall", "a.b", "X"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("a\nb", &expressions);
         assert_eq!(output, "X");
@@ -1408,7 +1382,7 @@ mod tests {
 
     #[test]
     fn test_dot_does_not_match_newline_by_default() {
-        let cli = Cli::parse_from(["rep", "-r", "a.b", "X"]);
+        let cli = parse_cli(&["rep", "-r", "a.b", "X"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("a\nb", &expressions);
         assert_eq!(output, "a\nb");
@@ -1417,7 +1391,7 @@ mod tests {
 
     #[test]
     fn test_delete_mode_wraps_pattern_and_deletes_whole_line() {
-        let cli = Cli::parse_from(["rep", "-d", "foo"]);
+        let cli = parse_cli(&["rep", "-d", "foo"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str(
             "keep\nhas foo here\nkeep\nanother foo\ntail\n",
@@ -1429,7 +1403,7 @@ mod tests {
 
     #[test]
     fn test_delete_mode_handles_match_on_final_line_without_trailing_newline() {
-        let cli = Cli::parse_from(["rep", "-d", "foo"]);
+        let cli = parse_cli(&["rep", "-d", "foo"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("keep\nhas foo", &expressions);
         assert_eq!(output, "keep\n");
@@ -1438,7 +1412,7 @@ mod tests {
 
     #[test]
     fn test_delete_mode_with_line_regexp_only_matches_exact_lines() {
-        let cli = Cli::parse_from(["rep", "-d", "-x", "foo"]);
+        let cli = parse_cli(&["rep", "-d", "-x", "foo"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("foo\nfoobar\nfoo\nbar\n", &expressions);
         assert_eq!(output, "foobar\nbar\n");
@@ -1447,7 +1421,7 @@ mod tests {
 
     #[test]
     fn test_delete_mode_with_ignore_case() {
-        let cli = Cli::parse_from(["rep", "-d", "-i", "foo"]);
+        let cli = parse_cli(&["rep", "-d", "-i", "foo"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (output, count) = apply_str("FOO line\nbar\nfoo line\n", &expressions);
         assert_eq!(output, "bar\n");
@@ -1482,7 +1456,7 @@ mod tests {
     /// tests exercise the preview-only code path directly.
     #[test]
     fn test_preview_replacer_literal_mode_returns_raw_replacement() {
-        let cli = Cli::parse_from(["rep", "foo", "$1bar"]);
+        let cli = parse_cli(&["rep", "foo", "$1bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let preview = expressions[0].preview_expr();
         let caps = preview.regex.captures("foo").unwrap();
@@ -1491,7 +1465,7 @@ mod tests {
 
     #[test]
     fn test_preview_replacer_regex_mode_expands_captures() {
-        let cli = Cli::parse_from(["rep", "-r", r"(foo)\.(bar)", "$2.$1"]);
+        let cli = parse_cli(&["rep", "-r", r"(foo)\.(bar)", "$2.$1"]);
         let expressions = compile_expressions(&cli).unwrap();
         let preview = expressions[0].preview_expr();
         let caps = preview.regex.captures("foo.bar").unwrap();
@@ -1500,7 +1474,7 @@ mod tests {
 
     #[test]
     fn test_preview_replacer_smart_mode_maps_case_variant() {
-        let cli = Cli::parse_from(["rep", "--smart", "foo_bar", "hello_world"]);
+        let cli = parse_cli(&["rep", "--smart", "foo_bar", "hello_world"]);
         let expressions = compile_expressions(&cli).unwrap();
         let preview = expressions[0].preview_expr();
         let caps = preview.regex.captures("FooBar").unwrap();

@@ -70,7 +70,7 @@ Run `rep --help` for the full reference, including the styling and hyperlink fla
 
 ## Case-aware replacement
 
-`rep` offers two strategies for case-aware replacement. They solve different problems and are mutually exclusive - passing both makes the later flag win (so a flag in `~/.reprc` can be overridden on the command line).
+`rep` offers two strategies for case-aware replacement. They solve different problems and are mutually exclusive - passing both flags on the command line is an error. A value in `~/.config/rep/config.toml` or a `REP_*` env var can still be overridden by either flag on the command line.
 
 ### `-S, --smart` - identifier renames across naming conventions
 
@@ -109,18 +109,20 @@ Use `--preserve` for prose, docs, or string-literal rewrites where the same word
 
 ## Configuration
 
-`rep` reads default flags from `~/.reprc` if it exists. The file is plain - one CLI flag per line, blank lines and `#` comments ignored. Flags from the rc are prepended to argv before parsing, so command-line arguments override rc values.
+`rep` reads defaults from `~/.config/rep/config.toml` (or `$XDG_CONFIG_HOME/rep/config.toml`). The file uses TOML; keys mirror the CLI flag names in kebab-case.
 
-```sh
-# ~/.reprc
---hidden
---ignore-case
---preview-tool=delta
---hyperlink-format=vscode
+```toml
+# ~/.config/rep/config.toml
+hidden = true
+ignore-case = true
+preview-tool = "delta"
+hyperlink-format = "vscode"
 ```
 
-Set `REP_CONFIG_PATH` to use a different file (e.g. for project-local config), or set it to an empty string to disable rc loading entirely.
+Precedence is **config file < environment variable < CLI flag**. Each configurable flag has a matching `REP_*` env var (e.g. `REP_HIDDEN`, `REP_PREVIEW_TOOL`), accepting `1/0/true/false/yes/no/on/off` for booleans.
+
+Set `REP_CONFIG_PATH` to use a different file (e.g. for project-local config), or set it to an empty string to disable config loading entirely.
 
 ```sh
-REP_CONFIG_PATH=./.reprc rep foo bar
+REP_CONFIG_PATH=./rep.toml rep foo bar
 ```

@@ -3,6 +3,8 @@ mod diff;
 mod expressions;
 mod interactive;
 mod scan;
+#[cfg(test)]
+mod test_env;
 mod theme;
 mod ui;
 
@@ -35,7 +37,9 @@ fn stdin_has_input() -> bool {
 }
 
 use anyhow::{Result, bail};
-use clap::{CommandFactory as _, Parser};
+use clap::builder::BoolishValueParser;
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory as _, FromArgMatches as _, Parser};
 use clap_complete::Shell;
 use diffy::DiffOptions;
 
@@ -87,6 +91,8 @@ struct Cli {
     #[arg(
         short = 'H',
         long = "hidden",
+        env = "REP_HIDDEN",
+        value_parser = BoolishValueParser::new(),
         help = "Search hidden files and directories",
         help_heading = "Filter"
     )]
@@ -94,6 +100,8 @@ struct Cli {
 
     #[arg(
         long = "no-ignore",
+        env = "REP_NO_IGNORE",
+        value_parser = BoolishValueParser::new(),
         help = "Do not respect ignore files",
         help_heading = "Filter"
     )]
@@ -111,8 +119,9 @@ struct Cli {
     #[arg(
         short = 'S',
         long = "smart",
-        overrides_with = "preserve",
-        help = "Replace all case variants of the pattern",
+        env = "REP_SMART",
+        value_parser = BoolishValueParser::new(),
+        help = "Replace all <find> case variants",
         help_heading = "Replace"
     )]
     smart: bool,
@@ -120,7 +129,8 @@ struct Cli {
     #[arg(
         short = 'P',
         long = "preserve",
-        overrides_with = "smart",
+        env = "REP_PRESERVE",
+        value_parser = BoolishValueParser::new(),
         help = "Mirror the <find> case onto the <replace>",
         help_heading = "Replace"
     )]
@@ -129,6 +139,8 @@ struct Cli {
     #[arg(
         short = 'G',
         long = "greedy",
+        env = "REP_GREEDY",
+        value_parser = BoolishValueParser::new(),
         help = "Use greedy matching for regular expressions",
         help_heading = "Match"
     )]
@@ -137,6 +149,8 @@ struct Cli {
     #[arg(
         short = 'i',
         long = "ignore-case",
+        env = "REP_IGNORE_CASE",
+        value_parser = BoolishValueParser::new(),
         help = "Case-insensitive matching",
         help_heading = "Match"
     )]
@@ -145,6 +159,8 @@ struct Cli {
     #[arg(
         short = 'm',
         long = "multiline",
+        env = "REP_MULTILINE",
+        value_parser = BoolishValueParser::new(),
         help = "Search across multiple lines",
         help_heading = "Match"
     )]
@@ -152,6 +168,8 @@ struct Cli {
 
     #[arg(
         long = "dotall",
+        env = "REP_DOTALL",
+        value_parser = BoolishValueParser::new(),
         help = "Allow dot to match newlines",
         help_heading = "Match"
     )]
@@ -161,6 +179,8 @@ struct Cli {
         short = 'r',
         long = "regex",
         alias = "regexp",
+        env = "REP_REGEX",
+        value_parser = BoolishValueParser::new(),
         help = "Treat patterns as regular expressions",
         help_heading = "Match"
     )]
@@ -169,6 +189,8 @@ struct Cli {
     #[arg(
         short = 'w',
         long = "word-regexp",
+        env = "REP_WORD_REGEXP",
+        value_parser = BoolishValueParser::new(),
         help = "Match only whole words",
         help_heading = "Match"
     )]
@@ -177,6 +199,8 @@ struct Cli {
     #[arg(
         short = 'x',
         long = "line-regexp",
+        env = "REP_LINE_REGEXP",
+        value_parser = BoolishValueParser::new(),
         help = "Match only whole lines",
         help_heading = "Match"
     )]
@@ -194,7 +218,8 @@ struct Cli {
         short = 'n',
         long = "dry-run",
         alias = "dry",
-        overrides_with_all = ["write", "preview"],
+        env = "REP_DRY_RUN",
+        value_parser = BoolishValueParser::new(),
         help = "Show what would be changed without writing",
         help_heading = "Mode"
     )]
@@ -202,8 +227,10 @@ struct Cli {
 
     #[arg(
         short = 'W',
+        short_alias = 'y',
         long = "write",
-        overrides_with_all = ["dry_run", "preview"],
+        env = "REP_WRITE",
+        value_parser = BoolishValueParser::new(),
         help = "Apply changes to disk",
         help_heading = "Mode"
     )]
@@ -212,7 +239,8 @@ struct Cli {
     #[arg(
         short = 'p',
         long = "preview",
-        overrides_with_all = ["dry_run", "write"],
+        env = "REP_PREVIEW",
+        value_parser = BoolishValueParser::new(),
         help = "Preview the changes before applying them",
         help_heading = "Mode"
     )]
@@ -221,7 +249,7 @@ struct Cli {
     #[arg(
         long = "preview-tool",
         value_name = "cmd",
-        requires = "preview",
+        env = "REP_PREVIEW_TOOL",
         overrides_with = "preview_tool",
         help = "External diff tool for preview mode",
         help_heading = "Mode"
@@ -240,6 +268,7 @@ struct Cli {
         short = 'C',
         long = "context",
         value_name = "n",
+        env = "REP_CONTEXT",
         default_value_t = DEFAULT_CONTEXT_LINES,
         overrides_with = "context",
         hide_short_help = true,
@@ -252,6 +281,7 @@ struct Cli {
     #[arg(
         long = "hyperlink-format",
         value_name = "fmt",
+        env = "REP_HYPERLINK_FORMAT",
         overrides_with = "hyperlink_format",
         help = "Terminal hyperlink format",
         help_heading = "Miscellaneous",
@@ -262,6 +292,7 @@ struct Cli {
     #[arg(
         long = "hyperlink-limit",
         value_name = "n",
+        env = "REP_HYPERLINK_LIMIT",
         default_value_t = DEFAULT_HYPERLINK_LIMIT,
         overrides_with = "hyperlink_limit",
         allow_negative_numbers = true,
@@ -277,6 +308,7 @@ struct Cli {
         alias = "colour",
         value_name = "when",
         value_enum,
+        env = "REP_COLOR",
         default_value_t = ColorChoice::Auto,
         overrides_with = "color",
         help = "When to use color",
@@ -288,6 +320,8 @@ struct Cli {
     #[arg(
         short = 'q',
         long = "quiet",
+        env = "REP_QUIET",
+        value_parser = BoolishValueParser::new(),
         help = "Suppress summary output",
         help_heading = "Miscellaneous",
         display_order = 110
@@ -297,6 +331,7 @@ struct Cli {
     #[arg(
         long = "style-added",
         value_name = "style",
+        env = "REP_STYLE_ADDED",
         help = "Style for added lines",
         help_heading = "Style",
         display_order = 10
@@ -306,6 +341,7 @@ struct Cli {
     #[arg(
         long = "style-removed",
         value_name = "style",
+        env = "REP_STYLE_REMOVED",
         help = "Style for removed lines",
         help_heading = "Style",
         display_order = 20
@@ -315,6 +351,7 @@ struct Cli {
     #[arg(
         long = "style-line-added",
         value_name = "style",
+        env = "REP_STYLE_LINE_ADDED",
         help = "Style for added line numbers",
         help_heading = "Style",
         display_order = 30
@@ -324,6 +361,7 @@ struct Cli {
     #[arg(
         long = "style-line-removed",
         value_name = "style",
+        env = "REP_STYLE_LINE_REMOVED",
         help = "Style for removed line numbers",
         help_heading = "Style",
         display_order = 40
@@ -333,6 +371,7 @@ struct Cli {
     #[arg(
         long = "marker-added",
         value_name = "str",
+        env = "REP_MARKER_ADDED",
         help = "Marker before added lines",
         help_heading = "Style",
         display_order = 60
@@ -342,6 +381,7 @@ struct Cli {
     #[arg(
         long = "marker-removed",
         value_name = "str",
+        env = "REP_MARKER_REMOVED",
         help = "Marker before removed lines",
         help_heading = "Style",
         display_order = 70
@@ -367,10 +407,15 @@ struct Cli {
     #[arg(long = "completions", value_name = "shell", hide = true)]
     completions: Option<Shell>,
 
-    #[arg(long = "no-hints", overrides_with_all = ["hints", "no_hints"], hide = true)]
+    #[arg(long = "no-hints", hide = true)]
     no_hints: bool,
 
-    #[arg(long = "hints", overrides_with_all = ["no_hints", "hints"], hide = true)]
+    #[arg(
+        long = "hints",
+        env = "REP_HINTS",
+        value_parser = BoolishValueParser::new(),
+        hide = true
+    )]
     hints: bool,
 }
 
@@ -453,27 +498,245 @@ fn colorize_help_metavars(help: &str, styles: Styles) -> String {
     out
 }
 
-/// The id of the mode flag that "wins" given rc state - i.e. the flag that
-/// would be active if no mode flag is passed on the CLI. Mirrors the dispatch
-/// in `run`: `cli.write` first, then `cli.preview`, fallthrough to dry-run.
-fn current_default_mode_id() -> &'static str {
-    let mut id = "dry_run";
-    for arg in config::rc_args() {
-        match arg.to_str() {
-            Some("-n" | "--dry-run" | "--dry") => id = "dry_run",
-            Some("-W" | "--write") => id = "write",
-            Some("-p" | "--preview") => id = "preview",
-            _ => {}
+/// Enforce the `config < env < CLI` precedence policy across mutually
+/// exclusive flags. The winner of each group is the highest-priority "true"
+/// flag (CLI > shell env > config-derived env); the losers are cleared in
+/// the resolved `Cli` so dispatch logic only sees one active flag per group.
+/// Returns an error when two flags in the same group both come from the
+/// same source tier (two CLI flags, two shell env vars, or two config
+/// entries) - the genuine ambiguity cases.
+fn resolve_mutex_groups(
+    cli: &mut Cli,
+    matches: &ArgMatches,
+    origin: &config::Origin,
+) -> Result<()> {
+    let mode = resolve_group(
+        matches,
+        origin,
+        &["dry_run", "write", "preview", "list_files"],
+    )?;
+    cli.dry_run = mode == Some("dry_run");
+    cli.write = mode == Some("write");
+    cli.preview = mode == Some("preview");
+    cli.list_files = mode == Some("list_files");
+
+    if cli.list_files && preview_tool_active(cli, matches) {
+        resolve_list_files_vs_preview_tool(cli, matches, origin)?;
+    }
+
+    let case = resolve_group(matches, origin, &["smart", "preserve"])?;
+    cli.smart = case == Some("smart");
+    cli.preserve = case == Some("preserve");
+
+    let regex_anchor = resolve_group(matches, origin, &["word_regexp", "line_regexp"])?;
+    cli.word_regexp = regex_anchor == Some("word_regexp");
+    cli.line_regexp = regex_anchor == Some("line_regexp");
+
+    cli.no_hints = !resolve_show_hints(matches, origin)?;
+    cli.hints = !cli.no_hints;
+
+    Ok(())
+}
+
+/// Resolve whether hint output should be shown. The default is "on" when
+/// nothing is configured. CLI flags beat env; passing both `--hints` and
+/// `--no-hints` on the command line is an error.
+fn resolve_show_hints(matches: &ArgMatches, origin: &config::Origin) -> Result<bool> {
+    let hints_cli = matches.value_source("hints") == Some(ValueSource::CommandLine);
+    let no_hints_cli = matches.value_source("no_hints") == Some(ValueSource::CommandLine);
+    if hints_cli && no_hints_cli {
+        bail!("--hints and --no-hints cannot be used together");
+    }
+    if hints_cli {
+        return Ok(matches.get_flag("hints"));
+    }
+    if no_hints_cli {
+        return Ok(!matches.get_flag("no_hints"));
+    }
+    if let Some(Tier::ShellEnv | Tier::Config) = tier_of("hints", matches, origin) {
+        return Ok(matches.get_flag("hints"));
+    }
+    Ok(true)
+}
+
+fn preview_tool_active(cli: &Cli, matches: &ArgMatches) -> bool {
+    cli.preview_tool.is_some()
+        && !matches!(
+            matches.value_source("preview_tool"),
+            Some(ValueSource::DefaultValue) | None
+        )
+}
+
+fn resolve_list_files_vs_preview_tool(
+    cli: &mut Cli,
+    matches: &ArgMatches,
+    origin: &config::Origin,
+) -> Result<()> {
+    let list_tier = tier_of("list_files", matches, origin);
+    let tool_tier = tier_of("preview_tool", matches, origin);
+    match (list_tier, tool_tier) {
+        (Some(a), Some(b)) if a == b => bail!(same_tier_error(a, &["list_files", "preview_tool"])),
+        (Some(a), Some(b)) if a > b => cli.preview_tool = None,
+        (Some(_), Some(_)) => cli.list_files = false,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Pick the winner of an "at most one is true" group. Higher tier wins;
+/// same-tier conflicts are errors with wording specific to the source.
+fn resolve_group<'a>(
+    matches: &ArgMatches,
+    origin: &config::Origin,
+    ids: &[&'a str],
+) -> Result<Option<&'a str>> {
+    let mut by_tier: [Vec<&'a str>; Tier::COUNT] = std::array::from_fn(|_| Vec::new());
+    for id in ids {
+        if !matches.get_flag(id) {
+            continue;
+        }
+        if let Some(tier) = tier_of(id, matches, origin) {
+            by_tier[tier.index()].push(*id);
         }
     }
-    id
+    // Walk tiers high-to-low: the highest-priority tier with any active
+    // flag determines the winner. Same-tier ties become source-aware errors.
+    for tier in [Tier::Cli, Tier::ShellEnv, Tier::Config] {
+        let ids_in_tier = &by_tier[tier.index()];
+        if ids_in_tier.len() > 1 {
+            bail!(same_tier_error(tier, ids_in_tier));
+        }
+        if let Some(id) = ids_in_tier.first() {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
-fn print_help() {
-    print_help_with(HELP_SECTIONS, false);
+/// Source tier for precedence resolution. Higher discriminant = higher
+/// priority. The explicit `index` method (rather than `as usize` casts at
+/// call sites) gives the compiler a chance to enforce exhaustiveness if a
+/// variant is added.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Tier {
+    Config,
+    ShellEnv,
+    Cli,
 }
 
-fn print_help_with(sections: &[&str], long: bool) {
+impl Tier {
+    const COUNT: usize = 3;
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Config => 0,
+            Self::ShellEnv => 1,
+            Self::Cli => 2,
+        }
+    }
+}
+
+fn tier_of(id: &str, matches: &ArgMatches, origin: &config::Origin) -> Option<Tier> {
+    match matches.value_source(id) {
+        Some(ValueSource::CommandLine) => Some(Tier::Cli),
+        Some(ValueSource::EnvVariable) => {
+            let env_name = arg_env_name(id)?;
+            if origin.is_config_derived(env_name) {
+                Some(Tier::Config)
+            } else {
+                Some(Tier::ShellEnv)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn same_tier_error(tier: Tier, ids: &[&str]) -> String {
+    let names: Vec<String> = ids.iter().map(|id| (*id).replace('_', "-")).collect();
+    match tier {
+        Tier::Cli => format!(
+            "the following flags cannot be used together: {}",
+            names
+                .iter()
+                .map(|n| format!("--{n}"))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        ),
+        Tier::ShellEnv => format!(
+            "conflicting environment variables: {}",
+            ids.iter()
+                .map(|id| arg_env_name(id)
+                    .map_or_else(|| format!("REP_{}", id.to_ascii_uppercase()), str::to_owned))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        ),
+        Tier::Config => format!(
+            "config sets conflicting keys: {}",
+            names
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        ),
+    }
+}
+
+/// Map a clap arg id to its declared `REP_*` env var name. Returns `None`
+/// for ids without an `env = ...` attribute - those can't be config-derived.
+fn arg_env_name(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "hidden" => "REP_HIDDEN",
+        "no_ignore" => "REP_NO_IGNORE",
+        "ignore_case" => "REP_IGNORE_CASE",
+        "regexp" => "REP_REGEX",
+        "multiline" => "REP_MULTILINE",
+        "dotall" => "REP_DOTALL",
+        "greedy" => "REP_GREEDY",
+        "word_regexp" => "REP_WORD_REGEXP",
+        "line_regexp" => "REP_LINE_REGEXP",
+        "smart" => "REP_SMART",
+        "preserve" => "REP_PRESERVE",
+        "dry_run" => "REP_DRY_RUN",
+        "write" => "REP_WRITE",
+        "preview" => "REP_PREVIEW",
+        "preview_tool" => "REP_PREVIEW_TOOL",
+        "context" => "REP_CONTEXT",
+        "color" => "REP_COLOR",
+        "hyperlink_format" => "REP_HYPERLINK_FORMAT",
+        "hyperlink_limit" => "REP_HYPERLINK_LIMIT",
+        "quiet" => "REP_QUIET",
+        "hints" => "REP_HINTS",
+        "style_added" => "REP_STYLE_ADDED",
+        "style_removed" => "REP_STYLE_REMOVED",
+        "style_line_added" => "REP_STYLE_LINE_ADDED",
+        "style_line_removed" => "REP_STYLE_LINE_REMOVED",
+        "marker_added" => "REP_MARKER_ADDED",
+        "marker_removed" => "REP_MARKER_REMOVED",
+        _ => return None,
+    })
+}
+
+/// The mode that would be active if the user passes no mode flag on the CLI.
+/// Drives which mode flag gets promoted to the top of help output. Reads
+/// the resolved `Cli`, so the help layout reflects the same precedence the
+/// run path would apply.
+const fn current_default_mode_id(cli: &Cli) -> &'static str {
+    if cli.write {
+        "write"
+    } else if cli.preview {
+        "preview"
+    } else if cli.list_files {
+        "list_files"
+    } else {
+        "dry_run"
+    }
+}
+
+fn print_help(cli: &Cli) {
+    print_help_with(cli, HELP_SECTIONS, false);
+}
+
+fn print_help_with(cli: &Cli, sections: &[&str], long: bool) {
     let styles = ui::Styles::when(std::io::stdout().is_terminal());
     let bold = styles.bold();
     let red = styles.fg(Color::Red);
@@ -497,7 +760,7 @@ fn print_help_with(sections: &[&str], long: bool) {
     );
 
     let cmd = Cli::command();
-    let default_mode = current_default_mode_id();
+    let default_mode = current_default_mode_id(cli);
 
     // Synthesized for the renderer: the real `--version` is added by clap's
     // build pass, which `Cli::command()` doesn't trigger.
@@ -570,7 +833,7 @@ fn print_help_with(sections: &[&str], long: bool) {
     }
 }
 
-fn print_help_long() {
+fn print_help_long(cli: &Cli) {
     let styles = ui::Styles::when(std::io::stdout().is_terminal());
     let bold = styles.bold();
     let green = styles.fg(Color::Green);
@@ -578,7 +841,7 @@ fn print_help_long() {
     let grey = styles.fg(Color::Grey);
     let reset = styles.reset();
 
-    print_help_with(LONG_HELP_SECTIONS, true);
+    print_help_with(cli, LONG_HELP_SECTIONS, true);
 
     let text = format!(
         "
@@ -1485,21 +1748,14 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut argv: Vec<_> = std::env::args().collect();
-    let rc_args = config::rc_args();
-    if !rc_args.is_empty() {
-        // Insert rc args after argv[0] so clap sees: [program, ...rc, ...cli].
-        // CLI args come last so they win for `Option<T>` (last occurrence) and
-        // positionals stay in their expected positions.
-        let tail = argv.split_off(1);
-        argv.extend(
-            rc_args
-                .into_iter()
-                .map(|a| a.into_string().unwrap_or_default()),
-        );
-        argv.extend(tail);
-    }
-    let cli = Cli::parse_from(preprocess_expression_args(argv));
+    let argv: Vec<_> = std::env::args().collect();
+    let cfg_origin = config::load_into_env();
+    let matches = Cli::command().get_matches_from(preprocess_expression_args(argv));
+    let mut cli = Cli::from_arg_matches(&matches).map_err(|e| anyhow::anyhow!(e))?;
+    resolve_mutex_groups(&mut cli, &matches, &cfg_origin)?;
+    // Clear config-synthesized env so spawned subprocesses (preview tools,
+    // hyperlink targets, etc.) inherit only the user's real shell env.
+    cfg_origin.unset_synthesized();
     ui::set_color_choice(cli.color);
     let theme = theme::Theme::from_overrides(theme::Overrides {
         style_added: cli.style_added.as_deref(),
@@ -1518,17 +1774,17 @@ fn run() -> Result<()> {
     }
 
     if cli.help_long {
-        print_help_long();
+        print_help_long(&cli);
         std::process::exit(0);
     }
 
     if cli.help {
-        print_help();
+        print_help(&cli);
         std::process::exit(0);
     }
 
     if !cli.uses_expressions() && cli.args.is_empty() && !cli.delete && !cli.list_files {
-        print_help();
+        print_help(&cli);
         std::process::exit(1);
     }
 
@@ -1539,7 +1795,7 @@ fn run() -> Result<()> {
             "<replace>"
         };
         print_error(&anyhow::anyhow!("missing required argument: {missing}"));
-        print_help();
+        print_help(&cli);
         std::process::exit(1);
     }
 
@@ -1589,10 +1845,20 @@ fn run() -> Result<()> {
 mod tests {
     use super::*;
 
+    use crate::test_env::{EnvGuard, lock_for_parse};
+
     fn parse_cli(args: &[&str]) -> Cli {
+        let _lock = lock_for_parse();
         let processed =
             preprocess_expression_args(args.iter().map(std::string::ToString::to_string).collect());
         Cli::parse_from(processed)
+    }
+
+    fn try_parse_cli(args: &[&str]) -> clap::error::Result<Cli> {
+        let _lock = lock_for_parse();
+        let processed =
+            preprocess_expression_args(args.iter().map(std::string::ToString::to_string).collect());
+        Cli::try_parse_from(processed)
     }
 
     #[test]
@@ -1630,33 +1896,181 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_write_overrides_dry_run_last_wins() {
-        let cli = parse_cli(&["rep", "--dry-run", "-W", "a", "b"]);
-        assert!(!cli.dry_run);
-        assert!(cli.write);
-        assert!(!cli.preview);
+    fn parse_and_resolve(args: &[&str]) -> Result<Cli> {
+        let _lock = lock_for_parse();
+        let processed = preprocess_expression_args(args.iter().map(|s| (*s).to_string()).collect());
+        let matches = Cli::command().try_get_matches_from(processed)?;
+        let mut cli = Cli::from_arg_matches(&matches).map_err(|e| anyhow::anyhow!(e))?;
+        resolve_mutex_groups(&mut cli, &matches, &config::Origin::default())?;
+        Ok(cli)
     }
 
     #[test]
-    fn test_dry_run_overrides_write_last_wins() {
-        let cli = parse_cli(&["rep", "-W", "--dry-run", "a", "b"]);
-        assert!(cli.dry_run);
+    fn test_mode_flags_are_mutex_on_cli() {
+        for args in [
+            ["rep", "--dry-run", "--write", "a", "b"].as_slice(),
+            ["rep", "--write", "--preview", "a", "b"].as_slice(),
+            ["rep", "--dry-run", "--preview", "a", "b"].as_slice(),
+            ["rep", "--list-files", "--write", "a", "b"].as_slice(),
+            ["rep", "--list-files", "--preview", "a", "b"].as_slice(),
+            ["rep", "--list-files", "--dry-run", "a", "b"].as_slice(),
+        ] {
+            assert!(
+                parse_and_resolve(args).is_err(),
+                "expected mode flags {args:?} to conflict, but parse succeeded"
+            );
+        }
+    }
+
+    #[test]
+    fn test_smart_and_preserve_are_mutex_on_cli() {
+        assert!(parse_and_resolve(&["rep", "--smart", "--preserve", "a", "b"]).is_err());
+    }
+
+    #[test]
+    fn test_word_and_line_regexp_are_mutex_on_cli() {
+        assert!(parse_and_resolve(&["rep", "--word-regexp", "--line-regexp", "a", "b"]).is_err());
+    }
+
+    #[test]
+    fn test_hints_and_no_hints_are_mutex_on_cli() {
+        assert!(parse_and_resolve(&["rep", "--hints", "--no-hints", "a", "b"]).is_err());
+    }
+
+    /// Resolver helper for env-aware tests. The caller must hold an
+    /// [`EnvGuard`] for the duration of this call - the matches read env
+    /// state and would race with a concurrent mutator.
+    fn resolve_with_origin(args: &[&str], origin: &config::Origin) -> Result<Cli> {
+        let processed = preprocess_expression_args(args.iter().map(|s| (*s).to_string()).collect());
+        let matches = Cli::command().try_get_matches_from(processed)?;
+        let mut cli = Cli::from_arg_matches(&matches).map_err(|e| anyhow::anyhow!(e))?;
+        resolve_mutex_groups(&mut cli, &matches, origin)?;
+        Ok(cli)
+    }
+
+    /// Build a config `Origin` claiming the given env var names are
+    /// config-derived. Used to simulate `apply_to_env` having projected
+    /// values onto the environment without actually loading a config file.
+    fn fake_config_origin(keys: &'static [&'static str]) -> config::Origin {
+        let mut origin = config::Origin::default();
+        for k in keys {
+            // Re-create the projection record without touching the env -
+            // the test's `EnvGuard` handles the env setup directly.
+            origin.mark_as_config_derived(k);
+        }
+        origin
+    }
+
+    #[test]
+    fn test_cli_mode_beats_shell_env_mode() {
+        let _g = EnvGuard::set(&[("REP_WRITE", "true")]);
+        let cli = resolve_with_origin(&["rep", "--dry-run", "a", "b"], &config::Origin::default())
+            .unwrap();
+        assert!(cli.dry_run, "CLI --dry-run must win over shell REP_WRITE");
         assert!(!cli.write);
     }
 
     #[test]
-    fn test_preview_overrides_dry_run_last_wins() {
-        let cli = parse_cli(&["rep", "--dry-run", "--preview", "a", "b"]);
+    fn test_shell_env_beats_config_in_same_group() {
+        // Config says dry_run=true (synthesized REP_DRY_RUN), shell says
+        // REP_WRITE=true. Shell wins over config, so write mode is active.
+        let _g = EnvGuard::set(&[("REP_DRY_RUN", "true"), ("REP_WRITE", "true")]);
+        let origin = fake_config_origin(&["REP_DRY_RUN"]);
+        let cli = resolve_with_origin(&["rep", "a", "b"], &origin).unwrap();
+        assert!(
+            cli.write,
+            "shell REP_WRITE must beat config-derived REP_DRY_RUN"
+        );
         assert!(!cli.dry_run);
-        assert!(cli.preview);
     }
 
     #[test]
-    fn test_dry_run_overrides_preview_last_wins() {
-        let cli = parse_cli(&["rep", "--preview", "--dry-run", "a", "b"]);
-        assert!(cli.dry_run);
-        assert!(!cli.preview);
+    fn test_two_shell_env_vars_in_one_group_errors() {
+        let _g = EnvGuard::set(&[("REP_WRITE", "true"), ("REP_DRY_RUN", "true")]);
+        let err = resolve_with_origin(&["rep", "a", "b"], &config::Origin::default())
+            .err()
+            .expect("expected resolver error")
+            .to_string();
+        assert!(
+            err.contains("environment variables"),
+            "expected env-conflict wording, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_two_config_keys_in_one_group_errors() {
+        let _g = EnvGuard::set(&[("REP_WRITE", "true"), ("REP_DRY_RUN", "true")]);
+        let origin = fake_config_origin(&["REP_WRITE", "REP_DRY_RUN"]);
+        let err = resolve_with_origin(&["rep", "a", "b"], &origin)
+            .err()
+            .expect("expected resolver error")
+            .to_string();
+        assert!(
+            err.contains("config sets"),
+            "expected config-conflict wording, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_cli_smart_beats_shell_env_preserve() {
+        let _g = EnvGuard::set(&[("REP_PRESERVE", "true")]);
+        let cli =
+            resolve_with_origin(&["rep", "--smart", "a", "b"], &config::Origin::default()).unwrap();
+        assert!(cli.smart);
+        assert!(!cli.preserve);
+    }
+
+    #[test]
+    fn test_cli_word_regexp_beats_shell_env_line_regexp() {
+        let _g = EnvGuard::set(&[("REP_LINE_REGEXP", "true")]);
+        let cli = resolve_with_origin(
+            &["rep", "--word-regexp", "a", "b"],
+            &config::Origin::default(),
+        )
+        .unwrap();
+        assert!(cli.word_regexp);
+        assert!(!cli.line_regexp);
+    }
+
+    #[test]
+    fn test_cli_no_hints_beats_shell_env_hints() {
+        let _g = EnvGuard::set(&[("REP_HINTS", "true")]);
+        let cli = resolve_with_origin(&["rep", "--no-hints", "a", "b"], &config::Origin::default())
+            .unwrap();
+        assert!(cli.no_hints);
+        assert!(!cli.hints);
+    }
+
+    #[test]
+    fn test_arg_env_name_matches_clap_spec() {
+        // The hardcoded `arg_env_name` map mirrors the `env = ...` attributes
+        // on the `Cli` struct. If a new env-backed flag is added without
+        // updating the map, source-aware resolution and config-tier error
+        // wording will silently misclassify it.
+        let cmd = Cli::command();
+        for arg in cmd.get_arguments() {
+            if let Some(declared) = arg.get_env() {
+                let id = arg.get_id().as_str();
+                let mapped = arg_env_name(id);
+                assert_eq!(
+                    mapped,
+                    Some(declared.to_str().expect("env name is UTF-8")),
+                    "arg_env_name({id}) does not match clap's env attribute",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cli_list_files_beats_shell_env_preview_tool() {
+        let _g = EnvGuard::set(&[("REP_PREVIEW_TOOL", "delta")]);
+        let cli = resolve_with_origin(
+            &["rep", "--list-files", "a", "b"],
+            &config::Origin::default(),
+        )
+        .unwrap();
+        assert!(cli.list_files);
+        assert!(cli.preview_tool.is_none());
     }
 
     #[test]
@@ -1845,36 +2259,33 @@ mod tests {
 
     #[test]
     fn test_cli_is_regex_any_flag_enables_regex() {
-        assert!(!Cli::parse_from(["rep", "a", "b"]).is_regex());
-        assert!(Cli::parse_from(["rep", "-r", "a", "b"]).is_regex());
-        assert!(Cli::parse_from(["rep", "-i", "a", "b"]).is_regex());
-        assert!(Cli::parse_from(["rep", "-w", "a", "b"]).is_regex());
-        assert!(Cli::parse_from(["rep", "-x", "a", "b"]).is_regex());
-        assert!(Cli::parse_from(["rep", "-m", "a", "b"]).is_regex());
-        assert!(Cli::parse_from(["rep", "-G", "a", "b"]).is_regex());
-        assert!(Cli::parse_from(["rep", "--dotall", "a", "b"]).is_regex());
+        assert!(!parse_cli(&["rep", "a", "b"]).is_regex());
+        assert!(parse_cli(&["rep", "-r", "a", "b"]).is_regex());
+        assert!(parse_cli(&["rep", "-i", "a", "b"]).is_regex());
+        assert!(parse_cli(&["rep", "-w", "a", "b"]).is_regex());
+        assert!(parse_cli(&["rep", "-x", "a", "b"]).is_regex());
+        assert!(parse_cli(&["rep", "-m", "a", "b"]).is_regex());
+        assert!(parse_cli(&["rep", "-G", "a", "b"]).is_regex());
+        assert!(parse_cli(&["rep", "--dotall", "a", "b"]).is_regex());
     }
 
     #[test]
     fn test_cli_positional_skip() {
         // find+replace mode: skip 2 positional args
-        assert_eq!(Cli::parse_from(["rep", "a", "b"]).positional_skip(), 2);
+        assert_eq!(parse_cli(&["rep", "a", "b"]).positional_skip(), 2);
         // expression mode: no positional find/replace
         assert_eq!(parse_cli(&["rep", "-e", "a", "b"]).positional_skip(), 0);
         // -l accepts an optional <replace>: 1 positional stays find-only,
         // 2+ positionals consume both find and replace.
-        assert_eq!(Cli::parse_from(["rep", "-l", "a"]).positional_skip(), 1);
+        assert_eq!(parse_cli(&["rep", "-l", "a"]).positional_skip(), 1);
+        assert_eq!(parse_cli(&["rep", "-l", "a", "b"]).positional_skip(), 2);
         assert_eq!(
-            Cli::parse_from(["rep", "-l", "a", "b"]).positional_skip(),
-            2
-        );
-        assert_eq!(
-            Cli::parse_from(["rep", "-l", "a", "b", "src"]).positional_skip(),
+            parse_cli(&["rep", "-l", "a", "b", "src"]).positional_skip(),
             2
         );
         // -d -l keeps delete semantics (no <replace>).
         assert_eq!(
-            Cli::parse_from(["rep", "-d", "-l", "a", "src"]).positional_skip(),
+            parse_cli(&["rep", "-d", "-l", "a", "src"]).positional_skip(),
             1
         );
     }
@@ -1882,23 +2293,23 @@ mod tests {
     #[test]
     fn test_cli_is_find_only() {
         // -l is no longer find-only: it accepts an optional <replace>.
-        assert!(!Cli::parse_from(["rep", "-l", "a"]).is_find_only());
-        assert!(!Cli::parse_from(["rep", "-l", "a", "b"]).is_find_only());
-        assert!(!Cli::parse_from(["rep", "a", "b"]).is_find_only());
+        assert!(!parse_cli(&["rep", "-l", "a"]).is_find_only());
+        assert!(!parse_cli(&["rep", "-l", "a", "b"]).is_find_only());
+        assert!(!parse_cli(&["rep", "a", "b"]).is_find_only());
         // -l with -e is expression mode, not find-only
         assert!(!parse_cli(&["rep", "-l", "-e", "a", "b"]).is_find_only());
         // -d is always find-only regardless of trailing positional path count
-        assert!(Cli::parse_from(["rep", "-d", "a"]).is_find_only());
-        assert!(Cli::parse_from(["rep", "-d", "a", "src"]).is_find_only());
-        assert!(Cli::parse_from(["rep", "-d", "a", "src", "tests"]).is_find_only());
+        assert!(parse_cli(&["rep", "-d", "a"]).is_find_only());
+        assert!(parse_cli(&["rep", "-d", "a", "src"]).is_find_only());
+        assert!(parse_cli(&["rep", "-d", "a", "src", "tests"]).is_find_only());
         // -d -l keeps delete's find-only semantics.
-        assert!(Cli::parse_from(["rep", "-d", "-l", "a", "src"]).is_find_only());
+        assert!(parse_cli(&["rep", "-d", "-l", "a", "src"]).is_find_only());
     }
 
     #[test]
     fn test_delete_mode_treats_trailing_positionals_as_paths() {
         // With -d, there is no <replace>; args[1..] are all paths.
-        let cli = Cli::parse_from(["rep", "-d", "TODO", "src", "tests"]);
+        let cli = parse_cli(&["rep", "-d", "TODO", "src", "tests"]);
         assert_eq!(cli.positional_skip(), 1);
         assert_eq!(cli.pattern(), "TODO");
         assert_eq!(
@@ -1910,20 +2321,20 @@ mod tests {
     #[test]
     fn test_list_files_mode_consumes_optional_replace() {
         // 1 positional: find-only, default search root.
-        let cli = Cli::parse_from(["rep", "-l", "TODO"]);
+        let cli = parse_cli(&["rep", "-l", "TODO"]);
         assert_eq!(cli.positional_skip(), 1);
         assert_eq!(cli.pattern(), "TODO");
         assert_eq!(cli.paths(), Vec::<PathBuf>::new());
 
         // 2 positionals: <find> <replace>, default search root.
-        let cli = Cli::parse_from(["rep", "-l", "foo", "bar"]);
+        let cli = parse_cli(&["rep", "-l", "foo", "bar"]);
         assert_eq!(cli.positional_skip(), 2);
         assert_eq!(cli.pattern(), "foo");
         assert_eq!(cli.replacement(), "bar");
         assert_eq!(cli.paths(), Vec::<PathBuf>::new());
 
         // 3+ positionals: <find> <replace> followed by paths.
-        let cli = Cli::parse_from(["rep", "-l", "foo", "bar", "src", "tests"]);
+        let cli = parse_cli(&["rep", "-l", "foo", "bar", "src", "tests"]);
         assert_eq!(cli.positional_skip(), 2);
         assert_eq!(cli.pattern(), "foo");
         assert_eq!(cli.replacement(), "bar");
@@ -1936,7 +2347,7 @@ mod tests {
     #[test]
     fn test_delete_list_files_mode_treats_trailing_positionals_as_paths() {
         // -d -l keeps -d's parsing: no <replace>, all trailing positionals are paths.
-        let cli = Cli::parse_from(["rep", "-d", "-l", "TODO", "src", "tests"]);
+        let cli = parse_cli(&["rep", "-d", "-l", "TODO", "src", "tests"]);
         assert_eq!(cli.positional_skip(), 1);
         assert_eq!(cli.pattern(), "TODO");
         assert_eq!(
@@ -1947,14 +2358,14 @@ mod tests {
 
     #[test]
     fn test_delete_combines_with_smart_flag() {
-        let cli = Cli::parse_from(["rep", "-d", "-S", "foo_bar"]);
+        let cli = parse_cli(&["rep", "-d", "-S", "foo_bar"]);
         assert!(cli.delete);
         assert!(cli.smart);
     }
 
     #[test]
     fn test_delete_combines_with_list_files() {
-        let cli = Cli::parse_from(["rep", "-d", "-l", "foo"]);
+        let cli = parse_cli(&["rep", "-d", "-l", "foo"]);
         assert!(cli.delete);
         assert!(cli.list_files);
     }
@@ -1962,46 +2373,40 @@ mod tests {
     #[test]
     fn test_color_flag_parses_all_variants() {
         assert_eq!(
-            Cli::parse_from(["rep", "--color=auto", "a", "b"]).color,
+            parse_cli(&["rep", "--color=auto", "a", "b"]).color,
             ColorChoice::Auto
         );
         assert_eq!(
-            Cli::parse_from(["rep", "--color=always", "a", "b"]).color,
+            parse_cli(&["rep", "--color=always", "a", "b"]).color,
             ColorChoice::Always
         );
         assert_eq!(
-            Cli::parse_from(["rep", "--color=never", "a", "b"]).color,
+            parse_cli(&["rep", "--color=never", "a", "b"]).color,
             ColorChoice::Never
         );
         // Default when omitted.
-        assert_eq!(Cli::parse_from(["rep", "a", "b"]).color, ColorChoice::Auto);
+        assert_eq!(parse_cli(&["rep", "a", "b"]).color, ColorChoice::Auto);
     }
 
     #[test]
     fn test_color_flag_rejects_invalid_value() {
-        assert!(Cli::try_parse_from(["rep", "--color=bogus", "a", "b"]).is_err());
-    }
-
-    #[test]
-    fn test_preview_tool_requires_preview() {
-        let result = Cli::try_parse_from(["rep", "--preview-tool", "delta", "foo", "bar"]);
-        assert!(result.is_err());
+        assert!(try_parse_cli(&["rep", "--color=bogus", "a", "b"]).is_err());
     }
 
     #[test]
     fn test_cli_dirs_defaults_to_current_directory() {
-        assert_eq!(Cli::parse_from(["rep", "a", "b"]).dirs(), vec!["."]);
+        assert_eq!(parse_cli(&["rep", "a", "b"]).dirs(), vec!["."]);
     }
 
     #[test]
     fn test_cli_dirs_uses_trailing_positionals() {
-        let cli = Cli::parse_from(["rep", "a", "b", "src", "tests"]);
+        let cli = parse_cli(&["rep", "a", "b", "src", "tests"]);
         assert_eq!(cli.dirs(), vec!["src", "tests"]);
     }
 
     #[test]
     fn test_cli_paths_skips_find_and_replace() {
-        let cli = Cli::parse_from(["rep", "a", "b", "src", "tests"]);
+        let cli = parse_cli(&["rep", "a", "b", "src", "tests"]);
         assert_eq!(
             cli.paths(),
             vec![PathBuf::from("src"), PathBuf::from("tests")]

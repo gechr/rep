@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 crossterm = "0.29"
 convert_case = "0.10"
@@ -20,8 +20,10 @@ memchr = "2"
 natord = "1"
 num-format = { version = "0", features = ["with-system-locale"] }
 regex = "1"
+serde = { version = "1", features = ["derive"] }
 shlex = "1"
 tempfile = "3"
+toml = "1"
 
 [profile.release]
 opt-level = 3

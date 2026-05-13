@@ -16,11 +16,18 @@ use tempfile::tempdir;
 
 const REP: &str = env!("CARGO_BIN_EXE_rep");
 
-/// Spawns the rep binary with `REP_CONFIG_PATH=""` so the user's `~/.reprc`
-/// doesn't bleed into snapshot assertions. Tests that exercise rc behavior
-/// can `.env("REP_CONFIG_PATH", path)` to override.
+/// Spawns the rep binary with all `REP_*` env vars cleared so the developer's
+/// shell environment can't bleed into snapshot assertions. Tests that exercise
+/// config or env behavior can `.env(...)` back in selectively.
 fn rep_command() -> Command {
     let mut cmd = Command::new(REP);
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("REP_") {
+            cmd.env_remove(&key);
+        }
+    }
+    // Empty (not unset) means "no config file" - rep falls through to
+    // `~/.config/rep/config.toml` if this is missing.
     cmd.env("REP_CONFIG_PATH", "");
     cmd
 }
@@ -115,8 +122,8 @@ fn write_flag_overrides_dry_run_set_in_rc() {
     let file = dir.path().join("a.txt");
     write(&file, "foo");
 
-    let rc = dir.path().join("reprc");
-    write(&rc, "--dry-run\n");
+    let rc = dir.path().join("config.toml");
+    write(&rc, "dry-run = true\n");
 
     let status = rep_command()
         .env("REP_CONFIG_PATH", &rc)
@@ -128,7 +135,7 @@ fn write_flag_overrides_dry_run_set_in_rc() {
     assert_eq!(
         read(&file),
         "bar",
-        "-W on the CLI must override --dry-run from the rc file"
+        "-W on the CLI must override dry-run from config"
     );
 }
 
@@ -830,7 +837,7 @@ Match
 Replace
 
   -e, --expression <f> <r>      Repeatable <find> <replace> expression
-  -S, --smart                   Replace all case variants of the pattern
+  -S, --smart                   Replace all <find> case variants
   -P, --preserve                Mirror the <find> case onto the <replace>
   -d, --delete                  Delete lines matching <find>
 
@@ -860,8 +867,8 @@ Miscellaneous
 #[test]
 fn rc_write_promotes_write_above_dry_run_in_help() {
     let dir = tempdir().unwrap();
-    let rc = dir.path().join("reprc");
-    write(&rc, "--write\n");
+    let rc = dir.path().join("config.toml");
+    write(&rc, "write = true\n");
 
     let output = rep_command()
         .env("REP_CONFIG_PATH", &rc)
@@ -900,7 +907,7 @@ Match
 Replace
 
   -e, --expression <f> <r>      Repeatable <find> <replace> expression
-  -S, --smart                   Replace all case variants of the pattern
+  -S, --smart                   Replace all <find> case variants
   -P, --preserve                Mirror the <find> case onto the <replace>
   -d, --delete                  Delete lines matching <find>
 
@@ -1161,8 +1168,8 @@ fn delete_mode_with_expression_treats_trailing_arg_as_path_not_replace() {
 }
 
 #[test]
-fn rc_file_flags_are_applied_via_config_path() {
-    // Hidden files are skipped by default; an rc file enabling --hidden
+fn config_toml_enables_flag() {
+    // Hidden files are skipped by default; a config file enabling `hidden`
     // should make them searchable.
     let dir = tempdir().unwrap();
     let visible = dir.path().join("a.txt");
@@ -1170,8 +1177,8 @@ fn rc_file_flags_are_applied_via_config_path() {
     write(&visible, "foo here");
     write(&hidden, "foo here");
 
-    let rc = dir.path().join("reprc");
-    write(&rc, "# enable hidden\n--hidden\n");
+    let rc = dir.path().join("config.toml");
+    write(&rc, "# enable hidden\nhidden = true\n");
 
     let status = rep_command()
         .env("REP_CONFIG_PATH", &rc)
@@ -1185,27 +1192,88 @@ fn rc_file_flags_are_applied_via_config_path() {
 }
 
 #[test]
-fn cli_args_override_rc_args() {
-    // rc restricts to *.md; CLI overrides with *.txt. Only the .txt file
-    // should be rewritten.
+fn shell_env_overrides_config_in_mutex_group() {
+    // Config asks for dry-run; shell sets REP_WRITE=true. Shell env beats
+    // config-derived env, so write mode wins and the file is modified.
     let dir = tempdir().unwrap();
-    let txt = dir.path().join("a.txt");
-    let md = dir.path().join("b.md");
-    write(&txt, "foo");
-    write(&md, "foo");
+    let file = dir.path().join("a.txt");
+    write(&file, "foo");
 
-    let rc = dir.path().join("reprc");
-    write(&rc, "--files=*.md\n");
+    let rc = dir.path().join("config.toml");
+    write(&rc, "dry-run = true\n");
 
     let status = rep_command()
         .env("REP_CONFIG_PATH", &rc)
-        .args(["-W", "--files=*.txt", "foo", "bar", "."])
+        .env("REP_WRITE", "true")
+        .args(["foo", "bar", "."])
         .current_dir(dir.path())
         .status()
         .unwrap();
     assert!(status.success());
-    assert_eq!(read(&txt), "bar");
-    assert_eq!(read(&md), "foo");
+    assert_eq!(
+        read(&file),
+        "bar",
+        "shell REP_WRITE should beat config dry-run"
+    );
+}
+
+#[test]
+fn env_var_overrides_config_value() {
+    // Config sets ignore-case, env overrides it back to false. The match
+    // should be case-sensitive (no replacement on "Foo").
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "Foo");
+
+    let rc = dir.path().join("config.toml");
+    write(&rc, "ignore-case = true\n");
+
+    let status = rep_command()
+        .env("REP_CONFIG_PATH", &rc)
+        .env("REP_IGNORE_CASE", "false")
+        .args(["-W", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(read(&file), "Foo", "env should override config");
+}
+
+#[test]
+fn cli_flag_wins_over_config_and_env() {
+    // Probe an *observable* value: --context lines bracket each diff hunk,
+    // so setting context to wildly different values in config / env / CLI
+    // and counting context lines in the output proves which one won.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    // Five lines of padding above and below the match, so we can tell
+    // context=0 (no surrounding lines) from context=5 (all of them) from
+    // context=2 (two each side).
+    write(&file, "p1\np2\np3\np4\np5\nfoo\np6\np7\np8\np9\np10\n");
+
+    let rc = dir.path().join("config.toml");
+    write(&rc, "context = 5\n");
+
+    let output = rep_command()
+        .env("REP_CONFIG_PATH", &rc)
+        .env("REP_CONTEXT", "2")
+        .args(["--color=never", "-C", "0", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "rep failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // With context=0 (CLI), only the changed lines `-foo`/`+bar` should
+    // appear - no surrounding padding.
+    let context_lines: Vec<&str> = stdout.lines().filter(|l| l.starts_with(" p")).collect();
+    assert!(
+        context_lines.is_empty(),
+        "CLI -C 0 should suppress context, but found surrounding lines: {context_lines:?} in:\n{stdout}"
+    );
 }
 
 #[test]
@@ -1908,7 +1976,11 @@ fn run_hyperlink_limit(limit: &str) -> String {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "rep failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).unwrap()
 }
 
