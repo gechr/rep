@@ -753,6 +753,43 @@ fn list_files_with_replace_lists_only_files_that_would_change() {
 }
 
 #[test]
+fn list_files_without_pattern_lists_every_walked_file() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("a.txt"), "anything");
+    write(&dir.path().join("b.go"), "anything");
+    write(&dir.path().join("c.go"), "anything");
+
+    // `-l` alone: every walked file, no content filter.
+    let output = rep_command()
+        .args(["-l"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "a.txt\nb.go\nc.go\n"
+    );
+
+    // `-f go -l`: every file passing the `*.go` glob, no content filter.
+    let output = rep_command()
+        .args(["-f", "go", "-l"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "b.go\nc.go\n");
+}
+
+#[test]
 fn stdin_mode_writes_replaced_text_to_stdout() {
     let mut child = rep_command()
         .args(["foo", "bar"])

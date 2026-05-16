@@ -585,6 +585,11 @@ pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> 
         } else {
             parse_expressions(cli)?
         }
+    } else if cli.args.is_empty() {
+        // Reachable only under `-l` with no positional `<find>` (the main
+        // entry guard requires args otherwise). An empty expression set means
+        // "no content filter" - the walker output is the listing as-is.
+        Vec::new()
     } else {
         vec![Expression {
             find: cli.pattern().to_string(),

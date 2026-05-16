@@ -1290,7 +1290,15 @@ fn run_list_files(cli: &Cli) -> Result<()> {
     use std::sync::Arc;
 
     let expressions = Arc::new(compile_expressions(cli)?);
-    let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
+    // `-l` with no `<find>` lists every walked file (still filtered by `-f`,
+    // `-H`, etc.). This is distinct from a pattern that was supplied but
+    // optimised away (e.g. `-l foo foo`), where `expressions` is also empty
+    // post-filter but the user *did* ask for a content match - so we still
+    // build a pre-filter for that case.
+    let has_no_pattern = !cli.uses_expressions() && cli.args.is_empty();
+    let pre_filter = (!has_no_pattern)
+        .then(|| build_pre_filter_matcher(cli, &expressions))
+        .transpose()?;
     let filter_by_change = cli.positional_replace().is_some();
 
     let dirs = cli.dirs();
@@ -1327,17 +1335,19 @@ fn run_list_files(cli: &Cli) -> Result<()> {
                 if !scan::is_candidate_path(path) {
                     return WalkState::Continue;
                 }
-                let listed = if filter_by_change {
-                    let Some(contents) =
-                        scan::file_contents_if_matches(&mut searcher, &pre_filter, path)
-                    else {
-                        return WalkState::Continue;
-                    };
-                    let (updated, count, _) =
-                        apply_compiled_expressions(&contents, &expressions, false);
-                    count > 0 && *updated != *contents
-                } else {
-                    scan::file_matches(&mut searcher, &pre_filter, path)
+                let listed = match &pre_filter {
+                    None => true,
+                    Some(pre_filter) if filter_by_change => {
+                        let Some(contents) =
+                            scan::file_contents_if_matches(&mut searcher, pre_filter, path)
+                        else {
+                            return WalkState::Continue;
+                        };
+                        let (updated, count, _) =
+                            apply_compiled_expressions(&contents, &expressions, false);
+                        count > 0 && *updated != *contents
+                    }
+                    Some(pre_filter) => scan::file_matches(&mut searcher, pre_filter, path),
                 };
                 if listed && tx.send(display_path(path)).is_err() {
                     return WalkState::Quit;
