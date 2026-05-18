@@ -22,3 +22,8 @@ updates:
       cargo:
         patterns:
           - "*"
+    ignore:
+      - dependency-name: convert_case
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
