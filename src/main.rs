@@ -1755,6 +1755,15 @@ impl ResultPrinter<'_> {
     }
 
     fn print_patch_results(&self, results: &[ReplacementResult]) {
+        let mut stdout = std::io::stdout().lock();
+        drop(self.write_patch_results_to(results, &mut stdout));
+    }
+
+    fn write_patch_results_to<W: std::io::Write>(
+        &self,
+        results: &[ReplacementResult],
+        out: &mut W,
+    ) -> std::io::Result<()> {
         for result in results {
             let Some((old, new)) = &result.diff else {
                 continue;
@@ -1765,8 +1774,9 @@ impl ResultPrinter<'_> {
                 .set_original_filename(format!("a/{}", result.path))
                 .set_modified_filename(format!("b/{}", result.path));
             let patch = options.create_patch(old, new);
-            print!("{patch}");
+            write!(out, "{patch}")?;
         }
+        Ok(())
     }
 }
 
@@ -2515,6 +2525,43 @@ mod tests {
         assert_eq!(
             summary_message(1, 3, true, true),
             "Would perform 3 deletions in 1 file"
+        );
+    }
+
+    #[test]
+    fn test_patch_results_write_to_single_writer() {
+        let printer = ResultPrinter {
+            quiet: false,
+            delete: false,
+            dry: true,
+            no_hints: false,
+            hyperlink_format: None,
+            hyperlink_limit: 0,
+            context_lines: 3,
+        };
+        let results = [ReplacementResult {
+            path: "a.txt".to_string(),
+            link_path: "a.txt".to_string(),
+            count: 1,
+            diff: Some(("foo\n".to_string(), "bar\n".to_string())),
+            columns: std::collections::HashMap::new(),
+            spans: Vec::new(),
+            linewise_diff: false,
+            multiline_span_diff: false,
+        }];
+        let mut out = Vec::new();
+
+        printer.write_patch_results_to(&results, &mut out).unwrap();
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-foo
++bar
+"
         );
     }
 
