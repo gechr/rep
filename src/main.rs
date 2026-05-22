@@ -1379,6 +1379,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     let force_color = ui::color_choice() == ui::ColorChoice::Always;
     let will_render_color = stdout_terminal || force_color;
     let skip_apply = should_skip_apply_for_quiet_dry_run(write, cli.quiet, will_render_color);
+    let skip_result = should_skip_result_for_quiet_write(write, cli.quiet);
     let hyperlink_format = cli.hyperlink_format.as_deref().and_then(hyperlink_format);
     // Span tracking pays for itself when (a) hyperlinks need a per-line
     // first-column for `{column}` substitution, or (b) we'll render an inline
@@ -1477,20 +1478,27 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 } else {
                     None
                 };
-                let payload = if write && let Err(e) = std::fs::write(path, &*updated) {
-                    Err(anyhow::Error::new(e).context(format!("Unable to write to {path:?}")))
-                } else {
-                    Ok(ReplacementResult {
-                        path: display_path(path),
-                        link_path: hyperlink_path(path),
-                        count,
-                        diff,
-                        columns,
-                        spans: if render_inline_diff { spans } else { Vec::new() },
-                        linewise_diff,
-                        multiline_span_diff,
-                    })
-                };
+                if write && let Err(e) = std::fs::write(path, &*updated) {
+                    let payload =
+                        Err(anyhow::Error::new(e).context(format!("Unable to write to {path:?}")));
+                    if tx.send(payload).is_err() {
+                        return WalkState::Quit;
+                    }
+                    return WalkState::Continue;
+                }
+                if skip_result {
+                    return WalkState::Continue;
+                }
+                let payload = Ok(ReplacementResult {
+                    path: display_path(path),
+                    link_path: hyperlink_path(path),
+                    count,
+                    diff,
+                    columns,
+                    spans: if render_inline_diff { spans } else { Vec::new() },
+                    linewise_diff,
+                    multiline_span_diff,
+                });
                 if tx.send(payload).is_err() {
                     return WalkState::Quit;
                 }
@@ -1524,6 +1532,10 @@ const fn should_skip_apply_for_quiet_dry_run(
     will_render_color: bool,
 ) -> bool {
     !write && quiet && !will_render_color
+}
+
+const fn should_skip_result_for_quiet_write(write: bool, quiet: bool) -> bool {
+    write && quiet
 }
 
 fn run_preview(cli: &Cli) -> Result<()> {
@@ -1971,6 +1983,13 @@ mod tests {
         assert!(!should_skip_apply_for_quiet_dry_run(true, true, false));
         assert!(!should_skip_apply_for_quiet_dry_run(false, false, false));
         assert!(!should_skip_apply_for_quiet_dry_run(false, true, true));
+    }
+
+    #[test]
+    fn test_quiet_write_skips_unused_results_only_after_writes() {
+        assert!(should_skip_result_for_quiet_write(true, true));
+        assert!(!should_skip_result_for_quiet_write(false, true));
+        assert!(!should_skip_result_for_quiet_write(true, false));
     }
 
     /// Resolver helper for env-aware tests. The caller must hold an
