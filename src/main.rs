@@ -1755,7 +1755,8 @@ impl ResultPrinter<'_> {
     }
 
     fn print_patch_results(&self, results: &[ReplacementResult]) {
-        let mut stdout = std::io::stdout().lock();
+        let stdout = std::io::stdout().lock();
+        let mut stdout = std::io::BufWriter::new(stdout);
         drop(self.write_patch_results_to(results, &mut stdout));
     }
 
@@ -2563,6 +2564,39 @@ mod tests {
 +bar
 "
         );
+    }
+
+    #[test]
+    fn test_patch_results_write_through_buffered_writer() {
+        let printer = ResultPrinter {
+            quiet: false,
+            delete: false,
+            dry: true,
+            no_hints: false,
+            hyperlink_format: None,
+            hyperlink_limit: 0,
+            context_lines: 3,
+        };
+        let results = [ReplacementResult {
+            path: "a.txt".to_string(),
+            link_path: "a.txt".to_string(),
+            count: 1,
+            diff: Some(("foo\n".to_string(), "bar\n".to_string())),
+            columns: std::collections::HashMap::new(),
+            spans: Vec::new(),
+            linewise_diff: false,
+            multiline_span_diff: false,
+        }];
+        let mut out = Vec::new();
+        {
+            let mut buffered = std::io::BufWriter::new(&mut out);
+            printer
+                .write_patch_results_to(&results, &mut buffered)
+                .unwrap();
+            std::io::Write::flush(&mut buffered).unwrap();
+        }
+
+        assert!(String::from_utf8(out).unwrap().contains("-foo\n+bar\n"));
     }
 
     #[test]
