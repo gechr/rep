@@ -1378,6 +1378,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     let stdout_terminal = std::io::stdout().is_terminal();
     let force_color = ui::color_choice() == ui::ColorChoice::Always;
     let will_render_color = stdout_terminal || force_color;
+    let skip_apply = should_skip_apply_for_quiet_dry_run(write, cli.quiet, will_render_color);
     let hyperlink_format = cli.hyperlink_format.as_deref().and_then(hyperlink_format);
     // Span tracking pays for itself when (a) hyperlinks need a per-line
     // first-column for `{column}` substitution, or (b) we'll render an inline
@@ -1440,6 +1441,10 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 }
                 let path = dirent.path();
                 if !scan::is_candidate_path(path) {
+                    return WalkState::Continue;
+                }
+                if skip_apply {
+                    scan::file_matches(&mut searcher, &pre_filter, path);
                     return WalkState::Continue;
                 }
                 let Some(contents) =
@@ -1511,6 +1516,14 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     }
     .print(&ok_results);
     Ok(())
+}
+
+const fn should_skip_apply_for_quiet_dry_run(
+    write: bool,
+    quiet: bool,
+    will_render_color: bool,
+) -> bool {
+    !write && quiet && !will_render_color
 }
 
 fn run_preview(cli: &Cli) -> Result<()> {
@@ -1950,6 +1963,14 @@ mod tests {
     #[test]
     fn test_hints_and_no_hints_are_mutex_on_cli() {
         assert!(parse_and_resolve(&["rep", "--hints", "--no-hints", "a", "b"]).is_err());
+    }
+
+    #[test]
+    fn test_quiet_dry_run_apply_skip_only_when_output_is_suppressed() {
+        assert!(should_skip_apply_for_quiet_dry_run(false, true, false));
+        assert!(!should_skip_apply_for_quiet_dry_run(true, true, false));
+        assert!(!should_skip_apply_for_quiet_dry_run(false, false, false));
+        assert!(!should_skip_apply_for_quiet_dry_run(false, true, true));
     }
 
     /// Resolver helper for env-aware tests. The caller must hold an
