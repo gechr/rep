@@ -678,19 +678,44 @@ fn numbered_lines(text: &str, start_line_no: usize) -> Vec<(usize, &str)> {
         .collect()
 }
 
+/// Advance through `text` line by line via `memchr`, materializing a slice
+/// only for the line numbers `line_numbers` actually asks for. Mirrors
+/// `str::lines()` semantics: `\n` and `\r\n` are both terminators (and the
+/// `\r` is stripped from the line text), a final terminator does not produce
+/// an extra empty line. `line_numbers` is expected sorted and deduplicated.
 fn lines_for_numbers<'a>(text: &'a str, line_numbers: &[usize]) -> Option<Vec<(usize, &'a str)>> {
     let mut out = Vec::with_capacity(line_numbers.len());
     let mut wanted = line_numbers.iter().copied().peekable();
-    for (idx, line) in text.lines().enumerate() {
-        let line_no = idx + 1;
-        while wanted.next_if_eq(&line_no).is_some() {
-            out.push((line_no, line));
-        }
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return wanted.peek().is_none().then(Vec::new);
+    }
+    let mut start = 0usize;
+    let mut line_no = 1usize;
+    loop {
         if wanted.peek().is_none() {
             return Some(out);
         }
+        let nl = memchr::memchr(b'\n', &bytes[start..]).map(|off| start + off);
+        let line_end = nl.unwrap_or(bytes.len());
+        let trim_to = if nl.is_some() && line_end > start && bytes[line_end - 1] == b'\r' {
+            line_end - 1
+        } else {
+            line_end
+        };
+        let line = &text[start..trim_to];
+        while wanted.next_if_eq(&line_no).is_some() {
+            out.push((line_no, line));
+        }
+        let Some(nl_pos) = nl else {
+            return wanted.peek().is_none().then_some(out);
+        };
+        start = nl_pos + 1;
+        line_no += 1;
+        if start == bytes.len() {
+            return wanted.peek().is_none().then_some(out);
+        }
     }
-    None
 }
 
 pub(crate) fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) {
@@ -1649,6 +1674,61 @@ mod tests {
         let l2 = &map[&2];
         assert_eq!(l2.len(), 1);
         assert_eq!((l2[0].start, l2[0].end), (0, 2));
+    }
+
+    #[test]
+    fn lines_for_numbers_returns_requested_lines_in_order() {
+        let text = "alpha\nbeta\ngamma\ndelta\n";
+        let got = lines_for_numbers(text, &[1, 3]);
+        assert_eq!(got, Some(vec![(1, "alpha"), (3, "gamma")]));
+    }
+
+    #[test]
+    fn lines_for_numbers_handles_missing_trailing_newline() {
+        let text = "alpha\nbeta\ngamma";
+        let got = lines_for_numbers(text, &[1, 2, 3]);
+        assert_eq!(got, Some(vec![(1, "alpha"), (2, "beta"), (3, "gamma")]));
+    }
+
+    #[test]
+    fn lines_for_numbers_strips_crlf_like_str_lines() {
+        let text = "alpha\r\nbeta\r\ngamma";
+        let got = lines_for_numbers(text, &[1, 2, 3]);
+        assert_eq!(got, Some(vec![(1, "alpha"), (2, "beta"), (3, "gamma")]));
+    }
+
+    #[test]
+    fn lines_for_numbers_returns_none_when_line_is_past_end() {
+        let text = "alpha\nbeta";
+        let got = lines_for_numbers(text, &[3]);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn lines_for_numbers_treats_empty_text_with_no_requests_as_success() {
+        let got = lines_for_numbers("", &[]);
+        assert_eq!(got, Some(Vec::new()));
+    }
+
+    #[test]
+    fn lines_for_numbers_returns_none_for_empty_text_with_any_request() {
+        let got = lines_for_numbers("", &[1]);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn lines_for_numbers_does_not_invent_trailing_empty_line() {
+        // Mirrors `str::lines()`: "a\n" yields one line, not two. Asking for
+        // line 2 must fail even though the buffer ends with a newline.
+        let got = lines_for_numbers("alpha\n", &[2]);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn lines_for_numbers_preserves_inner_blank_lines() {
+        let text = "alpha\n\ngamma\n";
+        let got = lines_for_numbers(text, &[1, 2, 3]);
+        assert_eq!(got, Some(vec![(1, "alpha"), (2, ""), (3, "gamma")]));
     }
 
     #[test]
