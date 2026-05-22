@@ -1395,10 +1395,14 @@ fn group_spans_by_line(
     }
 
     let bytes = text.as_bytes();
-    // Compute the start byte of each line lazily as we iterate spans in
-    // order. `apply_compiled_expressions` pushes spans left-to-right, so
+    // Walk the buffer's newlines once via a stateful `memchr_iter` cursor.
+    // `apply_compiled_expressions` pushes spans left-to-right, so
     // `input_start` and `output_start` are both monotonically ascending;
-    // we walk the buffer once without sorting or collecting.
+    // `next_nl` always holds the next `\n` at or after `line_start`, advanced
+    // only when we actually step past one. This avoids re-running a fresh
+    // `memchr(b'\n', &bytes[line_start..])` on every span iteration.
+    let mut newlines = memchr::memchr_iter(b'\n', bytes);
+    let mut next_nl: Option<usize> = newlines.next();
     let mut line_no: usize = 1;
     let mut line_start: usize = 0;
 
@@ -1411,21 +1415,18 @@ fn group_spans_by_line(
             continue;
         }
         // Advance past lines that end before the span starts.
-        while line_start < bytes.len() {
-            let nl = memchr::memchr(b'\n', &bytes[line_start..]).map(|i| line_start + i);
-            match nl {
-                Some(nl_pos) if nl_pos < start => {
-                    line_no += 1;
-                    line_start = nl_pos + 1;
-                }
-                _ => break,
+        while let Some(nl) = next_nl {
+            if nl >= start {
+                break;
             }
+            line_no += 1;
+            line_start = nl + 1;
+            next_nl = newlines.next();
         }
         // Now `line_start <= start` and either there is no further newline
         // before `start` or it sits past it. Slice the span line by line.
         while start < end {
-            let nl = memchr::memchr(b'\n', &bytes[line_start..]).map(|i| line_start + i);
-            let line_end_byte = nl.unwrap_or(bytes.len());
+            let line_end_byte = next_nl.unwrap_or(bytes.len());
             let chunk_end = end.min(line_end_byte);
             if chunk_end > start {
                 let local_start = start - line_start;
@@ -1438,11 +1439,13 @@ fn group_spans_by_line(
             if chunk_end == end {
                 break;
             }
-            // Crossed a newline: advance to the next line and continue with
-            // whatever's left of the span.
-            debug_assert!(nl.is_some(), "chunk_end < end requires a newline ahead");
+            debug_assert!(
+                next_nl.is_some(),
+                "chunk_end < end requires a newline ahead"
+            );
             line_no += 1;
             line_start = line_end_byte + 1;
+            next_nl = newlines.next();
             start = line_start;
         }
     }
@@ -1729,6 +1732,42 @@ mod tests {
         let text = "alpha\n\ngamma\n";
         let got = lines_for_numbers(text, &[1, 2, 3]);
         assert_eq!(got, Some(vec![(1, "alpha"), (2, ""), (3, "gamma")]));
+    }
+
+    #[test]
+    fn group_spans_by_line_locates_span_on_last_line_without_trailing_newline() {
+        // The cursor must surface `next_nl = None` and still slot the span on
+        // the final line. Regression for the EOF branch of the body loop.
+        let text = "foo\nbar\nbaz";
+        let spans = vec![rep(8, 3, 8, 3)];
+        let map = group_spans_by_line(text, &spans, SpanSide::Input);
+        assert_eq!(map.len(), 1);
+        let l3 = &map[&3];
+        assert_eq!(l3.len(), 1);
+        assert_eq!((l3[0].start, l3[0].end), (0, 3));
+    }
+
+    #[test]
+    fn group_spans_by_line_handles_many_sequential_spans_across_many_lines() {
+        // Many spans spread over many newlines: exercises the shared
+        // memchr_iter cursor across the for-loop iterations.
+        let text = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n";
+        let spans = vec![
+            rep(0, 1, 0, 1),
+            rep(4, 1, 4, 1),
+            rep(8, 1, 8, 1),
+            rep(12, 1, 12, 1),
+            rep(16, 1, 16, 1),
+        ];
+        let map = group_spans_by_line(text, &spans, SpanSide::Input);
+        for (line_no, local_start) in [(1, 0), (3, 0), (5, 0), (7, 0), (9, 0)] {
+            let bucket = &map[&line_no];
+            assert_eq!(bucket.len(), 1);
+            assert_eq!(
+                (bucket[0].start, bucket[0].end),
+                (local_start, local_start + 1)
+            );
+        }
     }
 
     #[test]
