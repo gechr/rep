@@ -678,6 +678,27 @@ fn quiet_suppresses_dry_run_diff() {
 }
 
 #[test]
+fn quiet_dry_run_skips_diff_payload_for_non_utf8_matches() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.bin");
+    fs::write(&file, b"foo\xff\n").unwrap();
+
+    let output = rep_command()
+        .args(["-n", "-q", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(&file).unwrap(), b"foo\xff\n");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+}
+
+#[test]
 fn list_files_prints_sorted_matching_paths() {
     let dir = tempdir().unwrap();
     // Write out of order to make sure the sort actually fires.

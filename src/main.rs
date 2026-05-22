@@ -1390,6 +1390,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
         .is_some_and(hyperlink_format_uses_column);
     let render_inline_diff = will_render_color && !cli.quiet && expressions.len() == 1;
     let track_spans = (stdout_terminal && !cli.quiet && needs_first_column) || render_inline_diff;
+    let build_diff = !cli.quiet;
     let linewise_diff = will_render_color
         && !cli.quiet
         && expressions
@@ -1452,20 +1453,24 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                     return WalkState::Continue;
                 }
                 let columns = first_column_map_if_needed(needs_first_column, &contents, &spans);
-                let diff = match (
-                    String::from_utf8(contents.clone()),
-                    String::from_utf8(updated.as_ref().to_vec()),
-                ) {
-                    (Ok(old), Ok(new)) => Some((old, new)),
-                    _ => {
-                        if !write {
-                            eprintln!(
-                                "Warning: {}: skipping diff (not valid UTF-8; use non-dry-run mode)",
-                                path.display()
-                            );
+                let diff = if build_diff {
+                    match (
+                        String::from_utf8(contents.clone()),
+                        String::from_utf8(updated.as_ref().to_vec()),
+                    ) {
+                        (Ok(old), Ok(new)) => Some((old, new)),
+                        _ => {
+                            if !write {
+                                eprintln!(
+                                    "Warning: {}: skipping diff (not valid UTF-8; use non-dry-run mode)",
+                                    path.display()
+                                );
+                            }
+                            None
                         }
-                        None
                     }
+                } else {
+                    None
                 };
                 let payload = if write && let Err(e) = std::fs::write(path, &*updated) {
                     Err(anyhow::Error::new(e).context(format!("Unable to write to {path:?}")))
