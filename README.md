@@ -2,9 +2,9 @@
 
 `rep` is a fast find-and-replace tool, based on [fastmod](https://github.com/facebookincubator/fastmod).
 
-Features plain and regex replacement, case-aware rewrites (`--smart` for identifiers, `--preserve` for mirroring source case), interactive preview, line deletion, file listing, stdin mode, and multiple `-e/--expression` replacements in one pass.
+Features plain and regex replacement, case-aware rewrites, interactive preview, line deletion, file listing, stdin mode, and multiple replacements in one pass.
 
-By default `rep` prints a diff without touching the filesystem; pass `-W` to apply changes or `-p` to step through them interactively.
+By default `rep` prints a diff without touching the filesystem; pass `--write` to apply changes or `--preview` to step through them interactively.
 
 ## Install
 
