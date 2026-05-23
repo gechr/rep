@@ -57,9 +57,9 @@ struct ReplacementResult {
     count: usize,
     diff: Option<(String, String)>,
     /// 1-indexed `(line -> first-match column)` for the original file, used to
-    /// fill `{column}` in per-line hyperlinks. Empty when position tracking
-    /// was disabled (non-interactive output).
-    columns: std::collections::HashMap<usize, usize>,
+    /// fill `{column}` in per-line hyperlinks. `None` when position tracking
+    /// was disabled (no `{column}` placeholder in the hyperlink format).
+    columns: Option<std::collections::HashMap<usize, usize>>,
     /// Per-replacement input/output spans, populated when span tracking is
     /// enabled and the run uses a single expression. Drives inline highlight.
     spans: Vec<Replacement>,
@@ -1728,7 +1728,7 @@ impl ResultPrinter<'_> {
                     styles,
                     template.as_ref(),
                     &encoded_path,
-                    &result.columns,
+                    result.columns.as_ref(),
                     out,
                 );
             }
@@ -2559,7 +2559,7 @@ mod tests {
             link_path: "a.txt".to_string(),
             count: 1,
             diff: Some(("foo\n".to_string(), "bar\n".to_string())),
-            columns: std::collections::HashMap::new(),
+            columns: None,
             spans: Vec::new(),
             linewise_diff: false,
             multiline_span_diff: false,
@@ -2596,7 +2596,7 @@ mod tests {
             link_path: "a.txt".to_string(),
             count: 1,
             diff: Some(("foo\n".to_string(), "bar\n".to_string())),
-            columns: std::collections::HashMap::new(),
+            columns: None,
             spans: Vec::new(),
             linewise_diff: false,
             multiline_span_diff: false,
@@ -2629,7 +2629,7 @@ mod tests {
             link_path: "a.txt".to_string(),
             count: 1,
             diff: Some(("foo\n".to_string(), "bar\n".to_string())),
-            columns: std::collections::HashMap::new(),
+            columns: None,
             spans: Vec::new(),
             linewise_diff: false,
             multiline_span_diff: false,

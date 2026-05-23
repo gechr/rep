@@ -111,10 +111,9 @@ pub(crate) fn print_file_line_diff<W: std::io::Write>(
     styles: Styles,
     hyperlink_template: Option<&crate::HyperlinkTemplate<'_>>,
     encoded_path: &str,
-    columns: &std::collections::HashMap<usize, usize>,
+    columns: Option<&std::collections::HashMap<usize, usize>>,
     out: &mut W,
 ) {
-    let columns = (!columns.is_empty()).then_some(columns);
     let hyperlinks = Hyperlinks::new(hyperlink_template, encoded_path, columns, styles.is_plain());
     let mut trimmed: Vec<Replacement> = Vec::with_capacity(hints.spans.len());
     for &span in hints.spans {
