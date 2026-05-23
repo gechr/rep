@@ -1669,6 +1669,16 @@ impl ResultPrinter<'_> {
             return;
         }
 
+        let stdout = std::io::stdout().lock();
+        let mut stdout = std::io::BufWriter::new(stdout);
+        drop(self.write_colored_results_to(results, &mut stdout));
+    }
+
+    fn write_colored_results_to<W: std::io::Write>(
+        &self,
+        results: &[ReplacementResult],
+        out: &mut W,
+    ) -> std::io::Result<()> {
         let total_files = results.len();
         let total_matches: usize = results.iter().map(|result| result.count).sum();
         let styles = Styles::when(true);
@@ -1691,7 +1701,8 @@ impl ResultPrinter<'_> {
                 .filter(|t| t.uses_path())
                 .map_or(String::new(), |_| percent_encode_path(&result.link_path));
             let path = hyperlink_with_template(template.as_ref(), &encoded_path, 0, &result.path);
-            println!(
+            writeln!(
+                out,
                 "{}{} {}({count}){}",
                 if self.quiet {
                     ""
@@ -1701,7 +1712,7 @@ impl ResultPrinter<'_> {
                 path,
                 styles.fg(Color::Grey),
                 styles.reset()
-            );
+            )?;
 
             if !self.quiet
                 && let Some((old, new)) = &result.diff
@@ -1718,11 +1729,12 @@ impl ResultPrinter<'_> {
                     template.as_ref(),
                     &encoded_path,
                     &result.columns,
+                    out,
                 );
             }
 
             if !self.quiet && idx + 1 < results.len() {
-                println!();
+                writeln!(out)?;
             }
         }
 
@@ -1744,14 +1756,16 @@ impl ResultPrinter<'_> {
             } else {
                 String::new()
             };
-            println!(
+            writeln!(
+                out,
                 "\n{}{}{}{}{hint}",
                 styles.bold(),
                 styles.fg(color),
                 msg,
                 styles.reset()
-            );
+            )?;
         }
+        Ok(())
     }
 
     fn print_patch_results(&self, results: &[ReplacementResult]) {
@@ -2597,6 +2611,41 @@ mod tests {
         }
 
         assert!(String::from_utf8(out).unwrap().contains("-foo\n+bar\n"));
+    }
+
+    #[test]
+    fn test_colored_results_write_through_buffered_writer() {
+        let printer = ResultPrinter {
+            quiet: false,
+            delete: false,
+            dry: true,
+            no_hints: false,
+            hyperlink_format: None,
+            hyperlink_limit: 0,
+            context_lines: 3,
+        };
+        let results = [ReplacementResult {
+            path: "a.txt".to_string(),
+            link_path: "a.txt".to_string(),
+            count: 1,
+            diff: Some(("foo\n".to_string(), "bar\n".to_string())),
+            columns: std::collections::HashMap::new(),
+            spans: Vec::new(),
+            linewise_diff: false,
+            multiline_span_diff: false,
+        }];
+        let mut out = Vec::new();
+        {
+            let mut buffered = std::io::BufWriter::new(&mut out);
+            printer
+                .write_colored_results_to(&results, &mut buffered)
+                .unwrap();
+            std::io::Write::flush(&mut buffered).unwrap();
+        }
+
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("a.txt"), "expected path in output: {s:?}");
+        assert!(s.contains("(1)"), "expected match count in output: {s:?}");
     }
 
     #[test]

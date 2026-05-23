@@ -103,7 +103,8 @@ impl<'a> Hyperlinks<'a> {
     }
 }
 
-pub(crate) fn print_file_line_diff(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn print_file_line_diff<W: std::io::Write>(
     old: &str,
     new: &str,
     hints: DiffHints<'_>,
@@ -111,6 +112,7 @@ pub(crate) fn print_file_line_diff(
     hyperlink_template: Option<&crate::HyperlinkTemplate<'_>>,
     encoded_path: &str,
     columns: &std::collections::HashMap<usize, usize>,
+    out: &mut W,
 ) {
     let columns = (!columns.is_empty()).then_some(columns);
     let hyperlinks = Hyperlinks::new(hyperlink_template, encoded_path, columns, styles.is_plain());
@@ -138,6 +140,7 @@ pub(crate) fn print_file_line_diff(
             hyperlinks,
             &old_line_spans,
             &new_line_spans,
+            out,
         )
     {
         return;
@@ -151,6 +154,7 @@ pub(crate) fn print_file_line_diff(
             span_highlighting,
             &old_line_spans,
             &new_line_spans,
+            out,
         )
     {
         return;
@@ -164,6 +168,7 @@ pub(crate) fn print_file_line_diff(
             hyperlinks,
             &old_line_spans,
             &new_line_spans,
+            out,
         )
     {
         return;
@@ -215,13 +220,13 @@ pub(crate) fn print_file_line_diff(
     // Output is roughly the diff text plus per-line ANSI/OSC-8 overhead. The
     // up-front capacity keeps the per-line `push_str` calls off the realloc
     // path, capped to avoid pathologically large reservations on huge diffs.
-    let mut out = String::with_capacity(
+    let mut buf = String::with_capacity(
         (old.len() + new.len())
             .saturating_mul(2)
             .min(8 * 1024 * 1024),
     );
     let mut writer = NumberedDiffWriter {
-        out: &mut out,
+        out: &mut buf,
         width,
         styles,
         hyperlinks,
@@ -233,7 +238,7 @@ pub(crate) fn print_file_line_diff(
     for (old_lines, new_lines) in blocks {
         writer.write_block(&old_lines, &new_lines);
     }
-    write_stdout(&out);
+    drop(out.write_all(buf.as_bytes()));
 }
 
 /// Shrink a span by stripping the longest common prefix and suffix shared by
@@ -380,13 +385,14 @@ fn replacements_preserve_line_boundaries(old: &str, new: &str, spans: &[Replacem
         })
 }
 
-fn print_same_line_span_diff(
+fn print_same_line_span_diff<W: std::io::Write>(
     old: &str,
     new: &str,
     styles: Styles,
     hyperlinks: Hyperlinks<'_>,
     old_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
     new_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+    out: &mut W,
 ) -> bool {
     let mut changed_lines: Vec<usize> = old_line_spans
         .keys()
@@ -411,9 +417,9 @@ fn print_same_line_span_diff(
         .map(|line_no| line_no.to_string().len())
         .max()
         .unwrap_or(1);
-    let mut out = String::new();
+    let mut buf = String::new();
     let mut writer = NumberedDiffWriter {
-        out: &mut out,
+        out: &mut buf,
         width,
         styles,
         hyperlinks,
@@ -430,11 +436,12 @@ fn print_same_line_span_diff(
             block_start = idx;
         }
     }
-    write_stdout(&out);
+    drop(out.write_all(buf.as_bytes()));
     true
 }
 
-fn print_linewise_diff(
+#[allow(clippy::too_many_arguments)]
+fn print_linewise_diff<W: std::io::Write>(
     old: &str,
     new: &str,
     styles: Styles,
@@ -442,6 +449,7 @@ fn print_linewise_diff(
     span_highlighting: bool,
     old_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
     new_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+    out: &mut W,
 ) -> bool {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
@@ -464,9 +472,9 @@ fn print_linewise_diff(
         .map(|line_no| line_no.to_string().len())
         .max()
         .unwrap_or(1);
-    let mut out = String::new();
+    let mut buf = String::new();
     let mut writer = NumberedDiffWriter {
-        out: &mut out,
+        out: &mut buf,
         width,
         styles,
         hyperlinks,
@@ -491,11 +499,12 @@ fn print_linewise_diff(
             block_start = idx;
         }
     }
-    write_stdout(&out);
+    drop(out.write_all(buf.as_bytes()));
     true
 }
 
-fn print_multiline_span_diff(
+#[allow(clippy::too_many_arguments)]
+fn print_multiline_span_diff<W: std::io::Write>(
     old: &str,
     new: &str,
     spans: &[Replacement],
@@ -503,6 +512,7 @@ fn print_multiline_span_diff(
     hyperlinks: Hyperlinks<'_>,
     old_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
     new_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+    out: &mut W,
 ) -> bool {
     let Some(mut hunks) = multiline_span_hunks(old, new, spans) else {
         return false;
@@ -521,9 +531,9 @@ fn print_multiline_span_diff(
         })
         .max()
         .unwrap_or(1);
-    let mut out = String::new();
+    let mut buf = String::new();
     let mut writer = NumberedDiffWriter {
-        out: &mut out,
+        out: &mut buf,
         width,
         styles,
         hyperlinks,
@@ -535,7 +545,7 @@ fn print_multiline_span_diff(
     for hunk in &mut hunks {
         writer.write_block(&hunk.old_lines, &hunk.new_lines);
     }
-    write_stdout(&out);
+    drop(out.write_all(buf.as_bytes()));
     true
 }
 
