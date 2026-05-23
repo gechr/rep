@@ -678,11 +678,12 @@ fn numbered_lines(text: &str, start_line_no: usize) -> Vec<(usize, &str)> {
         .collect()
 }
 
-/// Advance through `text` line by line via `memchr`, materializing a slice
-/// only for the line numbers `line_numbers` actually asks for. Mirrors
-/// `str::lines()` semantics: `\n` and `\r\n` are both terminators (and the
-/// `\r` is stripped from the line text), a final terminator does not produce
-/// an extra empty line. `line_numbers` is expected sorted and deduplicated.
+/// Advance through `text` line by line via a stateful `memchr_iter` cursor,
+/// materializing a slice only for the line numbers `line_numbers` actually
+/// asks for. Mirrors `str::lines()` semantics: `\n` and `\r\n` are both
+/// terminators (and the `\r` is stripped from the line text), a final
+/// terminator does not produce an extra empty line. `line_numbers` is
+/// expected sorted and deduplicated.
 fn lines_for_numbers<'a>(text: &'a str, line_numbers: &[usize]) -> Option<Vec<(usize, &'a str)>> {
     let mut out = Vec::with_capacity(line_numbers.len());
     let mut wanted = line_numbers.iter().copied().peekable();
@@ -690,15 +691,16 @@ fn lines_for_numbers<'a>(text: &'a str, line_numbers: &[usize]) -> Option<Vec<(u
     if bytes.is_empty() {
         return wanted.peek().is_none().then(Vec::new);
     }
+    let mut newlines = memchr::memchr_iter(b'\n', bytes);
+    let mut next_nl: Option<usize> = newlines.next();
     let mut start = 0usize;
     let mut line_no = 1usize;
     loop {
         if wanted.peek().is_none() {
             return Some(out);
         }
-        let nl = memchr::memchr(b'\n', &bytes[start..]).map(|off| start + off);
-        let line_end = nl.unwrap_or(bytes.len());
-        let trim_to = if nl.is_some() && line_end > start && bytes[line_end - 1] == b'\r' {
+        let line_end = next_nl.unwrap_or(bytes.len());
+        let trim_to = if next_nl.is_some() && line_end > start && bytes[line_end - 1] == b'\r' {
             line_end - 1
         } else {
             line_end
@@ -707,7 +709,7 @@ fn lines_for_numbers<'a>(text: &'a str, line_numbers: &[usize]) -> Option<Vec<(u
         while wanted.next_if_eq(&line_no).is_some() {
             out.push((line_no, line));
         }
-        let Some(nl_pos) = nl else {
+        let Some(nl_pos) = next_nl else {
             return wanted.peek().is_none().then_some(out);
         };
         start = nl_pos + 1;
@@ -715,6 +717,7 @@ fn lines_for_numbers<'a>(text: &'a str, line_numbers: &[usize]) -> Option<Vec<(u
         if start == bytes.len() {
             return wanted.peek().is_none().then_some(out);
         }
+        next_nl = newlines.next();
     }
 }
 
@@ -1725,6 +1728,16 @@ mod tests {
         // line 2 must fail even though the buffer ends with a newline.
         let got = lines_for_numbers("alpha\n", &[2]);
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn lines_for_numbers_crosses_many_newlines_via_cursor() {
+        let text: String = (1..=200).map(|n| format!("L{n}\n")).collect();
+        let got = lines_for_numbers(&text, &[1, 50, 100, 200]);
+        assert_eq!(
+            got,
+            Some(vec![(1, "L1"), (50, "L50"), (100, "L100"), (200, "L200")])
+        );
     }
 
     #[test]
