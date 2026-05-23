@@ -913,7 +913,7 @@ Miscellaneous
       --color <when>            When to use color
       --hyperlink-format <fmt>  Terminal hyperlink format
 
-  -q, --quiet                   Suppress summary output
+  -q, --quiet                   Suppress diff output
   -V, --version                 Print version
 
   -h                            Print short help
@@ -983,7 +983,7 @@ Miscellaneous
       --color <when>            When to use color
       --hyperlink-format <fmt>  Terminal hyperlink format
 
-  -q, --quiet                   Suppress summary output
+  -q, --quiet                   Suppress diff output
   -V, --version                 Print version
 
   -h                            Print short help

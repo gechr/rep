@@ -322,7 +322,7 @@ struct Cli {
         long = "quiet",
         env = "REP_QUIET",
         value_parser = BoolishValueParser::new(),
-        help = "Suppress summary output",
+        help = "Suppress diff output",
         help_heading = "Miscellaneous",
         display_order = 110
     )]
