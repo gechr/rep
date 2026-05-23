@@ -475,7 +475,12 @@ fn render_arg_body(arg: &clap::Arg, styles: Styles) -> String {
         (None, None) => String::new(),
     };
     if let Some(v) = arg_value_name(arg) {
-        let _ = write!(body, " {red}{dim_attr}<{v}>{reset}");
+        if v == "f> <r" {
+            let blue = styles.fg(Color::Blue);
+            let _ = write!(body, " {blue}{dim_attr}<{v}>{reset}");
+        } else {
+            let _ = write!(body, " {red}{dim_attr}<{v}>{reset}");
+        }
     }
     body
 }
