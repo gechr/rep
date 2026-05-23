@@ -705,7 +705,9 @@ pub(crate) fn first_column_map_if_needed(
 
 /// Walks `input` once, mapping a sorted slice of byte offsets to the
 /// 1-indexed `(line, column)` of the first match on each line. Single linear
-/// pass, `O(input.len() + offsets.len())`.
+/// pass, `O(input.len() + offsets.len())`, using a stateful `memchr_iter`
+/// cursor so each newline crossing pulls one position from the iterator
+/// rather than re-running `memchr` on a fresh sub-slice.
 pub(crate) fn byte_offsets_to_line_first_column(
     input: &[u8],
     offsets: &[usize],
@@ -718,26 +720,23 @@ pub(crate) fn byte_offsets_to_line_first_column(
 
     let mut sorted = offsets.to_vec();
     sorted.sort_unstable();
-    let mut idx = 0;
+    let mut newlines = memchr::memchr_iter(b'\n', input);
+    let mut next_nl: Option<usize> = newlines.next();
     let mut line: usize = 1;
     let mut line_start: usize = 0;
 
-    while idx < sorted.len() {
-        let off = sorted[idx];
-        // Advance line counter until this offset's line.
-        while line_start <= off && line_start < input.len() {
-            if let Some(nl) = memchr::memchr(b'\n', &input[line_start..])
-                && line_start + nl < off
-            {
-                line += 1;
-                line_start += nl + 1;
-            } else {
+    for &off in &sorted {
+        // Advance past newlines that end before this offset.
+        while let Some(nl) = next_nl {
+            if nl >= off {
                 break;
             }
+            line += 1;
+            line_start = nl + 1;
+            next_nl = newlines.next();
         }
         let col = off.saturating_sub(line_start) + 1;
         map.entry(line).or_insert(col);
-        idx += 1;
     }
     map
 }
@@ -790,6 +789,19 @@ mod tests {
     fn test_byte_offsets_to_line_first_column_empty_offsets() {
         let map = byte_offsets_to_line_first_column(b"abc\ndef\n", &[]);
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_byte_offsets_to_line_first_column_crosses_many_newlines() {
+        // Exercises the shared memchr_iter cursor across many advances:
+        // 10 single-char lines, one offset per line at column 1.
+        let input = b"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+        let offsets = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18];
+        let map = byte_offsets_to_line_first_column(input, &offsets);
+        let mut got: Vec<(usize, usize)> = map.into_iter().collect();
+        got.sort_unstable();
+        let want: Vec<(usize, usize)> = (1..=10).map(|n| (n, 1)).collect();
+        assert_eq!(got, want);
     }
 
     #[test]
