@@ -21,7 +21,7 @@ natord = "1"
 num-format = { version = "0", features = ["with-system-locale"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
-shlex = "1"
+shlex = "2"
 tempfile = "3"
 toml = "1"
 
