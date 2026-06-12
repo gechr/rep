@@ -1465,11 +1465,23 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                     return WalkState::Continue;
                 }
                 let columns = first_column_map_if_needed(needs_first_column, &contents, &spans);
+                // `count > 0` guarantees the replacement produced an owned
+                // buffer, so `into_owned` never copies; it just releases the
+                // borrow of `contents` so both buffers can move into the diff.
+                let updated = updated.into_owned();
+                if write && let Err(e) = std::fs::write(path, &updated) {
+                    let payload =
+                        Err(anyhow::Error::new(e).context(format!("Unable to write to {path:?}")));
+                    if tx.send(payload).is_err() {
+                        return WalkState::Quit;
+                    }
+                    return WalkState::Continue;
+                }
+                if skip_result {
+                    return WalkState::Continue;
+                }
                 let diff = if build_diff {
-                    match (
-                        String::from_utf8(contents.clone()),
-                        String::from_utf8(updated.as_ref().to_vec()),
-                    ) {
+                    match (String::from_utf8(contents), String::from_utf8(updated)) {
                         (Ok(old), Ok(new)) => Some((old, new)),
                         _ => {
                             if !write {
@@ -1484,17 +1496,6 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 } else {
                     None
                 };
-                if write && let Err(e) = std::fs::write(path, &*updated) {
-                    let payload =
-                        Err(anyhow::Error::new(e).context(format!("Unable to write to {path:?}")));
-                    if tx.send(payload).is_err() {
-                        return WalkState::Quit;
-                    }
-                    return WalkState::Continue;
-                }
-                if skip_result {
-                    return WalkState::Continue;
-                }
                 let payload = Ok(ReplacementResult {
                     path: display_path(path),
                     link_path: hyperlink_path(path),
