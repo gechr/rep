@@ -1314,46 +1314,49 @@ fn classify(c: char) -> TokenKind {
     }
 }
 
+/// Split a line into whitespace runs, single symbols, and words (further
+/// split at subword boundaries). Single pass over `char_indices` with a
+/// one-char lookahead via `peekable`, so the only allocation is the token
+/// vector itself.
 pub(crate) fn tokenize(line: &str) -> Vec<&str> {
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
-    let n = chars.len();
-    let byte_at = |k: usize| -> usize { if k < n { chars[k].0 } else { line.len() } };
     let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < n {
-        let c = chars[i].1;
+    let mut iter = line.char_indices().peekable();
+    while let Some((start, c)) = iter.next() {
         match classify(c) {
             TokenKind::Symbol => {
-                tokens.push(&line[chars[i].0..byte_at(i + 1)]);
-                i += 1;
+                let end = iter.peek().map_or(line.len(), |&(i, _)| i);
+                tokens.push(&line[start..end]);
             }
             TokenKind::Whitespace => {
-                let mut j = i + 1;
-                while j < n && classify(chars[j].1) == TokenKind::Whitespace {
-                    j += 1;
+                let mut end = line.len();
+                while let Some(&(i, next)) = iter.peek() {
+                    if classify(next) != TokenKind::Whitespace {
+                        end = i;
+                        break;
+                    }
+                    iter.next();
                 }
-                tokens.push(&line[chars[i].0..byte_at(j)]);
-                i = j;
+                tokens.push(&line[start..end]);
             }
             TokenKind::Word => {
-                let mut j = i + 1;
-                while j < n && classify(chars[j].1) == TokenKind::Word {
-                    j += 1;
-                }
-                let mut sub_start = i;
-                let mut k = i + 1;
-                while k < j {
-                    let prev = chars[k - 1].1;
-                    let cur = chars[k].1;
-                    let next = chars.get(k + 1).map(|x| x.1);
-                    if is_subword_boundary(prev, cur, next) {
-                        tokens.push(&line[chars[sub_start].0..chars[k].0]);
-                        sub_start = k;
+                let mut sub_start = start;
+                let mut prev = c;
+                while let Some(&(i, cur)) = iter.peek() {
+                    if classify(cur) != TokenKind::Word {
+                        break;
                     }
-                    k += 1;
+                    iter.next();
+                    // `next` is the raw following char (word or not): the
+                    // acronym rule looks one past `cur` regardless of class.
+                    let next = iter.peek().map(|&(_, n)| n);
+                    if is_subword_boundary(prev, cur, next) {
+                        tokens.push(&line[sub_start..i]);
+                        sub_start = i;
+                    }
+                    prev = cur;
                 }
-                tokens.push(&line[chars[sub_start].0..byte_at(j)]);
-                i = j;
+                let end = iter.peek().map_or(line.len(), |&(i, _)| i);
+                tokens.push(&line[sub_start..end]);
             }
         }
     }
@@ -1522,6 +1525,34 @@ mod tests {
             output_start,
             output_len,
         }
+    }
+
+    #[test]
+    fn tokenize_splits_words_whitespace_and_symbols() {
+        assert_eq!(
+            tokenize("let x = 1;"),
+            vec!["let", " ", "x", " ", "=", " ", "1", ";"]
+        );
+        assert_eq!(tokenize("a  b"), vec!["a", "  ", "b"]);
+        assert_eq!(tokenize("a+b"), vec!["a", "+", "b"]);
+        assert_eq!(tokenize(""), Vec::<&str>::new());
+        assert_eq!(tokenize("   "), vec!["   "]);
+    }
+
+    #[test]
+    fn tokenize_splits_subword_boundaries() {
+        assert_eq!(tokenize("fooBar"), vec!["foo", "Bar"]);
+        assert_eq!(tokenize("HTTPServer"), vec!["HTTP", "Server"]);
+        assert_eq!(tokenize("abc123def"), vec!["abc", "123", "def"]);
+        assert_eq!(tokenize("foo_bar"), vec!["foo", "_", "bar"]);
+        assert_eq!(tokenize("FOO"), vec!["FOO"]);
+    }
+
+    #[test]
+    fn tokenize_handles_multibyte_chars() {
+        assert_eq!(tokenize("café Bar"), vec!["café", " ", "Bar"]);
+        assert_eq!(tokenize("caféBar"), vec!["café", "Bar"]);
+        assert_eq!(tokenize("héllo→wörld"), vec!["héllo", "→", "wörld"]);
     }
 
     #[test]
