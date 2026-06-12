@@ -24,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 shlex = "2"
 tempfile = "3"
 toml = "1"
+similar = { version = "3.1.1", default-features = false }
 
 [profile.release]
 opt-level = 3

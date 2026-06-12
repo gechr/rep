@@ -457,7 +457,7 @@ impl InteractivePatcher {
             matches!(x, DiffResult::Both(..))
         }
 
-        let mut diffs = diff::lines(orig, edit);
+        let mut diffs = crate::diff::line_diffs(orig, edit);
         let chrome_lines = 8; // file:line header, blank lines, prompt (2 lines), padding
         let lines_to_print = match terminal::size() {
             Some((_w, h)) => h.saturating_sub(chrome_lines),

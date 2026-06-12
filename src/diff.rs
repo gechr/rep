@@ -173,7 +173,7 @@ pub(crate) fn print_file_line_diff<W: std::io::Write>(
         return;
     }
 
-    let diffs = diff::lines(old, new);
+    let diffs = line_diffs(old, new);
     let mut old_line_no = 1;
     let mut new_line_no = 1;
     let mut i = 0;
@@ -728,6 +728,64 @@ fn lines_for_numbers<'a>(text: &'a str, line_numbers: &[usize]) -> Option<Vec<(u
         }
         next_nl = newlines.next();
     }
+}
+
+/// Line-level diff producing the `DiffResult` stream the renderers consume.
+/// Lines are split on `\n` (a newline-terminated input yields a final empty
+/// line, which the renderers skip) and compared with `similar`'s Myers
+/// algorithm, which stays near-linear in file size when edits are sparse.
+pub(crate) fn line_diffs<'a>(old: &'a str, new: &'a str) -> Vec<DiffResult<&'a str>> {
+    use similar::{Algorithm, DiffOp, capture_diff_slices};
+
+    let old_lines: Vec<&str> = old.split('\n').collect();
+    let new_lines: Vec<&str> = new.split('\n').collect();
+    let mut out = Vec::with_capacity(old_lines.len().max(new_lines.len()));
+    for op in capture_diff_slices(Algorithm::Myers, &old_lines, &new_lines) {
+        match op {
+            DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => out.extend(
+                old_lines[old_index..old_index + len]
+                    .iter()
+                    .zip(&new_lines[new_index..new_index + len])
+                    .map(|(o, n)| DiffResult::Both(*o, *n)),
+            ),
+            DiffOp::Delete {
+                old_index, old_len, ..
+            } => out.extend(
+                old_lines[old_index..old_index + old_len]
+                    .iter()
+                    .map(|line| DiffResult::Left(*line)),
+            ),
+            DiffOp::Insert {
+                new_index, new_len, ..
+            } => out.extend(
+                new_lines[new_index..new_index + new_len]
+                    .iter()
+                    .map(|line| DiffResult::Right(*line)),
+            ),
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                out.extend(
+                    old_lines[old_index..old_index + old_len]
+                        .iter()
+                        .map(|line| DiffResult::Left(*line)),
+                );
+                out.extend(
+                    new_lines[new_index..new_index + new_len]
+                        .iter()
+                        .map(|line| DiffResult::Right(*line)),
+                );
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) {
