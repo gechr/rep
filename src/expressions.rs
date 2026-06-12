@@ -716,6 +716,28 @@ pub(crate) fn first_column_map_if_needed(
     Some(byte_offsets_to_line_first_column(input, &input_starts))
 }
 
+/// Builds the per-line first-column map by scanning the original `input` with
+/// every expression's matcher. Chained expressions match against each other's
+/// output, so their replacement spans share no coordinate space; the hyperlink
+/// `{column}` only needs the leftmost match column per line in the original
+/// input, which a direct scan yields correctly for every expression. Returns
+/// `None` when `{column}` isn't in the format, skipping the scan entirely.
+pub(crate) fn first_column_map_for_expressions(
+    needs_first_column: bool,
+    input: &[u8],
+    expressions: &[CompiledExpression],
+) -> Option<std::collections::HashMap<usize, usize>> {
+    if !needs_first_column {
+        return None;
+    }
+    let mut offsets: Vec<usize> = Vec::new();
+    for expr in expressions {
+        offsets.extend(expr.bytes_regex.find_iter(input).map(|m| m.start()));
+    }
+    offsets.sort_unstable();
+    Some(byte_offsets_to_line_first_column(input, &offsets))
+}
+
 /// Walks `input` once, mapping an ascending slice of byte offsets to the
 /// 1-indexed `(line, column)` of the first match on each line. Single linear
 /// pass, `O(input.len() + offsets.len())`, using a stateful `memchr_iter`
@@ -848,6 +870,25 @@ mod tests {
         // Needed but no spans -> Some(empty); the gate is still on.
         let map = first_column_map_if_needed(true, b"abc\ndef\n", &[]);
         assert!(map.expect("needed branch returns Some").is_empty());
+    }
+
+    #[test]
+    fn test_first_column_map_for_expressions_uses_later_expression() {
+        let cli = parse_cli(&["rep", "-e", "zzz", "qqq", "-e", "cat", "dog"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        // line 1 "ab" has no match; line 2 "  cat x" matches at byte column 3.
+        let map = first_column_map_for_expressions(true, b"ab\n  cat x\n", &expressions).unwrap();
+        let mut got: Vec<(usize, usize)> = map.into_iter().collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![(2, 3)]);
+    }
+
+    #[test]
+    fn test_first_column_map_for_expressions_skips_when_not_needed() {
+        let cli = parse_cli(&["rep", "cat", "dog"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let map = first_column_map_for_expressions(false, b"cat\n", &expressions);
+        assert!(map.is_none());
     }
 
     #[test]

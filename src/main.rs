@@ -56,7 +56,8 @@ use diffy::DiffOptions;
 
 use crate::expressions::{
     CompiledExpression, EXPR_SEP, Replacement, apply_compiled_expressions,
-    build_pre_filter_matcher, compile_expressions, first_column_map_if_needed,
+    build_pre_filter_matcher, compile_expressions, first_column_map_for_expressions,
+    first_column_map_if_needed,
 };
 use crate::ui::Color;
 use crate::ui::ColorChoice;
@@ -1578,8 +1579,11 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                     if count == 0 {
                         return WalkState::Continue;
                     }
-                    let columns =
-                        first_column_map_if_needed(needs_first_column, &contents, &spans);
+                    let columns = first_column_map_for_expressions(
+                        needs_first_column,
+                        &contents,
+                        &expressions,
+                    );
                     let updated = updated.into_owned();
                     (contents, updated, count, spans, columns)
                 };
