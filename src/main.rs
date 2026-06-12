@@ -1328,6 +1328,7 @@ fn run_list_files(cli: &Cli) -> Result<()> {
     thread::spawn(move || {
         walk.run(|| {
             let mut searcher = scan::make_searcher();
+            let mut scratch = Vec::new();
             let tx = tx.clone();
             let pre_filter = pre_filter.clone();
             let expressions = Arc::clone(&walk_expressions);
@@ -1349,9 +1350,12 @@ fn run_list_files(cli: &Cli) -> Result<()> {
                 let listed = match &pre_filter {
                     None => true,
                     Some(pre_filter) if filter_by_change => {
-                        let Some(contents) =
-                            scan::file_contents_if_matches(&mut searcher, pre_filter, path)
-                        else {
+                        let Some(contents) = scan::file_contents_if_matches(
+                            &mut searcher,
+                            pre_filter,
+                            path,
+                            &mut scratch,
+                        ) else {
                             return WalkState::Continue;
                         };
                         let (updated, count, _) =
@@ -1440,6 +1444,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     thread::spawn(move || {
         walk.run(|| {
             let mut searcher = scan::make_searcher();
+            let mut scratch = Vec::new();
             let tx = tx.clone();
             let expressions = Arc::clone(&walk_expressions);
             let pre_filter = pre_filter.clone();
@@ -1465,7 +1470,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                     return WalkState::Continue;
                 }
                 let Some(contents) =
-                    scan::file_contents_if_matches(&mut searcher, &pre_filter, path)
+                    scan::file_contents_if_matches(&mut searcher, &pre_filter, path, &mut scratch)
                 else {
                     return WalkState::Continue;
                 };

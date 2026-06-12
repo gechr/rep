@@ -100,23 +100,36 @@ pub(crate) fn make_searcher() -> Searcher {
 /// The multi-line searcher needs the whole file in memory anyway, so reading
 /// up front and searching the slice avoids a second full read (open + read +
 /// allocate) for every matching file.
+///
+/// `scratch` is a caller-owned (typically per-thread) read buffer. Files
+/// that don't match - the vast majority on a typical tree - are read into
+/// its existing capacity without touching the allocator; only a match takes
+/// the buffer's allocation away (`mem::take`), so capacity is rebuilt at
+/// most once per matching file.
 pub(crate) fn file_contents_if_matches(
     searcher: &mut Searcher,
     matcher: &RegexMatcher,
     path: &Path,
+    scratch: &mut Vec<u8>,
 ) -> Option<Vec<u8>> {
-    let contents = match fs::read(path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Warning: {}: {e}", path.display());
-            return None;
+    use std::io::Read as _;
+
+    scratch.clear();
+    let read = fs::File::open(path).and_then(|mut file| {
+        if let Ok(meta) = file.metadata() {
+            scratch.reserve(usize::try_from(meta.len()).unwrap_or(0));
         }
-    };
+        file.read_to_end(scratch)
+    });
+    if let Err(e) = read {
+        eprintln!("Warning: {}: {e}", path.display());
+        return None;
+    }
     let mut sink = MatchSink::new();
-    if let Err(e) = searcher.search_slice(matcher, &contents, &mut sink) {
+    if let Err(e) = searcher.search_slice(matcher, scratch, &mut sink) {
         eprintln!("Warning: {}: {e}", path.display());
     }
-    sink.did_match.then_some(contents)
+    sink.did_match.then(|| std::mem::take(scratch))
 }
 
 pub(crate) fn file_matches(searcher: &mut Searcher, matcher: &RegexMatcher, path: &Path) -> bool {
@@ -178,6 +191,7 @@ pub(crate) fn matching_files_parallel(
     thread::spawn(move || {
         walk.run(|| {
             let mut searcher = make_searcher();
+            let mut scratch = Vec::new();
             let tx = tx.clone();
             let matcher = thread_matcher.clone();
             Box::new(move |result| {
@@ -195,7 +209,8 @@ pub(crate) fn matching_files_parallel(
                 if !is_candidate_path(path) {
                     return WalkState::Continue;
                 }
-                if let Some(contents) = file_contents_if_matches(&mut searcher, &matcher, path)
+                if let Some(contents) =
+                    file_contents_if_matches(&mut searcher, &matcher, path, &mut scratch)
                     && tx.send((path.to_path_buf(), contents)).is_err()
                 {
                     return WalkState::Quit;
