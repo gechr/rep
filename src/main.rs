@@ -1073,7 +1073,13 @@ fn hyperlink_path(path: &std::path::Path) -> String {
             .as_ref()
             .map_or_else(|| path.to_path_buf(), |cwd| cwd.join(path))
     };
-    abs.to_string_lossy().to_string()
+    // `join` keeps a relative path's `.` components, so collapse `.` and
+    // redundant separators for a clean URL. `..` is left intact; it can't be
+    // resolved without following symlinks.
+    abs.components()
+        .collect::<PathBuf>()
+        .to_string_lossy()
+        .to_string()
 }
 
 pub(crate) fn osc8(url: &str, text: &str) -> String {
@@ -2376,6 +2382,14 @@ mod tests {
             "src/main.rs"
         );
         assert_eq!(display_path(std::path::Path::new("/abs/path")), "/abs/path");
+    }
+
+    #[test]
+    fn test_hyperlink_path_collapses_dot_components() {
+        assert_eq!(
+            hyperlink_path(std::path::Path::new("/abs/./tests/cli.rs")),
+            "/abs/tests/cli.rs"
+        );
     }
 
     #[test]
