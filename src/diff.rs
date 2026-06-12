@@ -17,17 +17,6 @@ use crate::theme::{self, Side, StyleSpec};
 use crate::ui::Color;
 use crate::ui::Styles;
 
-/// Bridge between the local `Color` enum threaded through diff rendering and
-/// the configurable per-side palette. Diff code only ever passes `Red` (removed)
-/// or `Green` (added); the catch-all arm exists to satisfy exhaustiveness.
-const fn side_of(color: Color) -> Side {
-    match color {
-        Color::Red => Side::Removed,
-        Color::Green => Side::Added,
-        _ => Side::Added,
-    }
-}
-
 fn side_diff_style(color: Color) -> StyleSpec {
     let t = theme::theme();
     match color {
@@ -954,6 +943,11 @@ struct Openers {
     /// matched spans inside otherwise-unstyled lines.
     diff_red: String,
     diff_green: String,
+    /// Everything emitted after the line number's closing reset: the side's
+    /// marker (or the default single-space separator). Invariant per writer,
+    /// so the per-line prefix emit skips the theme lookup entirely.
+    marker_suffix_red: String,
+    marker_suffix_green: String,
 }
 
 impl Openers {
@@ -985,6 +979,8 @@ impl Openers {
             diff_green_no_ul,
             diff_red,
             diff_green,
+            marker_suffix_red: marker_suffix(Side::Removed, styles),
+            marker_suffix_green: marker_suffix(Side::Added, styles),
         }
     }
 
@@ -1010,6 +1006,28 @@ impl Openers {
             Color::Green => &self.diff_green,
             _ => "",
         }
+    }
+
+    fn marker_suffix_for(&self, color: Color) -> &str {
+        match color {
+            Color::Red => &self.marker_suffix_red,
+            Color::Green => &self.marker_suffix_green,
+            _ => "",
+        }
+    }
+}
+
+/// Text between a line number and its content: an explicit marker verbatim,
+/// otherwise the marker (if any) padded with the single-space separator.
+fn marker_suffix(side: Side, styles: Styles) -> String {
+    let theme = theme::theme();
+    let marker = theme.marker_for(side, styles.is_plain());
+    if theme.has_explicit_marker(side) || styles.is_plain() {
+        marker.to_string()
+    } else if marker.is_empty() {
+        " ".to_string()
+    } else {
+        format!("{marker} ")
     }
 }
 
@@ -1110,17 +1128,8 @@ impl NumberedDiffWriter<'_, '_> {
             crate::push_decimal(self.out, line_no);
         }
         self.out.push_str(self.styles.reset());
-        let theme = theme::theme();
-        let side = side_of(line_color);
-        let marker = theme.marker_for(side, self.styles.is_plain());
-        if theme.has_explicit_marker(side) || self.styles.is_plain() {
-            self.out.push_str(marker);
-        } else if marker.is_empty() {
-            self.out.push(' ');
-        } else {
-            self.out.push_str(marker);
-            self.out.push(' ');
-        }
+        self.out
+            .push_str(self.openers.marker_suffix_for(line_color));
     }
 }
 
