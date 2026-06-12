@@ -37,24 +37,41 @@ impl StyleSpec {
 
     /// Push the SGR opening sequence directly into `out`. The hot per-line
     /// caller uses this to skip the owned-`String` return path entirely.
+    ///
+    /// All parameters are folded into a single CSI sequence
+    /// (`\x1b[31;2m`, not `\x1b[31m\x1b[2m`): every escape introducer is a
+    /// separate dispatch in the terminal's parser, and diff output emits
+    /// these once or twice per line, so fewer sequences directly cuts the
+    /// terminal-side cost of rendering large diffs.
     pub fn open_into(self, out: &mut String, styles: Styles) {
         if styles.is_plain() {
             return;
         }
+        let mut any = false;
         if let Some(c) = self.fg {
-            sgr_color_into(out, c, false);
+            sgr_color_params(out, c, false, &mut any);
         }
         if let Some(c) = self.bg {
-            sgr_color_into(out, c, true);
+            sgr_color_params(out, c, true, &mut any);
         }
-        emit_attr_into(out, 1, self.bold);
-        emit_attr_into(out, 2, self.dim);
-        emit_attr_into(out, 3, self.italic);
-        emit_attr_into(out, 4, self.underline);
-        emit_attr_into(out, 5, self.blink);
-        emit_attr_into(out, 7, self.reverse);
-        emit_attr_into(out, 8, self.hidden);
-        emit_attr_into(out, 9, self.strike);
+        for (param, on) in [
+            ('1', self.bold),
+            ('2', self.dim),
+            ('3', self.italic),
+            ('4', self.underline),
+            ('5', self.blink),
+            ('7', self.reverse),
+            ('8', self.hidden),
+            ('9', self.strike),
+        ] {
+            if on {
+                push_sgr_separator(out, &mut any);
+                out.push(param);
+            }
+        }
+        if any {
+            out.push('m');
+        }
     }
 
     /// Drop the underline attribute. Used for whole-line emission, where
@@ -65,83 +82,77 @@ impl StyleSpec {
     }
 }
 
-fn emit_attr_into(out: &mut String, code: u8, on: bool) {
-    if !on {
-        return;
+/// Open the CSI on the first parameter; separate subsequent ones with `;` so
+/// the whole spec lands in a single SGR sequence. The caller appends the
+/// final `m` once any parameter was written.
+fn push_sgr_separator(out: &mut String, any: &mut bool) {
+    if *any {
+        out.push(';');
+    } else {
+        out.push_str("\x1b[");
+        *any = true;
     }
-    let s = match code {
-        1 => "\x1b[1m",
-        2 => "\x1b[2m",
-        3 => "\x1b[3m",
-        4 => "\x1b[4m",
-        5 => "\x1b[5m",
-        7 => "\x1b[7m",
-        8 => "\x1b[8m",
-        9 => "\x1b[9m",
-        _ => {
-            let _ = write!(out, "\x1b[{code}m");
-            return;
-        }
-    };
-    out.push_str(s);
 }
 
-/// Push the short SGR form for `color` into `out`: `30`-`37` for the standard
+/// Push the SGR parameters for `color` into `out`: `30`-`37` for the standard
 /// palette, `90`-`97` for the bright palette, `38;5;N` for indexed, `38;2;R;G;B`
-/// for truecolor (and `+10` for backgrounds).
-fn sgr_color_into(out: &mut String, color: Color, bg: bool) {
+/// for truecolor (and `+10` for backgrounds). The separator is pushed only
+/// when the color actually produces parameters, so `Color::Reset` (and any
+/// unknown variant) cannot leave an empty - implicitly `0` - SGR parameter.
+fn sgr_color_params(out: &mut String, color: Color, bg: bool, any: &mut bool) {
     if let Some(s) = static_sgr_color(color, bg) {
+        push_sgr_separator(out, any);
         out.push_str(s);
         return;
     }
+    let extended: u32 = if bg { 48 } else { 38 };
     match color {
         Color::Rgb { r, g, b } => {
-            let extended: u32 = if bg { 48 } else { 38 };
-            let _ = write!(out, "\x1b[{extended};2;{r};{g};{b}m");
+            push_sgr_separator(out, any);
+            let _ = write!(out, "{extended};2;{r};{g};{b}");
         }
         Color::AnsiValue(n) => {
-            let extended: u32 = if bg { 48 } else { 38 };
-            let _ = write!(out, "\x1b[{extended};5;{n}m");
+            push_sgr_separator(out, any);
+            let _ = write!(out, "{extended};5;{n}");
         }
-        Color::Reset => {}
         _ => {}
     }
 }
 
 const fn static_sgr_color(color: Color, bg: bool) -> Option<&'static str> {
     Some(match (color, bg) {
-        (Color::Black, false) => "\x1b[30m",
-        (Color::DarkRed, false) => "\x1b[31m",
-        (Color::DarkGreen, false) => "\x1b[32m",
-        (Color::DarkYellow, false) => "\x1b[33m",
-        (Color::DarkBlue, false) => "\x1b[34m",
-        (Color::DarkMagenta, false) => "\x1b[35m",
-        (Color::DarkCyan, false) => "\x1b[36m",
-        (Color::Grey, false) => "\x1b[37m",
-        (Color::DarkGrey, false) => "\x1b[90m",
-        (Color::Red, false) => "\x1b[91m",
-        (Color::Green, false) => "\x1b[92m",
-        (Color::Yellow, false) => "\x1b[93m",
-        (Color::Blue, false) => "\x1b[94m",
-        (Color::Magenta, false) => "\x1b[95m",
-        (Color::Cyan, false) => "\x1b[96m",
-        (Color::White, false) => "\x1b[97m",
-        (Color::Black, true) => "\x1b[40m",
-        (Color::DarkRed, true) => "\x1b[41m",
-        (Color::DarkGreen, true) => "\x1b[42m",
-        (Color::DarkYellow, true) => "\x1b[43m",
-        (Color::DarkBlue, true) => "\x1b[44m",
-        (Color::DarkMagenta, true) => "\x1b[45m",
-        (Color::DarkCyan, true) => "\x1b[46m",
-        (Color::Grey, true) => "\x1b[47m",
-        (Color::DarkGrey, true) => "\x1b[100m",
-        (Color::Red, true) => "\x1b[101m",
-        (Color::Green, true) => "\x1b[102m",
-        (Color::Yellow, true) => "\x1b[103m",
-        (Color::Blue, true) => "\x1b[104m",
-        (Color::Magenta, true) => "\x1b[105m",
-        (Color::Cyan, true) => "\x1b[106m",
-        (Color::White, true) => "\x1b[107m",
+        (Color::Black, false) => "30",
+        (Color::DarkRed, false) => "31",
+        (Color::DarkGreen, false) => "32",
+        (Color::DarkYellow, false) => "33",
+        (Color::DarkBlue, false) => "34",
+        (Color::DarkMagenta, false) => "35",
+        (Color::DarkCyan, false) => "36",
+        (Color::Grey, false) => "37",
+        (Color::DarkGrey, false) => "90",
+        (Color::Red, false) => "91",
+        (Color::Green, false) => "92",
+        (Color::Yellow, false) => "93",
+        (Color::Blue, false) => "94",
+        (Color::Magenta, false) => "95",
+        (Color::Cyan, false) => "96",
+        (Color::White, false) => "97",
+        (Color::Black, true) => "40",
+        (Color::DarkRed, true) => "41",
+        (Color::DarkGreen, true) => "42",
+        (Color::DarkYellow, true) => "43",
+        (Color::DarkBlue, true) => "44",
+        (Color::DarkMagenta, true) => "45",
+        (Color::DarkCyan, true) => "46",
+        (Color::Grey, true) => "47",
+        (Color::DarkGrey, true) => "100",
+        (Color::Red, true) => "101",
+        (Color::Green, true) => "102",
+        (Color::Yellow, true) => "103",
+        (Color::Blue, true) => "104",
+        (Color::Magenta, true) => "105",
+        (Color::Cyan, true) => "106",
+        (Color::White, true) => "107",
         _ => return None,
     })
 }
@@ -504,7 +515,7 @@ mod tests {
     fn open_emits_color_then_attributes() {
         assert_eq!(
             parse("red bold").unwrap().open(Styles::ansi()),
-            "\x1b[31m\x1b[1m"
+            "\x1b[31;1m"
         );
     }
 
@@ -541,7 +552,7 @@ mod tests {
     fn open_emits_fg_and_bg() {
         assert_eq!(
             parse("white red").unwrap().open(Styles::ansi()),
-            "\x1b[37m\x1b[41m"
+            "\x1b[37;41m"
         );
     }
 

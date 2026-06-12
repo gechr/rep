@@ -91,8 +91,8 @@ fn no_mode_flag_defaults_to_dry_run() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m the \x1b[31m\x1b[4mfoo\x1b[m jumped
-\x1b[32m\x1b[2m1\x1b[m the \x1b[32m\x1b[4mbar\x1b[m jumped
+\x1b[31;2m1\x1b[m the \x1b[31;4mfoo\x1b[m jumped
+\x1b[32;2m1\x1b[m the \x1b[32;4mbar\x1b[m jumped
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -123,8 +123,8 @@ fn no_hints_suppresses_apply_hint_in_dry_run() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m the \x1b[31m\x1b[4mfoo\x1b[m jumped
-\x1b[32m\x1b[2m1\x1b[m the \x1b[32m\x1b[4mbar\x1b[m jumped
+\x1b[31;2m1\x1b[m the \x1b[31;4mfoo\x1b[m jumped
+\x1b[32;2m1\x1b[m the \x1b[32;4mbar\x1b[m jumped
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m
 "
@@ -331,8 +331,8 @@ fn colored_dry_run_trims_shared_affixes_to_actual_edit() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m let dir = tempdir().unwrap();
-\x1b[32m\x1b[2m1\x1b[m let dir = tempdir().unwrap();\x1b[32m\x1b[4m;\x1b[m
+\x1b[31;2m1\x1b[m let dir = tempdir().unwrap();
+\x1b[32;2m1\x1b[m let dir = tempdir().unwrap();\x1b[32;4m;\x1b[m
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -369,7 +369,7 @@ fn colored_dry_run_highlights_only_inserted_wrapping_delimiters() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m  a \n\x1b[32m\x1b[2m1\x1b[m  \x1b[32m\x1b[4m`\x1b[ma\x1b[32m\x1b[4m`\x1b[m \n
+\x1b[31;2m1\x1b[m  a \n\x1b[32;2m1\x1b[m  \x1b[32;4m`\x1b[ma\x1b[32;4m`\x1b[m \n
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
     );
@@ -403,8 +403,8 @@ fn colored_dry_run_trims_shared_prefix_even_when_added_side_is_empty() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m return fmt.Errorf(\"\x1b[31m\x1b[4mprefix: \x1b[m%w\", err)
-\x1b[32m\x1b[2m1\x1b[m return fmt.Errorf(\"%w\", err)
+\x1b[31;2m1\x1b[m return fmt.Errorf(\"\x1b[31;4mprefix: \x1b[m%w\", err)
+\x1b[32;2m1\x1b[m return fmt.Errorf(\"%w\", err)
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1408,12 +1408,12 @@ fn color_always_forces_rich_layout_through_pipe() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m bar \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m bar \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31;2m1\x1b[m \x1b[31;4mfoo\x1b[m bar \x1b[31;4mfoo\x1b[m
+\x1b[32;2m1\x1b[m \x1b[32;4mbar\x1b[m bar \x1b[32;4mbar\x1b[m
 
 \x1b[35mb.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31;2m1\x1b[m \x1b[31;4mfoo\x1b[m
+\x1b[32;2m1\x1b[m \x1b[32;4mbar\x1b[m
 
 \x1b[1m\x1b[33mWould perform 3 replacements in 2 files\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1444,8 +1444,8 @@ fn color_always_wraps_diff_text_in_red_and_green() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m line
-\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m line
+\x1b[31;2m1\x1b[m \x1b[31;4mfoo\x1b[m line
+\x1b[32;2m1\x1b[m \x1b[32;4mbar\x1b[m line
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1476,8 +1476,8 @@ fn color_always_highlights_merged_token_replacements_at_char_granularity() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m github\x1b[31m\x1b[4m.\x1b[mworkflow
-\x1b[32m\x1b[2m1\x1b[m github\x1b[32m\x1b[4mb\x1b[mworkflow
+\x1b[31;2m1\x1b[m github\x1b[31;4m.\x1b[mworkflow
+\x1b[32;2m1\x1b[m github\x1b[32;4mb\x1b[mworkflow
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1509,17 +1509,17 @@ fn color_always_highlights_only_changed_chars_for_multi_match_lines() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("output\x1b[31m\x1b[4m.\x1b[mstatus\x1b[31m\x1b[4m.\x1b[msuccess",),
+        stdout.contains("output\x1b[31;4m.\x1b[mstatus\x1b[31;4m.\x1b[msuccess",),
         "old line should underline only the two replaced dots: {stdout:?}",
     );
     assert!(
-        stdout.contains("output\x1b[32m\x1b[4mb\x1b[mstatus\x1b[32m\x1b[4mb\x1b[msuccess",),
+        stdout.contains("output\x1b[32;4mb\x1b[mstatus\x1b[32;4mb\x1b[msuccess",),
         "new line should underline only the two replacement b's: {stdout:?}",
     );
     // Negative: the surrounding word tokens must remain uncolored - earlier
     // LCS-based code colored the entire merged token on the new side.
     assert!(
-        !stdout.contains("\x1b[32m\x1b[4moutputbstatusbsuccess"),
+        !stdout.contains("\x1b[32;4moutputbstatusbsuccess"),
         "new line must not highlight the whole merged word: {stdout:?}",
     );
 }
@@ -1547,10 +1547,10 @@ fn color_always_fast_path_handles_utf8_non_adjacent_lines() {
         String::from_utf8(output.stdout).unwrap(),
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m café \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[32m\x1b[2m1\x1b[m café \x1b[32m\x1b[4mbar\x1b[m
-\x1b[31m\x1b[2m3\x1b[m naïve \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[32m\x1b[2m3\x1b[m naïve \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31;2m1\x1b[m café \x1b[31;4mfoo\x1b[m
+\x1b[32;2m1\x1b[m café \x1b[32;4mbar\x1b[m
+\x1b[31;2m3\x1b[m naïve \x1b[31;4mfoo\x1b[m
+\x1b[32;2m3\x1b[m naïve \x1b[32;4mbar\x1b[m
 
 \x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1584,10 +1584,10 @@ fn color_always_multi_expression_linewise_fast_path_preserves_layout() {
         String::from_utf8(output.stdout).unwrap(),
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mstatic\x1b[m café
-\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mSTATIC\x1b[m café
-\x1b[31m\x1b[2m3\x1b[m \x1b[31m\x1b[4mconst\x1b[m naïve
-\x1b[32m\x1b[2m3\x1b[m \x1b[32m\x1b[4mCONST\x1b[m naïve
+\x1b[31;2m1\x1b[m \x1b[31;4mstatic\x1b[m café
+\x1b[32;2m1\x1b[m \x1b[32;4mSTATIC\x1b[m café
+\x1b[31;2m3\x1b[m \x1b[31;4mconst\x1b[m naïve
+\x1b[32;2m3\x1b[m \x1b[32;4mCONST\x1b[m naïve
 
 \x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1622,10 +1622,10 @@ fn color_always_multi_expression_symbols_only_highlights_replacements() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m alpha\x1b[31m\x1b[4m.\x1b[mfoo
-\x1b[32m\x1b[2m1\x1b[m alpha\x1b[32m\x1b[4m:\x1b[mfoo
-\x1b[31m\x1b[2m2\x1b[m beta\x1b[31m\x1b[4m—\x1b[mgamma
-\x1b[32m\x1b[2m2\x1b[m beta\x1b[32m\x1b[4m-\x1b[mgamma
+\x1b[31;2m1\x1b[m alpha\x1b[31;4m.\x1b[mfoo
+\x1b[32;2m1\x1b[m alpha\x1b[32;4m:\x1b[mfoo
+\x1b[31;2m2\x1b[m beta\x1b[31;4m—\x1b[mgamma
+\x1b[32;2m2\x1b[m beta\x1b[32;4m-\x1b[mgamma
 
 \x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1661,10 +1661,10 @@ fn color_always_apply_multi_expression_symbols_only_highlights_replacements() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m alpha\x1b[31m\x1b[4m.\x1b[mfoo
-\x1b[32m\x1b[2m1\x1b[m alpha\x1b[32m\x1b[4m:\x1b[mfoo
-\x1b[31m\x1b[2m2\x1b[m beta\x1b[31m\x1b[4m—\x1b[mgamma
-\x1b[32m\x1b[2m2\x1b[m beta\x1b[32m\x1b[4m-\x1b[mgamma
+\x1b[31;2m1\x1b[m alpha\x1b[31;4m.\x1b[mfoo
+\x1b[32;2m1\x1b[m alpha\x1b[32;4m:\x1b[mfoo
+\x1b[31;2m2\x1b[m beta\x1b[31;4m—\x1b[mgamma
+\x1b[32;2m2\x1b[m beta\x1b[32;4m-\x1b[mgamma
 
 \x1b[1m\x1b[32mPerformed 2 replacements in 1 file\x1b[m
 "
@@ -1695,12 +1695,12 @@ fn color_always_multiline_span_fast_path_preserves_chained_utf8_context() {
         String::from_utf8(output.stdout).unwrap(),
         "\
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m α \x1b[31m\x1b[4mstatic\x1b[m ω
-\x1b[32m\x1b[2m1\x1b[m α \x1b[32m\x1b[4mSTATIC\x1b[m
-\x1b[31m\x1b[2m2\x1b[m β \x1b[31m\x1b[4mstatic\x1b[m δ
-\x1b[32m\x1b[2m2\x1b[m  ω
-\x1b[32m\x1b[2m3\x1b[m β \x1b[32m\x1b[4mSTATIC\x1b[m
-\x1b[32m\x1b[2m4\x1b[m  δ
+\x1b[31;2m1\x1b[m α \x1b[31;4mstatic\x1b[m ω
+\x1b[32;2m1\x1b[m α \x1b[32;4mSTATIC\x1b[m
+\x1b[31;2m2\x1b[m β \x1b[31;4mstatic\x1b[m δ
+\x1b[32;2m2\x1b[m  ω
+\x1b[32;2m3\x1b[m β \x1b[32;4mSTATIC\x1b[m
+\x1b[32;2m4\x1b[m  δ
 
 \x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1732,8 +1732,8 @@ fn color_always_highlights_each_replacement_symmetrically() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     // Five `.` underlines on the old line, five `b` underlines on the new.
-    let old_marks = stdout.matches("\x1b[31m\x1b[4m.\x1b[m").count();
-    let new_marks = stdout.matches("\x1b[32m\x1b[4mb\x1b[m").count();
+    let old_marks = stdout.matches("\x1b[31;4m.\x1b[m").count();
+    let new_marks = stdout.matches("\x1b[32;4mb\x1b[m").count();
     assert_eq!(
         old_marks, 5,
         "expected 5 dot highlights, got {old_marks} in {stdout:?}"
@@ -1821,8 +1821,8 @@ fn color_always_outranks_no_color_env() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31;2m1\x1b[m \x1b[31;4mfoo\x1b[m
+\x1b[32;2m1\x1b[m \x1b[32;4mbar\x1b[m
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1881,8 +1881,8 @@ fn colour_alias_behaves_like_color() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m
-\x1b[32m\x1b[2m1\x1b[m \x1b[32m\x1b[4mbar\x1b[m
+\x1b[31;2m1\x1b[m \x1b[31;4mfoo\x1b[m
+\x1b[32;2m1\x1b[m \x1b[32;4mbar\x1b[m
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1913,8 +1913,8 @@ fn style_added_overrides_diff_color() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m \x1b[31m\x1b[4mfoo\x1b[m line
-\x1b[32m\x1b[2m1\x1b[m \x1b[34m\x1b[1mbar\x1b[m line
+\x1b[31;2m1\x1b[m \x1b[31;4mfoo\x1b[m line
+\x1b[32;2m1\x1b[m \x1b[34;1mbar\x1b[m line
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "
@@ -1946,8 +1946,8 @@ fn marker_added_shows_explicit_string_even_when_colored() {
         stdout,
         "\
 \x1b[35ma.txt \x1b[38;5;248m(1)\x1b[m
-\x1b[31m\x1b[2m1\x1b[m<<\x1b[31m\x1b[4mfoo\x1b[m line
-\x1b[32m\x1b[2m1\x1b[m>>\x1b[32m\x1b[4mbar\x1b[m line
+\x1b[31;2m1\x1b[m<<\x1b[31;4mfoo\x1b[m line
+\x1b[32;2m1\x1b[m>>\x1b[32;4mbar\x1b[m line
 
 \x1b[1m\x1b[33mWould perform 1 replacement in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
 "

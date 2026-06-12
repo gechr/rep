@@ -1946,10 +1946,7 @@ mod tests {
             openers.diff_no_ul_for(Color::Red),
             Styles::ansi().reset(),
         );
-        assert_eq!(
-            out,
-            "output\x1b[31m\x1b[4m.\x1b[mstatus\x1b[31m\x1b[4m.\x1b[msuccess",
-        );
+        assert_eq!(out, "output\x1b[31;4m.\x1b[mstatus\x1b[31;4m.\x1b[msuccess",);
     }
 
     #[test]
@@ -2007,7 +2004,7 @@ mod tests {
 
         writer.write_line(1, "abc", Color::Red, SpanSide::Input);
 
-        assert_eq!(out, "\x1b[31m\x1b[2m1\x1b[m abc\n");
+        assert_eq!(out, "\x1b[31;2m1\x1b[m abc\n");
     }
 
     #[test]
@@ -2057,10 +2054,10 @@ mod tests {
         assert_eq!(
             out,
             "\
-\x1b[31m\x1b[2m1\x1b[m old one
-\x1b[32m\x1b[2m1\x1b[m new one
-\x1b[31m\x1b[2m2\x1b[m old two
-\x1b[32m\x1b[2m2\x1b[m new two
+\x1b[31;2m1\x1b[m old one
+\x1b[32;2m1\x1b[m new one
+\x1b[31;2m2\x1b[m old two
+\x1b[32;2m2\x1b[m new two
 "
         );
     }
@@ -2071,10 +2068,10 @@ mod tests {
 
         let mut old = String::new();
         write_inline_chars(&mut old, &inline, InlineSide::Old, Styles::ansi());
-        assert_eq!(old, "github\x1b[31m\x1b[4m.\x1b[mworkflow");
+        assert_eq!(old, "github\x1b[31;4m.\x1b[mworkflow");
 
         let mut new = String::new();
         write_inline_chars(&mut new, &inline, InlineSide::New, Styles::ansi());
-        assert_eq!(new, "github\x1b[32m\x1b[4mb\x1b[mworkflow");
+        assert_eq!(new, "github\x1b[32;4mb\x1b[mworkflow");
     }
 }
