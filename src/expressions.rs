@@ -28,7 +28,10 @@ pub(crate) struct Expression {
 
 pub(crate) struct CompiledExpression {
     pub(crate) pattern: String,
-    pub(crate) regex: regex::Regex,
+    /// Str-side regex backing the interactive preview's char-oriented
+    /// replacer. Compiled only under `--preview` - the TUI is its sole
+    /// consumer, and every other mode replaces via `bytes_regex`.
+    pub(crate) regex: Option<regex::Regex>,
     pub(crate) bytes_regex: regex::bytes::Regex,
     pub(crate) matcher: RegexMatcher,
     pub(crate) replacer: Box<dyn Fn(&regex::Captures) -> String + Send + Sync>,
@@ -45,7 +48,10 @@ pub(crate) struct CompiledExpression {
 impl CompiledExpression {
     pub(crate) fn preview_expr(&self) -> crate::interactive::PreviewExpr<'_> {
         crate::interactive::PreviewExpr {
-            regex: &self.regex,
+            regex: self
+                .regex
+                .as_ref()
+                .expect("str regex is compiled whenever preview mode is active"),
             replacer: &*self.replacer,
         }
     }
@@ -397,9 +403,10 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
         } else {
             wrapped
         };
-        let regex = RegexBuilder::new(&pattern)
-            .multi_line(true)
-            .build()
+        let regex = cli
+            .preview
+            .then(|| RegexBuilder::new(&pattern).multi_line(true).build())
+            .transpose()
             .with_context(|| format!("Invalid pattern: {}", expr.find))?;
         let bytes_regex = BytesRegexBuilder::new(&pattern)
             .multi_line(true)
@@ -454,9 +461,10 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
         } else {
             wrapped
         };
-        let regex = RegexBuilder::new(&pattern)
-            .multi_line(true)
-            .build()
+        let regex = cli
+            .preview
+            .then(|| RegexBuilder::new(&pattern).multi_line(true).build())
+            .transpose()
             .with_context(|| format!("Invalid smart pattern: {}", expr.find))?;
         let bytes_regex = BytesRegexBuilder::new(&pattern)
             .multi_line(true)
@@ -501,11 +509,16 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
         let pattern = build_pattern_for(cli, &expr.find);
         let subst = build_subst_for(cli, &expr.replace);
         let dot_matches_new_line = cli.dotall || cli.multiline;
-        let regex = RegexBuilder::new(&pattern)
-            .case_insensitive(cli.ignore_case)
-            .multi_line(true)
-            .dot_matches_new_line(dot_matches_new_line)
-            .build()
+        let regex = cli
+            .preview
+            .then(|| {
+                RegexBuilder::new(&pattern)
+                    .case_insensitive(cli.ignore_case)
+                    .multi_line(true)
+                    .dot_matches_new_line(dot_matches_new_line)
+                    .build()
+            })
+            .transpose()
             .with_context(|| format!("Invalid regex: {}", expr.find))?;
         let bytes_regex = BytesRegexBuilder::new(&pattern)
             .case_insensitive(cli.ignore_case)
@@ -1474,7 +1487,7 @@ mod tests {
     /// tests exercise the preview-only code path directly.
     #[test]
     fn test_preview_replacer_literal_mode_returns_raw_replacement() {
-        let cli = parse_cli(&["rep", "foo", "$1bar"]);
+        let cli = parse_cli(&["rep", "-p", "foo", "$1bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let preview = expressions[0].preview_expr();
         let caps = preview.regex.captures("foo").unwrap();
@@ -1483,7 +1496,7 @@ mod tests {
 
     #[test]
     fn test_preview_replacer_regex_mode_expands_captures() {
-        let cli = parse_cli(&["rep", "-r", r"(foo)\.(bar)", "$2.$1"]);
+        let cli = parse_cli(&["rep", "-p", "-r", r"(foo)\.(bar)", "$2.$1"]);
         let expressions = compile_expressions(&cli).unwrap();
         let preview = expressions[0].preview_expr();
         let caps = preview.regex.captures("foo.bar").unwrap();
@@ -1492,7 +1505,7 @@ mod tests {
 
     #[test]
     fn test_preview_replacer_smart_mode_maps_case_variant() {
-        let cli = parse_cli(&["rep", "--smart", "foo_bar", "hello_world"]);
+        let cli = parse_cli(&["rep", "-p", "--smart", "foo_bar", "hello_world"]);
         let expressions = compile_expressions(&cli).unwrap();
         let preview = expressions[0].preview_expr();
         let caps = preview.regex.captures("FooBar").unwrap();
