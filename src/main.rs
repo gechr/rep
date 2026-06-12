@@ -1293,6 +1293,7 @@ fn parse_file_globs(input: &str) -> Vec<String> {
 }
 
 fn run_list_files(cli: &Cli) -> Result<()> {
+    use std::io::Write as _;
     use std::sync::mpsc::channel;
     use std::thread;
 
@@ -1386,8 +1387,14 @@ fn run_list_files(cli: &Cli) -> Result<()> {
 
     let mut paths: Vec<String> = rx.iter().collect();
     paths.sort_by(|a, b| natord::compare(a, b));
+    // One lock + buffer for the whole listing; `println!` would re-lock
+    // stdout per path. A failed write (e.g. closed pipe) ends the listing.
+    let stdout = std::io::stdout().lock();
+    let mut out = std::io::BufWriter::new(stdout);
     for path in &paths {
-        println!("{path}");
+        if writeln!(out, "{path}").is_err() {
+            break;
+        }
     }
     Ok(())
 }
