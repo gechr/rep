@@ -58,6 +58,21 @@ fn basic_replace_rewrites_file_contents() {
 }
 
 #[test]
+fn expression_replace_accepts_hyphen_leading_values() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("notes.txt");
+    write(&file, "- old value\nunchanged\n");
+
+    let status = rep_command()
+        .args(["-W", "-e", "- old value", "- new value", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(read(&file), "- new value\nunchanged\n");
+}
+
+#[test]
 fn no_mode_flag_defaults_to_dry_run() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");

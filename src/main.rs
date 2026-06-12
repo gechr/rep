@@ -111,6 +111,7 @@ struct Cli {
         short = 'e',
         long = "expression",
         value_name = "f> <r",
+        allow_hyphen_values = true,
         help = "Repeatable <find> <replace> expression",
         help_heading = "Replace"
     )]
@@ -2164,6 +2165,24 @@ mod tests {
 
         assert!(cli.paths().is_empty());
         assert_eq!(cli.dirs(), vec!["."]);
+    }
+
+    #[test]
+    fn test_expression_values_may_start_with_dash() {
+        let cli = parse_cli(&[
+            "rep",
+            "--write",
+            "-e",
+            "- old value",
+            "- new value",
+            "notes.txt",
+        ]);
+
+        assert_eq!(
+            cli.expressions,
+            vec![format!("- old value{EXPR_SEP}- new value")]
+        );
+        assert_eq!(cli.paths(), vec![std::path::PathBuf::from("notes.txt")]);
     }
 
     #[test]
