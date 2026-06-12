@@ -85,26 +85,27 @@ pub(crate) fn make_searcher() -> Searcher {
         .build()
 }
 
+/// Reads `path` once and returns its contents when the pre-filter matches.
+/// The multi-line searcher needs the whole file in memory anyway, so reading
+/// up front and searching the slice avoids a second full read (open + read +
+/// allocate) for every matching file.
 pub(crate) fn file_contents_if_matches(
     searcher: &mut Searcher,
     matcher: &RegexMatcher,
     path: &Path,
 ) -> Option<Vec<u8>> {
+    let contents = match fs::read(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: {}: {e}", path.display());
+            return None;
+        }
+    };
     let mut sink = MatchSink::new();
-    if let Err(e) = searcher.search_path(matcher, path, &mut sink) {
+    if let Err(e) = searcher.search_slice(matcher, &contents, &mut sink) {
         eprintln!("Warning: {}: {e}", path.display());
     }
-    if sink.did_match {
-        match fs::read(path) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                eprintln!("Warning: {}: {e}", path.display());
-                None
-            }
-        }
-    } else {
-        None
-    }
+    sink.did_match.then_some(contents)
 }
 
 pub(crate) fn file_matches(searcher: &mut Searcher, matcher: &RegexMatcher, path: &Path) -> bool {
