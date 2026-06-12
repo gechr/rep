@@ -93,6 +93,7 @@ fn render_colored_diff(b: &mut Bencher) {
             None,
             "",
             None,
+            crate::ui::Color::Red,
             &mut sink,
         );
         black_box(&sink);

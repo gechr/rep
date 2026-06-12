@@ -1954,6 +1954,10 @@ impl ResultPrinter<'_> {
                 template,
                 &encoded_path,
                 result.columns.as_ref(),
+                // In dry-run the file on disk is the original (old side); after
+                // a write it is the rewritten version (new side). Per-line links
+                // on line-shifting diffs target whichever side is on disk.
+                if self.dry { Color::Red } else { Color::Green },
                 &mut buf,
             );
         }

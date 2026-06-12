@@ -56,6 +56,12 @@ struct Hyperlinks<'a> {
     /// only `{path}`/`{host}` produces the same link on every line as the file
     /// header already carries, so per-line links are pure terminal overhead.
     link_lines: bool,
+    /// Restricts per-line links to one diff side. `None` links both (line
+    /// numbers agree across sides). Diff paths whose old/new line numbers can
+    /// diverge set this to the side whose numbers match the file on disk - old
+    /// in dry-run, new after `--write` - so the other side, which only exists
+    /// in the version not on disk, stays plain.
+    link_side: Option<Color>,
 }
 
 impl<'a> Hyperlinks<'a> {
@@ -71,15 +77,27 @@ impl<'a> Hyperlinks<'a> {
             encoded_path,
             columns,
             link_lines,
+            link_side: None,
         }
     }
 
-    fn write(self, out: &mut String, line: usize, text: &str) {
+    /// Returns a copy that links only `side`'s gutter numbers. Diff paths whose
+    /// old and new line numbers can diverge (newline-changing replacements) use
+    /// this to link just the side that matches the file on disk; the other
+    /// side's number would point at a line that version doesn't contain.
+    const fn link_only(self, side: Color) -> Self {
+        Self {
+            link_side: Some(side),
+            ..self
+        }
+    }
+
+    fn write(self, out: &mut String, line: usize, text: &str, side: Color) {
         let Some(template) = self.template else {
             out.push_str(text);
             return;
         };
-        if !self.link_lines {
+        if !self.link_lines || self.link_side.is_some_and(|only| only != side) {
             out.push_str(text);
             return;
         }
@@ -104,6 +122,7 @@ pub(crate) fn print_file_line_diff<W: std::io::Write>(
     hyperlink_template: Option<&crate::HyperlinkTemplate<'_>>,
     encoded_path: &str,
     columns: Option<&std::collections::HashMap<usize, usize>>,
+    on_disk_side: Color,
     out: &mut W,
 ) {
     let hyperlinks = Hyperlinks::new(hyperlink_template, encoded_path, columns, styles.is_plain());
@@ -156,7 +175,7 @@ pub(crate) fn print_file_line_diff<W: std::io::Write>(
             new,
             spans,
             styles,
-            hyperlinks,
+            hyperlinks.link_only(on_disk_side),
             &old_line_spans,
             &new_line_spans,
             out,
@@ -220,7 +239,7 @@ pub(crate) fn print_file_line_diff<W: std::io::Write>(
         out: &mut buf,
         width,
         styles,
-        hyperlinks,
+        hyperlinks: hyperlinks.link_only(on_disk_side),
         span_highlighting,
         old_line_spans: &old_line_spans,
         new_line_spans: &new_line_spans,
@@ -1125,7 +1144,8 @@ impl NumberedDiffWriter<'_, '_> {
             // the link's open/close escapes. We materialize them on the stack.
             let mut buf = [0u8; 20];
             let line_no_text = format_usize(&mut buf, line_no);
-            self.hyperlinks.write(self.out, line_no, line_no_text);
+            self.hyperlinks
+                .write(self.out, line_no, line_no_text, line_color);
         } else {
             crate::push_decimal(self.out, line_no);
         }
@@ -2111,6 +2131,101 @@ mod tests {
 \x1b[31;2m2\x1b[m old two
 \x1b[32;2m2\x1b[m new two
 "
+        );
+    }
+
+    #[test]
+    fn dry_run_shifting_diff_links_only_old_side() {
+        // Inserting a line diverges the gutter numbering. In dry-run the file on
+        // disk is the original, so only the old/red side is a valid target.
+        let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
+        let mut out = Vec::new();
+        print_file_line_diff(
+            "a\nb\nc\n",
+            "a\nB\nB2\nc\n",
+            DiffHints {
+                spans: &[],
+                linewise: false,
+                multiline_spans: false,
+            },
+            Styles::ansi(),
+            Some(&template),
+            "a.txt",
+            None,
+            Color::Red,
+            &mut out,
+        );
+        let out = String::from_utf8(out).unwrap();
+        // Old line 2 (red) is linked; the inserted new line 3 (green-only) is not.
+        assert!(
+            out.contains("\x1b]8;;app://a.txt:2:"),
+            "old side must stay linked: {out:?}"
+        );
+        assert!(
+            !out.contains("app://a.txt:3:"),
+            "new-only line must not be linked in dry-run: {out:?}"
+        );
+    }
+
+    #[test]
+    fn write_shifting_diff_links_only_new_side() {
+        // After --write the file on disk is the rewritten version, so only the
+        // new/green side is a valid target; the deleted old line stays plain.
+        let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
+        let mut out = Vec::new();
+        print_file_line_diff(
+            "a\nb\nDEL\nc\n",
+            "a\nB\nc\n",
+            DiffHints {
+                spans: &[],
+                linewise: false,
+                multiline_spans: false,
+            },
+            Styles::ansi(),
+            Some(&template),
+            "a.txt",
+            None,
+            Color::Green,
+            &mut out,
+        );
+        let out = String::from_utf8(out).unwrap();
+        // New line 2 (green) is linked; the deleted old line 3 (red-only) is not.
+        assert!(
+            out.contains("\x1b]8;;app://a.txt:2:"),
+            "new side must stay linked: {out:?}"
+        );
+        assert!(
+            !out.contains("app://a.txt:3:"),
+            "old-only line must not be linked after a write: {out:?}"
+        );
+    }
+
+    #[test]
+    fn line_preserving_diff_links_both_sides_regardless_of_mode() {
+        // Same line count: gutter numbers agree across sides, so both link even
+        // though only one side matches the file on disk.
+        let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
+        let mut out = Vec::new();
+        print_file_line_diff(
+            "a\nb\nc\n",
+            "a\nX\nc\n",
+            DiffHints {
+                spans: &[],
+                linewise: true,
+                multiline_spans: false,
+            },
+            Styles::ansi(),
+            Some(&template),
+            "a.txt",
+            None,
+            Color::Red,
+            &mut out,
+        );
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(
+            out.matches("\x1b]8;;app://a.txt:2:").count(),
+            2,
+            "both old and new line 2 must be linked: {out:?}"
         );
     }
 
