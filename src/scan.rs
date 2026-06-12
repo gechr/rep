@@ -73,7 +73,18 @@ pub(crate) fn apply_walk_flags(builder: &mut WalkBuilder, hidden: bool, no_ignor
             .git_exclude(false)
             .git_global(false);
     }
-    builder.filter_entry(|entry| !is_vcs_path(entry.path()));
+    builder.filter_entry(|entry| {
+        // Entries at depth >= 2 only need their own name checked: any VCS
+        // directory between the walk root and them was already filtered when
+        // it was visited, so scanning every path component again per entry
+        // is redundant. Shallow entries still check the full path so walk
+        // roots that sit inside a VCS directory stay excluded.
+        if entry.depth() <= 1 {
+            !is_vcs_path(entry.path())
+        } else {
+            !is_vcs_dir_name(entry.file_name())
+        }
+    });
 }
 
 pub(crate) fn make_searcher() -> Searcher {
