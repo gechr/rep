@@ -96,6 +96,20 @@ pub(crate) fn make_searcher() -> Searcher {
         .build()
 }
 
+/// Line-oriented searcher for match/no-match probes. Streams the file in
+/// fixed-size chunks and, because `MatchSink` halts after the first hit,
+/// stops reading as soon as any line matches - a multi-line searcher must
+/// slurp the entire file before it can answer. Only sound when no pattern
+/// can match across a line boundary.
+pub(crate) fn make_line_searcher() -> Searcher {
+    SearcherBuilder::new()
+        .line_number(false)
+        .multi_line(false)
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        .bom_sniffing(false)
+        .build()
+}
+
 /// Reads `path` once and returns its contents when the pre-filter matches.
 /// The multi-line searcher needs the whole file in memory anyway, so reading
 /// up front and searching the slice avoids a second full read (open + read +

@@ -1311,6 +1311,14 @@ fn run_list_files(cli: &Cli) -> Result<()> {
         .then(|| build_pre_filter_matcher(cli, &expressions))
         .transpose()?;
     let filter_by_change = cli.positional_replace().is_some();
+    // Match/no-match probes can stream line by line and stop at the first
+    // hit when every pattern is confined to a single line. The change-filter
+    // path needs full contents regardless, so it keeps the multi-line
+    // searcher that `file_contents_if_matches` expects.
+    let line_oriented = !filter_by_change
+        && expressions
+            .iter()
+            .all(|expr| expr.preserves_line_boundaries);
 
     let dirs = cli.dirs();
     let mut builder = scan::walk_builder_with_file_set(&dirs, cli.file_set())?;
@@ -1327,7 +1335,11 @@ fn run_list_files(cli: &Cli) -> Result<()> {
 
     thread::spawn(move || {
         walk.run(|| {
-            let mut searcher = scan::make_searcher();
+            let mut searcher = if line_oriented {
+                scan::make_line_searcher()
+            } else {
+                scan::make_searcher()
+            };
             let mut scratch = Vec::new();
             let tx = tx.clone();
             let pre_filter = pre_filter.clone();
