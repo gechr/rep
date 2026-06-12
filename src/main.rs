@@ -1782,45 +1782,15 @@ impl ResultPrinter<'_> {
             self.hyperlink_format
         };
         let template = effective_format.map(HyperlinkTemplate::parse);
-        for (idx, result) in results.iter().enumerate() {
-            let count = with_commas(result.count);
-            let encoded_path = template
-                .as_ref()
-                .filter(|t| t.uses_path())
-                .map_or(String::new(), |_| percent_encode_path(&result.link_path));
-            let path = hyperlink_with_template(template.as_ref(), &encoded_path, 0, &result.path);
-            writeln!(
-                out,
-                "{}{} {}({count}){}",
-                if self.quiet {
-                    ""
-                } else {
-                    styles.fg(Color::Magenta)
-                },
-                path,
-                styles.fg(Color::Grey),
-                styles.reset()
-            )?;
 
-            if !self.quiet
-                && let Some((old, new)) = &result.diff
-            {
-                diff::print_file_line_diff(
-                    old,
-                    new,
-                    diff::DiffHints {
-                        spans: &result.spans,
-                        linewise: result.linewise_diff,
-                        multiline_spans: result.multiline_span_diff,
-                    },
-                    styles,
-                    template.as_ref(),
-                    &encoded_path,
-                    result.columns.as_ref(),
-                    out,
-                );
-            }
-
+        // Each file's block (header + diff) is independent, and span trimming,
+        // line grouping, and ANSI assembly dominate wall-clock on large runs.
+        // Render them across threads, then emit the finished blocks in order.
+        // The hyperlink-limit decision above is global (it needs the total
+        // match count), so it has to precede this fan-out.
+        let blocks = self.render_blocks(results, styles, template.as_ref());
+        for (idx, block) in blocks.iter().enumerate() {
+            out.write_all(block)?;
             if !self.quiet && idx + 1 < results.len() {
                 writeln!(out)?;
             }
@@ -1854,6 +1824,99 @@ impl ResultPrinter<'_> {
             )?;
         }
         Ok(())
+    }
+
+    /// Render every result's block in parallel, preserving input order. Small
+    /// runs render inline - the thread setup would cost more than it saves -
+    /// while large runs fan out across the same thread budget the walk uses.
+    fn render_blocks(
+        &self,
+        results: &[ReplacementResult],
+        styles: Styles,
+        template: Option<&HyperlinkTemplate<'_>>,
+    ) -> Vec<Vec<u8>> {
+        // Below this many files, the serial path wins: scoped-thread spawn and
+        // join overhead exceeds the render work for a handful of small diffs.
+        const PARALLEL_THRESHOLD: usize = 32;
+        if results.len() < PARALLEL_THRESHOLD {
+            return results
+                .iter()
+                .map(|result| self.render_block(result, styles, template))
+                .collect();
+        }
+        let threads = std::cmp::min(
+            12,
+            std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        );
+        let chunk_size = results.len().div_ceil(threads);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = results
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|result| self.render_block(result, styles, template))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap_or_default())
+                .collect()
+        })
+    }
+
+    /// Render one file's block: the magenta path header line plus, unless
+    /// quiet, its colored diff. Returns the finished bytes so the caller can
+    /// emit them without re-touching shared rendering state.
+    fn render_block(
+        &self,
+        result: &ReplacementResult,
+        styles: Styles,
+        template: Option<&HyperlinkTemplate<'_>>,
+    ) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let mut buf = Vec::new();
+        let count = with_commas(result.count);
+        let encoded_path = template
+            .filter(|t| t.uses_path())
+            .map_or(String::new(), |_| percent_encode_path(&result.link_path));
+        let path = hyperlink_with_template(template, &encoded_path, 0, &result.path);
+        drop(writeln!(
+            buf,
+            "{}{} {}({count}){}",
+            if self.quiet {
+                ""
+            } else {
+                styles.fg(Color::Magenta)
+            },
+            path,
+            styles.fg(Color::Grey),
+            styles.reset()
+        ));
+
+        if !self.quiet
+            && let Some((old, new)) = &result.diff
+        {
+            diff::print_file_line_diff(
+                old,
+                new,
+                diff::DiffHints {
+                    spans: &result.spans,
+                    linewise: result.linewise_diff,
+                    multiline_spans: result.multiline_span_diff,
+                },
+                styles,
+                template,
+                &encoded_path,
+                result.columns.as_ref(),
+                &mut buf,
+            );
+        }
+        buf
     }
 
     fn print_patch_results(&self, results: &[ReplacementResult]) {
