@@ -1153,12 +1153,14 @@ enum HyperlinkSeg<'a> {
 pub(crate) struct HyperlinkTemplate<'a> {
     segs: Vec<HyperlinkSeg<'a>>,
     has_path: bool,
+    has_line_or_column: bool,
 }
 
 impl<'a> HyperlinkTemplate<'a> {
     pub(crate) fn parse(format: &'a str) -> Self {
         let mut segs: Vec<HyperlinkSeg<'a>> = Vec::new();
         let mut has_path = false;
+        let mut has_line_or_column = false;
         let mut rest = format;
         while let Some(open) = rest.find('{') {
             let after_open = &rest[open + 1..];
@@ -1173,8 +1175,14 @@ impl<'a> HyperlinkTemplate<'a> {
                     HyperlinkSeg::Path
                 }
                 "host" => HyperlinkSeg::Host,
-                "line" => HyperlinkSeg::Line,
-                "column" => HyperlinkSeg::Column,
+                "line" => {
+                    has_line_or_column = true;
+                    HyperlinkSeg::Line
+                }
+                "column" => {
+                    has_line_or_column = true;
+                    HyperlinkSeg::Column
+                }
                 _ => {
                     segs.push(HyperlinkSeg::Lit(&rest[..consumed_to]));
                     rest = &rest[consumed_to..];
@@ -1190,11 +1198,23 @@ impl<'a> HyperlinkTemplate<'a> {
         if !rest.is_empty() {
             segs.push(HyperlinkSeg::Lit(rest));
         }
-        Self { segs, has_path }
+        Self {
+            segs,
+            has_path,
+            has_line_or_column,
+        }
     }
 
     pub(crate) const fn uses_path(&self) -> bool {
         self.has_path
+    }
+
+    /// True when the template varies per line (references `{line}` or
+    /// `{column}`). When false, every line's link is identical to the file
+    /// header link, so the diff renderer skips per-line OSC 8 entirely - one
+    /// link per file instead of one per line.
+    pub(crate) const fn links_lines(&self) -> bool {
+        self.has_line_or_column
     }
 
     /// Render directly into `out`. `encoded_path` is the percent-encoded path;

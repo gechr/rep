@@ -51,23 +51,26 @@ struct Hyperlinks<'a> {
     /// 1-indexed line -> first-match column. `None` when not tracked; lookups
     /// for absent lines fall back to column 1 inside `HyperlinkTemplate::render`.
     columns: Option<&'a std::collections::HashMap<usize, usize>>,
-    /// Cached `Styles::is_plain()`. Read once at construction so the per-line
-    /// emit doesn't re-touch the `OnceLock`-backed color choice on every line.
-    plain: bool,
+    /// Cached: emit a per-line OSC 8 link only when colored (`!plain`) and the
+    /// template varies by line (`{line}`/`{column}`). A format that references
+    /// only `{path}`/`{host}` produces the same link on every line as the file
+    /// header already carries, so per-line links are pure terminal overhead.
+    link_lines: bool,
 }
 
 impl<'a> Hyperlinks<'a> {
-    const fn new(
+    fn new(
         template: Option<&'a crate::HyperlinkTemplate<'a>>,
         encoded_path: &'a str,
         columns: Option<&'a std::collections::HashMap<usize, usize>>,
         plain: bool,
     ) -> Self {
+        let link_lines = !plain && template.is_some_and(crate::HyperlinkTemplate::links_lines);
         Self {
             template,
             encoded_path,
             columns,
-            plain,
+            link_lines,
         }
     }
 
@@ -76,7 +79,7 @@ impl<'a> Hyperlinks<'a> {
             out.push_str(text);
             return;
         };
-        if self.plain {
+        if !self.link_lines {
             out.push_str(text);
             return;
         }
@@ -1117,7 +1120,7 @@ impl NumberedDiffWriter<'_, '_> {
         let pad_len = self.width.saturating_sub(line_digits);
         self.out.push_str(self.openers.line_for(line_color));
         push_spaces(self.out, pad_len);
-        if self.hyperlinks.template.is_some() && !self.hyperlinks.plain {
+        if self.hyperlinks.link_lines {
             // OSC-8 needs the digits as a `&str` so it can wrap them between
             // the link's open/close escapes. We materialize them on the stack.
             let mut buf = [0u8; 20];
