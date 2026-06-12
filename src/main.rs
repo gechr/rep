@@ -1458,8 +1458,10 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 if !scan::is_candidate_path(path) {
                     return WalkState::Continue;
                 }
+                // Quiet dry-run with suppressed output produces no results at
+                // all, so searching the file would be pure waste. The walk
+                // itself still runs to surface traversal warnings on stderr.
                 if skip_apply {
-                    scan::file_matches(&mut searcher, &pre_filter, path);
                     return WalkState::Continue;
                 }
                 let Some(contents) =
