@@ -703,29 +703,30 @@ pub(crate) fn first_column_map_if_needed(
     Some(byte_offsets_to_line_first_column(input, &input_starts))
 }
 
-/// Walks `input` once, mapping a sorted slice of byte offsets to the
+/// Walks `input` once, mapping an ascending slice of byte offsets to the
 /// 1-indexed `(line, column)` of the first match on each line. Single linear
 /// pass, `O(input.len() + offsets.len())`, using a stateful `memchr_iter`
 /// cursor so each newline crossing pulls one position from the iterator
-/// rather than re-running `memchr` on a fresh sub-slice.
+/// rather than re-running `memchr` on a fresh sub-slice. Offsets must be
+/// sorted ascending - replacement spans are recorded left to right, so
+/// callers get this for free.
 pub(crate) fn byte_offsets_to_line_first_column(
     input: &[u8],
     offsets: &[usize],
 ) -> std::collections::HashMap<usize, usize> {
     use std::collections::HashMap;
+    debug_assert!(offsets.is_sorted(), "offsets must be ascending");
     let mut map: HashMap<usize, usize> = HashMap::new();
     if offsets.is_empty() {
         return map;
     }
 
-    let mut sorted = offsets.to_vec();
-    sorted.sort_unstable();
     let mut newlines = memchr::memchr_iter(b'\n', input);
     let mut next_nl: Option<usize> = newlines.next();
     let mut line: usize = 1;
     let mut line_start: usize = 0;
 
-    for &off in &sorted {
+    for &off in offsets {
         // Advance past newlines that end before this offset.
         while let Some(nl) = next_nl {
             if nl >= off {
@@ -781,7 +782,7 @@ mod tests {
     fn test_byte_offsets_to_line_first_column_records_first_only() {
         // Two matches on the same line: only the earliest column is kept.
         let input = b"foofoo\n";
-        let map = byte_offsets_to_line_first_column(input, &[3, 0]);
+        let map = byte_offsets_to_line_first_column(input, &[0, 3]);
         assert_eq!(map.get(&1), Some(&1));
     }
 
