@@ -378,14 +378,13 @@ fn print_same_line_span_diff<W: std::io::Write>(
     new: &str,
     styles: Styles,
     hyperlinks: Hyperlinks<'_>,
-    old_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
-    new_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+    old_line_spans: &LineSpans,
+    new_line_spans: &LineSpans,
     out: &mut W,
 ) -> bool {
     let mut changed_lines: Vec<usize> = old_line_spans
-        .keys()
-        .chain(new_line_spans.keys())
-        .copied()
+        .lines()
+        .chain(new_line_spans.lines())
         .collect();
     changed_lines.sort_unstable();
     changed_lines.dedup();
@@ -435,8 +434,8 @@ fn print_linewise_diff<W: std::io::Write>(
     styles: Styles,
     hyperlinks: Hyperlinks<'_>,
     span_highlighting: bool,
-    old_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
-    new_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+    old_line_spans: &LineSpans,
+    new_line_spans: &LineSpans,
     out: &mut W,
 ) -> bool {
     let old_lines: Vec<&str> = old.lines().collect();
@@ -498,8 +497,8 @@ fn print_multiline_span_diff<W: std::io::Write>(
     spans: &[Replacement],
     styles: Styles,
     hyperlinks: Hyperlinks<'_>,
-    old_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
-    new_line_spans: &std::collections::HashMap<usize, Vec<LocalSpan>>,
+    old_line_spans: &LineSpans,
+    new_line_spans: &LineSpans,
     out: &mut W,
 ) -> bool {
     let Some(mut hunks) = multiline_span_hunks(old, new, spans) else {
@@ -918,9 +917,9 @@ struct NumberedDiffWriter<'a, 'b> {
     /// the input side without emitting invisible zero-width highlights.
     span_highlighting: bool,
     /// 1-indexed line -> sorted local-byte spans for input (old) lines.
-    old_line_spans: &'a std::collections::HashMap<usize, Vec<LocalSpan>>,
+    old_line_spans: &'a LineSpans,
     /// 1-indexed line -> sorted local-byte spans for output (new) lines.
-    new_line_spans: &'a std::collections::HashMap<usize, Vec<LocalSpan>>,
+    new_line_spans: &'a LineSpans,
     /// Precomputed SGR opening sequences. Resolving the per-side `StyleSpec` and
     /// emitting its SGR codes is invariant for the lifetime of the writer; doing
     /// it once here turns each per-line emit into a single `push_str` of the
@@ -1037,8 +1036,8 @@ impl NumberedDiffWriter<'_, '_> {
         for idx in 0..paired {
             let (old_line_no, old_line) = old_lines[idx];
             let (new_line_no, new_line) = new_lines[idx];
-            let old_spans = self.old_line_spans.get(&old_line_no);
-            let new_spans = self.new_line_spans.get(&new_line_no);
+            let old_spans = self.old_line_spans.get(old_line_no);
+            let new_spans = self.new_line_spans.get(new_line_no);
             if self.span_highlighting
                 || old_spans.is_some_and(|spans| !spans.is_empty())
                 || new_spans.is_some_and(|spans| !spans.is_empty())
@@ -1064,8 +1063,8 @@ impl NumberedDiffWriter<'_, '_> {
 
     fn write_line(&mut self, line_no: usize, line: &str, color: Color, side: SpanSide) {
         let spans = match side {
-            SpanSide::Input => self.old_line_spans.get(&line_no),
-            SpanSide::Output => self.new_line_spans.get(&line_no),
+            SpanSide::Input => self.old_line_spans.get(line_no),
+            SpanSide::Output => self.new_line_spans.get(line_no),
         };
         self.write_line_with_spans(line_no, line, color, spans);
     }
@@ -1075,7 +1074,7 @@ impl NumberedDiffWriter<'_, '_> {
         line_no: usize,
         line: &str,
         color: Color,
-        spans: Option<&Vec<LocalSpan>>,
+        spans: Option<&[LocalSpan]>,
     ) {
         self.write_prefix(line_no, color);
         match spans {
@@ -1461,17 +1460,55 @@ enum SpanSide {
     Output,
 }
 
+/// Per-line spans keyed by 1-indexed line number. Backed by a line-sorted
+/// `Vec` rather than a `HashMap`: `group_spans_by_line` emits lines in
+/// ascending order and the renderers look up by line number (also ascending),
+/// so the build is push-to-tail and lookups are a binary search - no hashing,
+/// and no per-line bucket allocation churn.
+#[derive(Default)]
+struct LineSpans {
+    /// `(line_no, spans)` sorted ascending by `line_no`, each line unique.
+    entries: Vec<(usize, Vec<LocalSpan>)>,
+}
+
+impl LineSpans {
+    /// Append `span` to `line_no`'s bucket. Lines must arrive in
+    /// non-decreasing order (the grouping walk guarantees this), so a span
+    /// either extends the trailing bucket or opens a new one.
+    fn push(&mut self, line_no: usize, span: LocalSpan) {
+        match self.entries.last_mut() {
+            Some((last, spans)) if *last == line_no => spans.push(span),
+            Some((last, _)) => {
+                debug_assert!(line_no > *last, "lines must be pushed in ascending order");
+                self.entries.push((line_no, vec![span]));
+            }
+            None => self.entries.push((line_no, vec![span])),
+        }
+    }
+
+    fn get(&self, line_no: usize) -> Option<&[LocalSpan]> {
+        self.entries
+            .binary_search_by_key(&line_no, |(line, _)| *line)
+            .ok()
+            .map(|idx| self.entries[idx].1.as_slice())
+    }
+
+    fn lines(&self) -> impl Iterator<Item = usize> + '_ {
+        self.entries.iter().map(|(line_no, _)| *line_no)
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// Walk `text` once, splitting each replacement span at every `\n` it crosses
-/// and bucketing per-line slices into a 1-indexed `line -> Vec<LocalSpan>`
-/// map. Empty spans (insertions on input side, deletions on output side) are
-/// dropped: an empty underline is invisible and would emit useless escapes.
-fn group_spans_by_line(
-    text: &str,
-    spans: &[Replacement],
-    side: SpanSide,
-) -> std::collections::HashMap<usize, Vec<LocalSpan>> {
-    let mut map: std::collections::HashMap<usize, Vec<LocalSpan>> =
-        std::collections::HashMap::new();
+/// and bucketing per-line slices into a 1-indexed [`LineSpans`]. Empty spans
+/// (insertions on input side, deletions on output side) are dropped: an empty
+/// underline is invisible and would emit useless escapes.
+fn group_spans_by_line(text: &str, spans: &[Replacement], side: SpanSide) -> LineSpans {
+    let mut map = LineSpans::default();
     if spans.is_empty() {
         return map;
     }
@@ -1513,10 +1550,13 @@ fn group_spans_by_line(
             if chunk_end > start {
                 let local_start = start - line_start;
                 let local_end = chunk_end - line_start;
-                map.entry(line_no).or_default().push(LocalSpan {
-                    start: local_start,
-                    end: local_end,
-                });
+                map.push(
+                    line_no,
+                    LocalSpan {
+                        start: local_start,
+                        end: local_end,
+                    },
+                );
             }
             if chunk_end == end {
                 break;
@@ -1765,12 +1805,12 @@ mod tests {
         let text = "foo\nbar\nbaz\n";
         let spans = vec![rep(0, 3, 0, 3), rep(4, 3, 4, 3)];
         let map = group_spans_by_line(text, &spans, SpanSide::Input);
-        assert_eq!(map.get(&1).unwrap().len(), 1);
-        assert_eq!(map.get(&1).unwrap()[0].start, 0);
-        assert_eq!(map.get(&1).unwrap()[0].end, 3);
-        assert_eq!(map.get(&2).unwrap()[0].start, 0);
-        assert_eq!(map.get(&2).unwrap()[0].end, 3);
-        assert!(!map.contains_key(&3));
+        assert_eq!(map.get(1).unwrap().len(), 1);
+        assert_eq!(map.get(1).unwrap()[0].start, 0);
+        assert_eq!(map.get(1).unwrap()[0].end, 3);
+        assert_eq!(map.get(2).unwrap()[0].start, 0);
+        assert_eq!(map.get(2).unwrap()[0].end, 3);
+        assert!(map.get(3).is_none());
     }
 
     #[test]
@@ -1780,11 +1820,11 @@ mod tests {
         let spans = vec![rep(1, 5, 1, 5)];
         let map = group_spans_by_line(text, &spans, SpanSide::Input);
         // line 1: "foo" - span covers bytes 1..3 locally.
-        let l1 = &map[&1];
+        let l1 = map.get(1).unwrap();
         assert_eq!(l1.len(), 1);
         assert_eq!((l1[0].start, l1[0].end), (1, 3));
         // line 2: "bar" - span covers bytes 0..2 locally.
-        let l2 = &map[&2];
+        let l2 = map.get(2).unwrap();
         assert_eq!(l2.len(), 1);
         assert_eq!((l2[0].start, l2[0].end), (0, 2));
     }
@@ -1861,10 +1901,10 @@ mod tests {
         let text = "foo\nbar\nbaz";
         let spans = vec![rep(8, 3, 8, 3)];
         let map = group_spans_by_line(text, &spans, SpanSide::Input);
-        assert_eq!(map.len(), 1);
-        let l3 = &map[&3];
+        let l3 = map.get(3).unwrap();
         assert_eq!(l3.len(), 1);
         assert_eq!((l3[0].start, l3[0].end), (0, 3));
+        assert!(map.get(1).is_none() && map.get(2).is_none());
     }
 
     #[test]
@@ -1881,7 +1921,7 @@ mod tests {
         ];
         let map = group_spans_by_line(text, &spans, SpanSide::Input);
         for (line_no, local_start) in [(1, 0), (3, 0), (5, 0), (7, 0), (9, 0)] {
-            let bucket = &map[&line_no];
+            let bucket = map.get(line_no).unwrap();
             assert_eq!(bucket.len(), 1);
             assert_eq!(
                 (bucket[0].start, bucket[0].end),
@@ -1997,8 +2037,8 @@ mod tests {
     #[test]
     fn numbered_writer_leaves_empty_side_plain_when_span_highlighting_is_active() {
         let mut out = String::new();
-        let old_line_spans = std::collections::HashMap::new();
-        let new_line_spans = std::collections::HashMap::new();
+        let old_line_spans = LineSpans::default();
+        let new_line_spans = LineSpans::default();
         let columns = std::collections::HashMap::new();
         let mut writer = NumberedDiffWriter {
             out: &mut out,
@@ -2019,8 +2059,8 @@ mod tests {
     #[test]
     fn numbered_writer_places_plain_markers_between_line_number_and_text() {
         let mut out = String::new();
-        let old_line_spans = std::collections::HashMap::new();
-        let new_line_spans = std::collections::HashMap::new();
+        let old_line_spans = LineSpans::default();
+        let new_line_spans = LineSpans::default();
         let columns = std::collections::HashMap::new();
         let mut writer = NumberedDiffWriter {
             out: &mut out,
@@ -2041,8 +2081,8 @@ mod tests {
     #[test]
     fn numbered_writer_pairs_old_and_new_lines_positionally() {
         let mut out = String::new();
-        let old_line_spans = std::collections::HashMap::new();
-        let new_line_spans = std::collections::HashMap::new();
+        let old_line_spans = LineSpans::default();
+        let new_line_spans = LineSpans::default();
         let columns = std::collections::HashMap::new();
         let mut writer = NumberedDiffWriter {
             out: &mut out,
