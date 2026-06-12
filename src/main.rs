@@ -1046,10 +1046,15 @@ fn display_path(path: &std::path::Path) -> String {
 }
 
 fn hyperlink_path(path: &std::path::Path) -> String {
+    // The working directory cannot change mid-run, so resolve it once
+    // instead of issuing a `getcwd` syscall per matched file.
+    static CWD: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+        CWD.get_or_init(|| std::env::current_dir().ok())
+            .as_ref()
+            .map_or_else(|| path.to_path_buf(), |cwd| cwd.join(path))
     };
     abs.to_string_lossy().to_string()
 }
@@ -1396,6 +1401,9 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     let needs_first_column = hyperlink_format
         .as_deref()
         .is_some_and(hyperlink_format_uses_column);
+    // The absolute link path is only consumed when a hyperlink format is
+    // active; skip the per-file path resolution entirely otherwise.
+    let needs_link_path = hyperlink_format.is_some();
     let render_inline_diff = will_render_color && !cli.quiet && expressions.len() == 1;
     let track_spans = (stdout_terminal && !cli.quiet && needs_first_column) || render_inline_diff;
     let build_diff = !cli.quiet;
@@ -1498,7 +1506,11 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 };
                 let payload = Ok(ReplacementResult {
                     path: display_path(path),
-                    link_path: hyperlink_path(path),
+                    link_path: if needs_link_path {
+                        hyperlink_path(path)
+                    } else {
+                        String::new()
+                    },
                     count,
                     diff,
                     columns,
