@@ -1414,6 +1414,13 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
 
     let expressions = Arc::new(compile_expressions(cli)?);
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
+    // A single expression's pre-filter matcher *is* its replacement regex, so
+    // a separate match probe just re-scans what `replace_all` would scan
+    // anyway. Read the file (NUL-probed for binary) and let the replacement
+    // pass answer match/no-match in one go - `count == 0` means no match and
+    // leaves the buffer borrowed. Multi-expression runs keep the union
+    // pre-filter, which skips non-matching files in one scan instead of N.
+    let single_expression = expressions.len() == 1;
 
     let stdout_terminal = std::io::stdout().is_terminal();
     let force_color = ui::color_choice() == ui::ColorChoice::Always;
@@ -1494,21 +1501,51 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 if skip_apply {
                     return WalkState::Continue;
                 }
-                let Some(contents) =
-                    scan::file_contents_if_matches(&mut searcher, &pre_filter, path, &mut scratch)
-                else {
-                    return WalkState::Continue;
+                // Acquire `contents` (owned) and the applied `updated`/`count`/
+                // `columns`, or bail out for non-matching files.
+                //
+                // Single-expression: read once and let the replacement pass
+                // itself be the match probe - applying on the borrowed scratch
+                // buffer means a non-matching text file leaves `scratch`
+                // untouched (capacity retained for the next file) and never
+                // allocates an owned copy. Multi-expression: run the union
+                // pre-filter first so non-matching files cost one scan, not N.
+                //
+                // `count > 0` guarantees `replace_all` produced an owned buffer,
+                // so `into_owned` never copies - it just releases the borrow so
+                // `scratch` can be taken (single) or `contents` moved (multi).
+                let (contents, updated, count, spans, columns) = if single_expression {
+                    if !scan::read_text_file(path, &mut scratch) {
+                        return WalkState::Continue;
+                    }
+                    let (updated, count, spans) =
+                        apply_compiled_expressions(&scratch, &expressions, track_spans);
+                    if count == 0 {
+                        return WalkState::Continue;
+                    }
+                    let columns =
+                        first_column_map_if_needed(needs_first_column, &scratch, &spans);
+                    let updated = updated.into_owned();
+                    (std::mem::take(&mut scratch), updated, count, spans, columns)
+                } else {
+                    let Some(contents) = scan::file_contents_if_matches(
+                        &mut searcher,
+                        &pre_filter,
+                        path,
+                        &mut scratch,
+                    ) else {
+                        return WalkState::Continue;
+                    };
+                    let (updated, count, spans) =
+                        apply_compiled_expressions(&contents, &expressions, track_spans);
+                    if count == 0 {
+                        return WalkState::Continue;
+                    }
+                    let columns =
+                        first_column_map_if_needed(needs_first_column, &contents, &spans);
+                    let updated = updated.into_owned();
+                    (contents, updated, count, spans, columns)
                 };
-                let (updated, count, spans) =
-                    apply_compiled_expressions(&contents, &expressions, track_spans);
-                if count == 0 {
-                    return WalkState::Continue;
-                }
-                let columns = first_column_map_if_needed(needs_first_column, &contents, &spans);
-                // `count > 0` guarantees the replacement produced an owned
-                // buffer, so `into_owned` never copies; it just releases the
-                // borrow of `contents` so both buffers can move into the diff.
-                let updated = updated.into_owned();
                 if write && let Err(e) = std::fs::write(path, &updated) {
                     let payload =
                         Err(anyhow::Error::new(e).context(format!("Unable to write to {path:?}")));

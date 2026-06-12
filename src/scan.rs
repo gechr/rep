@@ -126,6 +126,19 @@ pub(crate) fn file_contents_if_matches(
     path: &Path,
     scratch: &mut Vec<u8>,
 ) -> Option<Vec<u8>> {
+    if !read_into(path, scratch) {
+        return None;
+    }
+    let mut sink = MatchSink::new();
+    if let Err(e) = searcher.search_slice(matcher, scratch, &mut sink) {
+        eprintln!("Warning: {}: {e}", path.display());
+    }
+    sink.did_match.then(|| std::mem::take(scratch))
+}
+
+/// Reads `path` into `scratch` (reusing its capacity), warning and returning
+/// `false` on I/O errors.
+fn read_into(path: &Path, scratch: &mut Vec<u8>) -> bool {
     use std::io::Read as _;
 
     scratch.clear();
@@ -137,13 +150,18 @@ pub(crate) fn file_contents_if_matches(
     });
     if let Err(e) = read {
         eprintln!("Warning: {}: {e}", path.display());
-        return None;
+        return false;
     }
-    let mut sink = MatchSink::new();
-    if let Err(e) = searcher.search_slice(matcher, scratch, &mut sink) {
-        eprintln!("Warning: {}: {e}", path.display());
-    }
-    sink.did_match.then(|| std::mem::take(scratch))
+    true
+}
+
+/// Reads `path` into `scratch` and reports whether it is searchable text.
+/// Returns `false` when the file cannot be read or contains a NUL byte - the
+/// same binary heuristic as the grep searchers' `BinaryDetection::quit`.
+/// Single-expression runs use this to skip the pre-filter scan entirely and
+/// let the replacement regex itself answer match/no-match in one pass.
+pub(crate) fn read_text_file(path: &Path, scratch: &mut Vec<u8>) -> bool {
+    read_into(path, scratch) && memchr::memchr(b'\x00', scratch).is_none()
 }
 
 pub(crate) fn file_matches(searcher: &mut Searcher, matcher: &RegexMatcher, path: &Path) -> bool {
