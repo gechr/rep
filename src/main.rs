@@ -423,6 +423,12 @@ struct Cli {
 const DEFAULT_CONTEXT_LINES: usize = 3;
 const DEFAULT_HYPERLINK_LIMIT: u64 = 50_000;
 
+/// Stdout buffer size for result printing. Large replacement runs emit tens
+/// of megabytes of escape-laden diff text; flushing it in big chunks keeps
+/// the write-syscall count low and hands the terminal bigger batches to
+/// parse per wakeup than the 8 KiB `BufWriter` default would.
+const OUTPUT_BUFFER_CAPACITY: usize = 256 * 1024;
+
 const HELP_SECTIONS: &[&str] = &["Filter", "Match", "Replace", "Mode", "Miscellaneous"];
 const LONG_HELP_SECTIONS: &[&str] = &[
     "Filter",
@@ -1390,7 +1396,7 @@ fn run_list_files(cli: &Cli) -> Result<()> {
     // One lock + buffer for the whole listing; `println!` would re-lock
     // stdout per path. A failed write (e.g. closed pipe) ends the listing.
     let stdout = std::io::stdout().lock();
-    let mut out = std::io::BufWriter::new(stdout);
+    let mut out = std::io::BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, stdout);
     for path in &paths {
         if writeln!(out, "{path}").is_err() {
             break;
@@ -1715,7 +1721,7 @@ impl ResultPrinter<'_> {
         }
 
         let stdout = std::io::stdout().lock();
-        let mut stdout = std::io::BufWriter::new(stdout);
+        let mut stdout = std::io::BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, stdout);
         drop(self.write_colored_results_to(results, &mut stdout));
     }
 
@@ -1815,7 +1821,7 @@ impl ResultPrinter<'_> {
 
     fn print_patch_results(&self, results: &[ReplacementResult]) {
         let stdout = std::io::stdout().lock();
-        let mut stdout = std::io::BufWriter::new(stdout);
+        let mut stdout = std::io::BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, stdout);
         drop(self.write_patch_results_to(results, &mut stdout));
     }
 
