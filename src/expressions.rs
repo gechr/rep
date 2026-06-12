@@ -738,6 +738,24 @@ pub(crate) fn first_column_map_for_expressions(
     Some(byte_offsets_to_line_first_column(input, &offsets))
 }
 
+/// Per-line first-column map keyed by each span's position in the rewritten
+/// `output`, mirroring `first_column_map_if_needed`'s input-side map. The new
+/// side of a line-shifting diff renumbers its lines, so a `{column}` link on a
+/// green line must resolve against the output line it actually lands on rather
+/// than the input map keyed by old line numbers. `output_start` values are
+/// ascending (spans are recorded left to right). Returns `None` when unneeded.
+pub(crate) fn output_first_column_map(
+    needed: bool,
+    output: &[u8],
+    spans: &[Replacement],
+) -> Option<std::collections::HashMap<usize, usize>> {
+    if !needed {
+        return None;
+    }
+    let output_starts: Vec<usize> = spans.iter().map(|s| s.output_start).collect();
+    Some(byte_offsets_to_line_first_column(output, &output_starts))
+}
+
 /// Walks `input` once, mapping an ascending slice of byte offsets to the
 /// 1-indexed `(line, column)` of the first match on each line. Single linear
 /// pass, `O(input.len() + offsets.len())`, using a stateful `memchr_iter`

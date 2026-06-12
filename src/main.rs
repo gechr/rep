@@ -57,7 +57,7 @@ use diffy::DiffOptions;
 use crate::expressions::{
     CompiledExpression, EXPR_SEP, Replacement, apply_compiled_expressions,
     build_pre_filter_matcher, compile_expressions, first_column_map_for_expressions,
-    first_column_map_if_needed,
+    first_column_map_if_needed, output_first_column_map,
 };
 use crate::ui::Color;
 use crate::ui::ColorChoice;
@@ -72,6 +72,10 @@ struct ReplacementResult {
     /// fill `{column}` in per-line hyperlinks. `None` when position tracking
     /// was disabled (no `{column}` placeholder in the hyperlink format).
     columns: Option<std::collections::HashMap<usize, usize>>,
+    /// Same map keyed by the rewritten file's line numbers, for `{column}` on
+    /// the new side of a line-shifting diff. `None` unless the replacement adds
+    /// or removes newlines (the only case where new line numbers diverge).
+    out_columns: Option<std::collections::HashMap<usize, usize>>,
     /// Per-replacement input/output spans, populated when span tracking is
     /// enabled and the run uses a single expression. Drives inline highlight.
     spans: Vec<Replacement>,
@@ -1552,7 +1556,8 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 // `count > 0` guarantees `replace_all` produced an owned buffer,
                 // so `into_owned` never copies - it just releases the borrow so
                 // `scratch` can be taken (single) or `contents` moved (multi).
-                let (contents, updated, count, spans, columns) = if single_expression {
+                let (contents, updated, count, spans, columns, out_columns) = if single_expression
+                {
                     if !scan::read_text_file(path, &mut scratch) {
                         return WalkState::Continue;
                     }
@@ -1564,7 +1569,23 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                     let columns =
                         first_column_map_if_needed(needs_first_column, &scratch, &spans);
                     let updated = updated.into_owned();
-                    (std::mem::take(&mut scratch), updated, count, spans, columns)
+                    // The new side renumbers its lines only when a replacement
+                    // adds or removes newlines (`multiline_span_diff`); the
+                    // output-keyed map lets green-side `{column}` links resolve
+                    // there. Boundary-preserving diffs reuse the input map.
+                    let out_columns = output_first_column_map(
+                        needs_first_column && multiline_span_diff,
+                        &updated,
+                        &spans,
+                    );
+                    (
+                        std::mem::take(&mut scratch),
+                        updated,
+                        count,
+                        spans,
+                        columns,
+                        out_columns,
+                    )
                 } else {
                     let Some(contents) = scan::file_contents_if_matches(
                         &mut searcher,
@@ -1585,7 +1606,11 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                         &expressions,
                     );
                     let updated = updated.into_owned();
-                    (contents, updated, count, spans, columns)
+                    // Multi-expression replacement spans share no coordinate
+                    // space across the chain, so the new side has no reliable
+                    // output column map; the green side falls back to col 1 on
+                    // the rare line-shifting multi-expression diff.
+                    (contents, updated, count, spans, columns, None)
                 };
                 if write && let Err(e) = std::fs::write(path, &updated) {
                     let payload =
@@ -1624,6 +1649,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                     count,
                     diff,
                     columns,
+                    out_columns,
                     spans: if render_inline_diff { spans } else { Vec::new() },
                     linewise_diff,
                     multiline_span_diff,
@@ -1954,6 +1980,7 @@ impl ResultPrinter<'_> {
                 template,
                 &encoded_path,
                 result.columns.as_ref(),
+                result.out_columns.as_ref(),
                 // In dry-run the file on disk is the original (old side); after
                 // a write it is the rewritten version (new side). Per-line links
                 // on line-shifting diffs target whichever side is on disk.
@@ -2782,6 +2809,7 @@ mod tests {
             count: 1,
             diff: Some(("foo\n".to_string(), "bar\n".to_string())),
             columns: None,
+            out_columns: None,
             spans: Vec::new(),
             linewise_diff: false,
             multiline_span_diff: false,
@@ -2819,6 +2847,7 @@ mod tests {
             count: 1,
             diff: Some(("foo\n".to_string(), "bar\n".to_string())),
             columns: None,
+            out_columns: None,
             spans: Vec::new(),
             linewise_diff: false,
             multiline_span_diff: false,
@@ -2852,6 +2881,7 @@ mod tests {
             count: 1,
             diff: Some(("foo\n".to_string(), "bar\n".to_string())),
             columns: None,
+            out_columns: None,
             spans: Vec::new(),
             linewise_diff: false,
             multiline_span_diff: false,

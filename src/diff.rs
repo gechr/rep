@@ -51,6 +51,10 @@ struct Hyperlinks<'a> {
     /// 1-indexed line -> first-match column. `None` when not tracked; lookups
     /// for absent lines fall back to column 1 inside `HyperlinkTemplate::render`.
     columns: Option<&'a std::collections::HashMap<usize, usize>>,
+    /// Same map keyed by the rewritten file's line numbers. When present, the
+    /// new/green side resolves `{column}` against this instead of `columns`, so
+    /// links on a line-shifting diff land on the correct output column.
+    out_columns: Option<&'a std::collections::HashMap<usize, usize>>,
     /// Cached: emit a per-line OSC 8 link only when colored (`!plain`) and the
     /// template varies by line (`{line}`/`{column}`). A format that references
     /// only `{path}`/`{host}` produces the same link on every line as the file
@@ -69,6 +73,7 @@ impl<'a> Hyperlinks<'a> {
         template: Option<&'a crate::HyperlinkTemplate<'a>>,
         encoded_path: &'a str,
         columns: Option<&'a std::collections::HashMap<usize, usize>>,
+        out_columns: Option<&'a std::collections::HashMap<usize, usize>>,
         plain: bool,
     ) -> Self {
         let link_lines = !plain && template.is_some_and(crate::HyperlinkTemplate::links_lines);
@@ -76,6 +81,7 @@ impl<'a> Hyperlinks<'a> {
             template,
             encoded_path,
             columns,
+            out_columns,
             link_lines,
             link_side: None,
         }
@@ -101,10 +107,18 @@ impl<'a> Hyperlinks<'a> {
             out.push_str(text);
             return;
         }
-        let column = self
-            .columns
-            .and_then(|m| m.get(&line).copied())
-            .unwrap_or(0);
+        // The new side renumbers its lines on a line-shifting diff, so it reads
+        // `{column}` from the output-keyed map when one was built; every other
+        // case (old side, or a diff that preserves line numbers) uses `columns`.
+        let column = if side == Color::Green
+            && let Some(out_columns) = self.out_columns
+        {
+            out_columns.get(&line).copied().unwrap_or(0)
+        } else {
+            self.columns
+                .and_then(|m| m.get(&line).copied())
+                .unwrap_or(0)
+        };
         out.push_str("\x1b]8;;");
         template.render_into(out, self.encoded_path, line, column);
         out.push_str("\x1b\\");
@@ -122,10 +136,17 @@ pub(crate) fn print_file_line_diff<W: std::io::Write>(
     hyperlink_template: Option<&crate::HyperlinkTemplate<'_>>,
     encoded_path: &str,
     columns: Option<&std::collections::HashMap<usize, usize>>,
+    out_columns: Option<&std::collections::HashMap<usize, usize>>,
     on_disk_side: Color,
     out: &mut W,
 ) {
-    let hyperlinks = Hyperlinks::new(hyperlink_template, encoded_path, columns, styles.is_plain());
+    let hyperlinks = Hyperlinks::new(
+        hyperlink_template,
+        encoded_path,
+        columns,
+        out_columns,
+        styles.is_plain(),
+    );
     let mut trimmed: Vec<Replacement> = Vec::with_capacity(hints.spans.len());
     for &span in hints.spans {
         let t = trim_shared_affixes(span, old, new);
@@ -2067,7 +2088,7 @@ mod tests {
             out: &mut out,
             width: 1,
             styles: Styles::ansi(),
-            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), false),
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), None, false),
             span_highlighting: true,
             old_line_spans: &old_line_spans,
             new_line_spans: &new_line_spans,
@@ -2089,7 +2110,7 @@ mod tests {
             out: &mut out,
             width: 4,
             styles: Styles::PLAIN,
-            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), true),
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), None, true),
             span_highlighting: true,
             old_line_spans: &old_line_spans,
             new_line_spans: &new_line_spans,
@@ -2111,7 +2132,7 @@ mod tests {
             out: &mut out,
             width: 1,
             styles: Styles::ansi(),
-            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), false),
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), None, false),
             span_highlighting: true,
             old_line_spans: &old_line_spans,
             new_line_spans: &new_line_spans,
@@ -2152,6 +2173,7 @@ mod tests {
             Some(&template),
             "a.txt",
             None,
+            None,
             Color::Red,
             &mut out,
         );
@@ -2185,6 +2207,7 @@ mod tests {
             Some(&template),
             "a.txt",
             None,
+            None,
             Color::Green,
             &mut out,
         );
@@ -2197,6 +2220,46 @@ mod tests {
         assert!(
             !out.contains("app://a.txt:3:"),
             "old-only line must not be linked after a write: {out:?}"
+        );
+    }
+
+    #[test]
+    fn write_shifting_diff_resolves_new_column_from_output_map() {
+        // The new side renumbers its lines, so its `{column}` must come from the
+        // output-keyed map, never the input `columns` map keyed by old lines.
+        let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
+        let columns: std::collections::HashMap<usize, usize> = [(2, 99)].into_iter().collect();
+        let out_columns: std::collections::HashMap<usize, usize> =
+            [(2, 7), (3, 4)].into_iter().collect();
+        let mut out = Vec::new();
+        print_file_line_diff(
+            "a\nb\nc\n",
+            "a\nB\nB2\nc\n",
+            DiffHints {
+                spans: &[],
+                linewise: false,
+                multiline_spans: false,
+            },
+            Styles::ansi(),
+            Some(&template),
+            "a.txt",
+            Some(&columns),
+            Some(&out_columns),
+            Color::Green,
+            &mut out,
+        );
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("\x1b]8;;app://a.txt:2:7"),
+            "green line 2 must use the output map column: {out:?}"
+        );
+        assert!(
+            out.contains("\x1b]8;;app://a.txt:3:4"),
+            "green line 3 must use the output map column: {out:?}"
+        );
+        assert!(
+            !out.contains(":2:99"),
+            "green side must not read the input column map: {out:?}"
         );
     }
 
@@ -2217,6 +2280,7 @@ mod tests {
             Styles::ansi(),
             Some(&template),
             "a.txt",
+            None,
             None,
             Color::Red,
             &mut out,
