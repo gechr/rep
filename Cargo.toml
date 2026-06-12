@@ -115,3 +115,6 @@ while_let_loop = "warn"
 [lints.rust]
 let_underscore_drop = "warn"
 redundant_imports = "warn"
+# `rep_bench` gates the nightly `#[bench]` module (see src/benches.rs); it is
+# set only by `make bench`, never on a normal stable build.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rep_bench)'] }

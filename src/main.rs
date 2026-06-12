@@ -1,3 +1,11 @@
+// `rep_bench` enables the unstable `test` crate for the nightly `#[bench]`
+// module. Gated so stable builds (and `make`) never see it; set only by
+// `make bench` via `RUSTFLAGS="--cfg rep_bench"`.
+#![cfg_attr(rep_bench, feature(test))]
+
+#[cfg(rep_bench)]
+extern crate test;
+
 mod config;
 mod diff;
 mod expressions;
@@ -7,6 +15,9 @@ mod scan;
 mod test_env;
 mod theme;
 mod ui;
+
+#[cfg(rep_bench)]
+mod benches;
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;

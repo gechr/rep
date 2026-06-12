@@ -3,6 +3,16 @@ CARGO ?= cargo
 .PHONY: all
 all: fmt lint test
 
+.PHONY: bench
+bench:
+	@RUSTC="$$(rustup which --toolchain nightly rustc)" \
+		RUSTFLAGS="--cfg rep_bench" \
+		"$$(rustup which --toolchain nightly cargo)" bench
+
+.PHONY: bench-e2e
+bench-e2e:
+	@./scripts/bench.sh
+
 .PHONY: build
 build:
 	@$(CARGO) build --release --bin rep
