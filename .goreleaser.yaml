@@ -42,4 +42,4 @@ scoops:
     directory: bucket
     homepage: https://github.com/gechr/rep
     description: Fast find-and-replace tool
-    license: MIT
+    license: Apache-2.0

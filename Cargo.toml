@@ -18,13 +18,19 @@ grep = "0"
 ignore = "0"
 memchr = "2"
 natord = "1"
-num-format = { version = "0", features = ["with-system-locale"] }
+num-format = "0"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 shlex = "2"
 tempfile = "3"
 toml = "1"
 similar = { version = "3.1.1", default-features = false }
+
+# `with-system-locale` pulls in num-format-windows, whose build script needs the
+# Windows SDK and so can't be cross-compiled. Enable it off-Windows only; on
+# Windows `with_commas` falls back to the static English locale.
+[target.'cfg(not(windows))'.dependencies]
+num-format = { version = "0", features = ["with-system-locale"] }
 
 [profile.release]
 opt-level = 3

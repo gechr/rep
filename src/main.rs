@@ -1748,10 +1748,12 @@ where
     n.to_formatted_string(format)
 }
 
+#[cfg(not(windows))]
 fn has_ambiguous_digit_group_separator(separator: &str) -> bool {
     separator.chars().all(char::is_whitespace)
 }
 
+#[cfg(not(windows))]
 fn with_commas(n: usize) -> String {
     use std::sync::OnceLock;
     static SYSTEM_LOCALE: OnceLock<Option<num_format::SystemLocale>> = OnceLock::new();
@@ -1766,6 +1768,14 @@ fn with_commas(n: usize) -> String {
         Some(loc) => format_count(n, loc),
         None => format_count(n, &num_format::Locale::en),
     }
+}
+
+// Windows has no `num-format` system-locale support (it needs the Windows SDK at
+// build time, unavailable when cross-compiling), so use the static English
+// locale.
+#[cfg(windows)]
+fn with_commas(n: usize) -> String {
+    format_count(n, &num_format::Locale::en)
 }
 
 fn summary_message_with_formatter<F>(
