@@ -8,11 +8,20 @@ By default `rep` prints a diff without touching the filesystem; pass `--write` t
 
 ## Install
 
+### macOS
+
 ```shell
 brew install gechr/tap/rep
 ```
 
-Or with Cargo:
+### Windows
+
+```shell
+scoop bucket add gechr https://github.com/gechr/scoop-bucket
+scoop install gechr/rep
+```
+
+### Cargo
 
 ```shell
 cargo install --git https://github.com/gechr/rep

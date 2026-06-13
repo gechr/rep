@@ -37,6 +37,14 @@ jobs:
           repositories: homebrew-tap
           permission-contents: write
 
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: scoop-token
+        with:
+          client-id: ${{ vars.RELEASER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASER_APP_PRIVATE_KEY }}
+          repositories: scoop-bucket
+          permission-contents: write
+
       - uses: taiki-e/install-action@e49978b799e49ff429d162b7a30601a569ab6538 # v2.81.1
         with:
           tool: cargo-zigbuild
@@ -52,6 +60,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SCOOP_GITHUB_TOKEN: ${{ steps.scoop-token.outputs.token }}
 
       - uses: gechr/homebrew-publish-formula@04c96853dce59cfbfca97503d2cc625cb3321cee # v1.0.5
         with:
