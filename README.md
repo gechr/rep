@@ -8,7 +8,7 @@ By default `rep` prints a diff without touching the filesystem; pass `--write` t
 
 ## Install
 
-### macOS
+### macOS / Linux
 
 ```shell
 brew install gechr/tap/rep
