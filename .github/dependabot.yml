@@ -11,6 +11,8 @@ updates:
       github-actions:
         patterns:
           - "*"
+    ignore:
+      - dependency-name: gechr/actions
 
   - package-ecosystem: cargo
     cooldown:
