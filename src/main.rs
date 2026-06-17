@@ -246,6 +246,7 @@ struct Cli {
         short = 'W',
         short_alias = 'y',
         long = "write",
+        alias = "yes",
         env = "REP_WRITE",
         value_parser = BoolishValueParser::new(),
         help = "Apply changes to disk",
