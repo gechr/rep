@@ -73,6 +73,9 @@ rep -e foo bar -e baz qux src
 
 # Delete every line containing "TODO"
 rep -d TODO
+
+# Print only the total number of replacements
+rep --count foo bar
 ```
 
 Run `rep --help` for the full reference, including the styling and hyperlink flags.

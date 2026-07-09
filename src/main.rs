@@ -283,6 +283,14 @@ struct Cli {
     list_files: bool,
 
     #[arg(
+        short = 'c',
+        long = "count",
+        help = "Print the total number of replacements",
+        help_heading = "Mode"
+    )]
+    count: bool,
+
+    #[arg(
         short = 'C',
         long = "context",
         value_name = "n",
@@ -542,12 +550,13 @@ fn resolve_mutex_groups(
     let mode = resolve_group(
         matches,
         origin,
-        &["dry_run", "write", "preview", "list_files"],
+        &["dry_run", "write", "preview", "list_files", "count"],
     )?;
     cli.dry_run = mode == Some("dry_run");
     cli.write = mode == Some("write");
     cli.preview = mode == Some("preview");
     cli.list_files = mode == Some("list_files");
+    cli.count = mode == Some("count");
 
     if cli.list_files && preview_tool_active(cli, matches) {
         resolve_list_files_vs_preview_tool(cli, matches, origin)?;
@@ -1736,6 +1745,97 @@ fn run_stdin(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// `--count` mode: apply the replacements and print only the total number of
+/// replacements to stdout, one integer with no separators (script-friendly).
+/// Nothing is written to disk and no diff is rendered. When reading from stdin
+/// the whole input is transformed once; otherwise the file tree is walked in
+/// parallel and each file's replacement count is summed.
+fn run_count(cli: &Cli, is_stdin: bool) -> Result<()> {
+    use std::io::Read as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ignore::WalkState;
+
+    let expressions = Arc::new(compile_expressions(cli)?);
+
+    if is_stdin {
+        let mut input = Vec::new();
+        std::io::stdin().lock().read_to_end(&mut input)?;
+        let (_, count, _) = apply_compiled_expressions(&input, &expressions, false);
+        println!("{count}");
+        return Ok(());
+    }
+
+    let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
+    // A single expression's pre-filter matcher is its own replacement regex, so
+    // reading the file and letting the replacement pass double as the match
+    // probe avoids a redundant scan; a non-matching file leaves `scratch`
+    // borrowed and allocates nothing. Multi-expression runs keep the union
+    // pre-filter so non-matching files cost one scan instead of N.
+    let single_expression = expressions.len() == 1;
+
+    let dirs = cli.dirs();
+    let mut builder = scan::walk_builder_with_file_set(&dirs, cli.file_set())?;
+    scan::apply_walk_flags(&mut builder, cli.hidden, cli.no_ignore);
+    let walk = builder
+        .threads(std::cmp::min(
+            12,
+            std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        ))
+        .build_parallel();
+
+    let total = Arc::new(AtomicUsize::new(0));
+    let walk_expressions = Arc::clone(&expressions);
+    let walk_total = Arc::clone(&total);
+
+    walk.run(|| {
+        let mut searcher = scan::make_searcher();
+        let mut scratch = Vec::new();
+        let expressions = Arc::clone(&walk_expressions);
+        let pre_filter = pre_filter.clone();
+        let total = Arc::clone(&walk_total);
+        Box::new(move |result| {
+            let dirent = match result {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Warning: {e}");
+                    return WalkState::Continue;
+                }
+            };
+            if dirent.file_type().is_none_or(|ft| !ft.is_file()) {
+                return WalkState::Continue;
+            }
+            let path = dirent.path();
+            if !scan::is_candidate_path(path) {
+                return WalkState::Continue;
+            }
+            let count = if single_expression {
+                if !scan::read_text_file(path, &mut scratch) {
+                    return WalkState::Continue;
+                }
+                let (_, count, _) = apply_compiled_expressions(&scratch, &expressions, false);
+                count
+            } else {
+                let Some(contents) =
+                    scan::file_contents_if_matches(&mut searcher, &pre_filter, path, &mut scratch)
+                else {
+                    return WalkState::Continue;
+                };
+                let (_, count, _) = apply_compiled_expressions(&contents, &expressions, false);
+                count
+            };
+            if count > 0 {
+                total.fetch_add(count, Ordering::Relaxed);
+            }
+            WalkState::Continue
+        })
+    });
+
+    println!("{}", total.load(Ordering::Relaxed));
+    Ok(())
+}
+
 /// Render `n` using the system locale's thousands separator (e.g. `648098` -> `648,098`
 /// on `en_US`, `648.098` on `de_DE`). Locales whose separator is whitespace (`fr_FR`'s NBSP,
 /// `sv_SE`'s regular space, etc.) fall back to `,` because a space inside a count is
@@ -2129,7 +2229,9 @@ fn run() -> Result<()> {
         bail!("--preview requires an interactive terminal");
     }
 
-    if is_stdin_mode {
+    if cli.count {
+        run_count(&cli, is_stdin_mode)
+    } else if is_stdin_mode {
         run_stdin(&cli)
     } else if cli.write {
         run_walk_and_apply(&cli, true)
@@ -2213,6 +2315,10 @@ mod tests {
             ["rep", "--list-files", "--write", "a", "b"].as_slice(),
             ["rep", "--list-files", "--preview", "a", "b"].as_slice(),
             ["rep", "--list-files", "--dry-run", "a", "b"].as_slice(),
+            ["rep", "--count", "--write", "a", "b"].as_slice(),
+            ["rep", "--count", "--dry-run", "a", "b"].as_slice(),
+            ["rep", "--count", "--preview", "a", "b"].as_slice(),
+            ["rep", "--count", "--list-files", "a", "b"].as_slice(),
         ] {
             assert!(
                 parse_and_resolve(args).is_err(),

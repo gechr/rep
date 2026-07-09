@@ -922,6 +922,7 @@ Mode
       --preview-tool <cmd>      External diff tool for preview mode
 
   -l, --list-files              Print file paths that would be changed
+  -c, --count                   Print the total number of replacements
 
 Miscellaneous
 
@@ -992,6 +993,7 @@ Mode
       --preview-tool <cmd>      External diff tool for preview mode
 
   -l, --list-files              Print file paths that would be changed
+  -c, --count                   Print the total number of replacements
 
 Miscellaneous
 
