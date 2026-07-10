@@ -460,6 +460,140 @@ const OUTPUT_BUFFER_CAPACITY: usize = 256 * 1024;
 const PARALLEL_RENDER_FILE_THRESHOLD: usize = 32;
 const PARALLEL_RENDER_BYTE_THRESHOLD: usize = 1024 * 1024;
 
+/// Estimated rendered bytes that may sit ahead of stdout before render
+/// workers stall. Small blocks are admitted far ahead so tiny-file runs never
+/// contend on the window; only runs of large blocks are throttled.
+const RENDER_WINDOW_BYTE_BUDGET: usize = 32 * 1024 * 1024;
+
+/// Coordinates parallel block rendering with in-order writing. Workers claim
+/// block indices while the estimated bytes outstanding fit the byte budget
+/// (with a minimum block look-ahead so progress never stalls), deposit
+/// finished blocks, and the single writer pops them in index order.
+struct RenderWindow {
+    state: std::sync::Mutex<RenderWindowState>,
+    /// Signaled when `written` advances and claimers are waiting.
+    advanced: std::sync::Condvar,
+    /// Signaled when the block the writer needs next is deposited.
+    deposited: std::sync::Condvar,
+    len: usize,
+    min_ahead: usize,
+    /// `prefix_bytes[i]` estimates the rendered bytes of blocks `[0, i)`.
+    prefix_bytes: Vec<usize>,
+}
+
+struct RenderWindowState {
+    next_claim: usize,
+    written: usize,
+    waiters: usize,
+    canceled: bool,
+    blocks: std::collections::BTreeMap<usize, Vec<u8>>,
+}
+
+impl RenderWindow {
+    const fn new(prefix_bytes: Vec<usize>, min_ahead: usize) -> Self {
+        Self {
+            state: std::sync::Mutex::new(RenderWindowState {
+                next_claim: 0,
+                written: 0,
+                waiters: 0,
+                canceled: false,
+                blocks: std::collections::BTreeMap::new(),
+            }),
+            advanced: std::sync::Condvar::new(),
+            deposited: std::sync::Condvar::new(),
+            len: prefix_bytes.len().saturating_sub(1),
+            min_ahead,
+            prefix_bytes,
+        }
+    }
+
+    fn claim(&self) -> Option<usize> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if state.canceled || state.next_claim >= self.len {
+                return None;
+            }
+            let idx = state.next_claim;
+            let outstanding = self.prefix_bytes[idx + 1] - self.prefix_bytes[state.written];
+            if idx < state.written.saturating_add(self.min_ahead)
+                || outstanding <= RENDER_WINDOW_BYTE_BUDGET
+            {
+                state.next_claim = idx + 1;
+                return Some(idx);
+            }
+            state.waiters += 1;
+            state = self
+                .advanced
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.waiters -= 1;
+        }
+    }
+
+    fn deposit(&self, idx: usize, block: Vec<u8>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let wanted = idx == state.written;
+        state.blocks.insert(idx, block);
+        if wanted {
+            self.deposited.notify_one();
+        }
+    }
+
+    /// Wait for the next block in index order, marking it written so claimers
+    /// may advance while the caller streams it out.
+    fn pop_next(&self) -> Option<Vec<u8>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if state.canceled || state.written >= self.len {
+                return None;
+            }
+            let written = state.written;
+            if let Some(block) = state.blocks.remove(&written) {
+                state.written += 1;
+                if state.waiters > 0 {
+                    self.advanced.notify_all();
+                }
+                return Some(block);
+            }
+            state = self
+                .deposited
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.canceled = true;
+        self.advanced.notify_all();
+        self.deposited.notify_one();
+    }
+}
+
+/// Cancels the window when a render worker unwinds, so the writer errors out
+/// instead of waiting forever for a block that will never be deposited.
+struct CancelOnPanic<'a>(&'a RenderWindow);
+
+impl Drop for CancelOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.cancel();
+        }
+    }
+}
+
 const HELP_SECTIONS: &[&str] = &["Filter", "Match", "Replace", "Mode", "Miscellaneous"];
 const LONG_HELP_SECTIONS: &[&str] = &[
     "Filter",
@@ -1972,13 +2106,7 @@ impl ResultPrinter<'_> {
         // Render them across threads, then emit the finished blocks in order.
         // The hyperlink-limit decision above is global (it needs the total
         // match count), so it has to precede this fan-out.
-        let blocks = self.render_blocks(results, styles, template.as_ref());
-        for (idx, block) in blocks.iter().enumerate() {
-            out.write_all(block)?;
-            if !self.quiet && idx + 1 < results.len() {
-                writeln!(out)?;
-            }
-        }
+        self.write_rendered_blocks(results, styles, template.as_ref(), out)?;
 
         if total_files > 0 {
             let color = if self.dry {
@@ -2010,17 +2138,16 @@ impl ResultPrinter<'_> {
         Ok(())
     }
 
-    /// Render every result's block in parallel, preserving input order. Small
-    /// runs render inline - the thread setup would cost more than it saves -
-    /// while large runs fan out across the same thread budget the walk uses.
-    fn render_blocks(
+    /// Render every result's block, preserving input order and keeping only a
+    /// small window of completed blocks ahead of stdout. Small runs render
+    /// inline; larger runs fan out across the same thread budget as the walk.
+    fn write_rendered_blocks<W: std::io::Write>(
         &self,
         results: &[ReplacementResult],
         styles: Styles,
         template: Option<&HyperlinkTemplate<'_>>,
-    ) -> Vec<Vec<u8>> {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
+        out: &mut W,
+    ) -> std::io::Result<()> {
         let threads = std::cmp::min(
             results.len(),
             std::cmp::min(
@@ -2036,40 +2163,65 @@ impl ResultPrinter<'_> {
             total.saturating_add(diff_bytes)
         });
         if !should_render_in_parallel(results.len(), work_bytes, threads) {
-            return results
-                .iter()
-                .map(|result| self.render_block(result, styles, template))
-                .collect();
+            for (idx, result) in results.iter().enumerate() {
+                let block = self.render_block(result, styles, template);
+                self.write_rendered_block(out, &block, idx, results.len())?;
+            }
+            return Ok(());
         }
 
-        let next = AtomicUsize::new(0);
+        let mut prefix_bytes = Vec::with_capacity(results.len() + 1);
+        prefix_bytes.push(0usize);
+        for result in results {
+            // Estimate each block as its diff text plus a small allowance for
+            // the path header line.
+            let block_bytes = result
+                .diff
+                .as_ref()
+                .map_or(0, |(old, new)| old.len().saturating_add(new.len()))
+                .saturating_add(result.path.len())
+                .saturating_add(64);
+            let total = prefix_bytes.last().copied().unwrap_or(0);
+            prefix_bytes.push(total.saturating_add(block_bytes));
+        }
+        let window = RenderWindow::new(prefix_bytes, threads.saturating_mul(2));
         std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..threads)
-                .map(|_| {
-                    let next = &next;
-                    scope.spawn(move || {
-                        let mut blocks = Vec::new();
-                        loop {
-                            let idx = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(result) = results.get(idx) else {
-                                break;
-                            };
-                            blocks.push((idx, self.render_block(result, styles, template)));
-                        }
-                        blocks
-                    })
-                })
-                .collect();
-            let mut ordered: Vec<Option<Vec<u8>>> = std::iter::repeat_with(|| None)
-                .take(results.len())
-                .collect();
-            for handle in handles {
-                for (idx, block) in handle.join().unwrap_or_default() {
-                    ordered[idx] = Some(block);
+            for _ in 0..threads {
+                let window = &window;
+                scope.spawn(move || {
+                    let _cancel_on_panic = CancelOnPanic(window);
+                    while let Some(idx) = window.claim() {
+                        let block = self.render_block(&results[idx], styles, template);
+                        window.deposit(idx, block);
+                    }
+                });
+            }
+
+            for idx in 0..results.len() {
+                let Some(block) = window.pop_next() else {
+                    return Err(std::io::Error::other("render workers stopped early"));
+                };
+                if let Err(e) = self.write_rendered_block(out, &block, idx, results.len()) {
+                    window.cancel();
+                    return Err(e);
                 }
             }
-            ordered.into_iter().map(Option::unwrap_or_default).collect()
+            Ok(())
         })
+    }
+
+    fn write_rendered_block<W: std::io::Write>(
+        &self,
+        out: &mut W,
+        block: &[u8],
+        idx: usize,
+        total: usize,
+    ) -> std::io::Result<()> {
+        out.write_all(block)?;
+        if !self.quiet && idx + 1 < total {
+            writeln!(out)?;
+        }
+        Ok(())
     }
 
     /// Render one file's block: the magenta path header line plus, unless
@@ -3069,6 +3221,47 @@ mod tests {
             0,
             12
         ));
+    }
+
+    #[test]
+    fn test_parallel_render_stream_preserves_result_order() {
+        let printer = ResultPrinter {
+            quiet: false,
+            delete: false,
+            dry: true,
+            no_hints: true,
+            hyperlink_format: None,
+            hyperlink_limit: 0,
+            context_lines: 3,
+        };
+        let results: Vec<_> = (0..PARALLEL_RENDER_FILE_THRESHOLD)
+            .map(|idx| ReplacementResult {
+                path: format!("file-{idx:02}.txt"),
+                link_path: String::new(),
+                count: 1,
+                diff: None,
+                columns: None,
+                out_columns: None,
+                spans: Vec::new(),
+                linewise_diff: false,
+                multiline_span_diff: false,
+            })
+            .collect();
+        let mut out = Vec::new();
+
+        printer
+            .write_colored_results_to(&results, &mut out)
+            .unwrap();
+
+        let out = String::from_utf8(out).unwrap();
+        let mut cursor = 0;
+        for idx in 0..PARALLEL_RENDER_FILE_THRESHOLD {
+            let path = format!("file-{idx:02}.txt");
+            let offset = out[cursor..]
+                .find(&path)
+                .unwrap_or_else(|| panic!("missing ordered path {path:?} in {out:?}"));
+            cursor += offset + path.len();
+        }
     }
 
     #[test]
