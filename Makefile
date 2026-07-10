@@ -47,6 +47,7 @@ endif
 
 .PHONY: fmt
 fmt:
+	@clover format
 	@rumdl fmt --quiet
 	@$(CARGO) fmt --all
 
@@ -68,4 +69,5 @@ test:
 
 .PHONY: update
 update:
+	@clover run
 	@$(CARGO) update

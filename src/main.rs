@@ -68,14 +68,15 @@ struct ReplacementResult {
     link_path: String,
     count: usize,
     diff: Option<(String, String)>,
-    /// 1-indexed `(line -> first-match column)` for the original file, used to
-    /// fill `{column}` in per-line hyperlinks. `None` when position tracking
-    /// was disabled (no `{column}` placeholder in the hyperlink format).
-    columns: Option<std::collections::HashMap<usize, usize>>,
+    /// 1-indexed `(line, first-match column)` pairs for the original file,
+    /// sorted by line, used to fill `{column}` in per-line hyperlinks. `None`
+    /// when position tracking was disabled (no `{column}` placeholder in the
+    /// hyperlink format).
+    columns: Option<Vec<(usize, usize)>>,
     /// Same map keyed by the rewritten file's line numbers, for `{column}` on
     /// the new side of a line-shifting diff. `None` unless the replacement adds
     /// or removes newlines (the only case where new line numbers diverge).
-    out_columns: Option<std::collections::HashMap<usize, usize>>,
+    out_columns: Option<Vec<(usize, usize)>>,
     /// Per-replacement input/output spans, populated when span tracking is
     /// enabled and the run uses a single expression. Drives inline highlight.
     spans: Vec<Replacement>,
@@ -2269,8 +2270,8 @@ impl ResultPrinter<'_> {
                 styles,
                 template,
                 &encoded_path,
-                result.columns.as_ref(),
-                result.out_columns.as_ref(),
+                result.columns.as_deref(),
+                result.out_columns.as_deref(),
                 // In dry-run the file on disk is the original (old side); after
                 // a write it is the rewritten version (new side). Per-line links
                 // on line-shifting diffs target whichever side is on disk.

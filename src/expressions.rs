@@ -699,16 +699,25 @@ pub(crate) fn apply_compiled_expressions<'a>(
     (current, replacements, spans)
 }
 
+/// Looks up `line`'s first-match column in a map built by
+/// `byte_offsets_to_line_first_column`. The map is sorted by line, so a
+/// binary search resolves the lookup without any hashing.
+pub(crate) fn first_column_for_line(map: &[(usize, usize)], line: usize) -> Option<usize> {
+    map.binary_search_by_key(&line, |&(l, _)| l)
+        .ok()
+        .map(|idx| map[idx].1)
+}
+
 /// Builds the per-line first-column map only when the caller's hyperlink
 /// format string actually consumes `{column}`. Returns `None` otherwise,
-/// skipping the input scan and the per-file `HashMap` construction entirely.
+/// skipping the input scan and the per-file map construction entirely.
 /// This is the pay-for-what-you-use gate that keeps replacement runs cheap
 /// when the format omits `{column}`.
 pub(crate) fn first_column_map_if_needed(
     needs_first_column: bool,
     input: &[u8],
     spans: &[Replacement],
-) -> Option<std::collections::HashMap<usize, usize>> {
+) -> Option<Vec<(usize, usize)>> {
     if !needs_first_column {
         return None;
     }
@@ -726,7 +735,7 @@ pub(crate) fn first_column_map_for_expressions(
     needs_first_column: bool,
     input: &[u8],
     expressions: &[CompiledExpression],
-) -> Option<std::collections::HashMap<usize, usize>> {
+) -> Option<Vec<(usize, usize)>> {
     if !needs_first_column {
         return None;
     }
@@ -748,7 +757,7 @@ pub(crate) fn output_first_column_map(
     needed: bool,
     output: &[u8],
     spans: &[Replacement],
-) -> Option<std::collections::HashMap<usize, usize>> {
+) -> Option<Vec<(usize, usize)>> {
     if !needed {
         return None;
     }
@@ -757,19 +766,20 @@ pub(crate) fn output_first_column_map(
 }
 
 /// Walks `input` once, mapping an ascending slice of byte offsets to the
-/// 1-indexed `(line, column)` of the first match on each line. Single linear
-/// pass, `O(input.len() + offsets.len())`, using a stateful `memchr_iter`
-/// cursor so each newline crossing pulls one position from the iterator
-/// rather than re-running `memchr` on a fresh sub-slice. Offsets must be
-/// sorted ascending - replacement spans are recorded left to right, so
-/// callers get this for free.
+/// 1-indexed `(line, column)` of the first match on each line, returned as a
+/// vector sorted by line (ascending offsets visit lines in order, so the sort
+/// falls out of the walk; `first_column_for_line` binary-searches it). Single
+/// linear pass, `O(input.len() + offsets.len())`, using a stateful
+/// `memchr_iter` cursor so each newline crossing pulls one position from the
+/// iterator rather than re-running `memchr` on a fresh sub-slice. Offsets
+/// must be sorted ascending - replacement spans are recorded left to right,
+/// so callers get this for free.
 pub(crate) fn byte_offsets_to_line_first_column(
     input: &[u8],
     offsets: &[usize],
-) -> std::collections::HashMap<usize, usize> {
-    use std::collections::HashMap;
+) -> Vec<(usize, usize)> {
     debug_assert!(offsets.is_sorted(), "offsets must be ascending");
-    let mut map: HashMap<usize, usize> = HashMap::new();
+    let mut map: Vec<(usize, usize)> = Vec::new();
     if offsets.is_empty() {
         return map;
     }
@@ -789,8 +799,11 @@ pub(crate) fn byte_offsets_to_line_first_column(
             line_start = nl + 1;
             next_nl = newlines.next();
         }
-        let col = off.saturating_sub(line_start) + 1;
-        map.entry(line).or_insert(col);
+        // Later offsets on an already-recorded line keep the first column.
+        if map.last().is_none_or(|&(l, _)| l != line) {
+            let col = off.saturating_sub(line_start) + 1;
+            map.push((line, col));
+        }
     }
     map
 }
@@ -826,9 +839,7 @@ mod tests {
         // matches at byte offsets 6 (line 2, col 3) and 10 (line 3, col 1)
         let input = b"abc\ndefoo\nfoox";
         let map = byte_offsets_to_line_first_column(input, &[6, 10]);
-        assert_eq!(map.get(&2), Some(&3));
-        assert_eq!(map.get(&3), Some(&1));
-        assert_eq!(map.get(&1), None);
+        assert_eq!(map, vec![(2, 3), (3, 1)]);
     }
 
     #[test]
@@ -836,7 +847,7 @@ mod tests {
         // Two matches on the same line: only the earliest column is kept.
         let input = b"foofoo\n";
         let map = byte_offsets_to_line_first_column(input, &[0, 3]);
-        assert_eq!(map.get(&1), Some(&1));
+        assert_eq!(map, vec![(1, 1)]);
     }
 
     #[test]
@@ -852,10 +863,8 @@ mod tests {
         let input = b"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
         let offsets = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18];
         let map = byte_offsets_to_line_first_column(input, &offsets);
-        let mut got: Vec<(usize, usize)> = map.into_iter().collect();
-        got.sort_unstable();
         let want: Vec<(usize, usize)> = (1..=10).map(|n| (n, 1)).collect();
-        assert_eq!(got, want);
+        assert_eq!(map, want);
     }
 
     #[test]
@@ -880,7 +889,7 @@ mod tests {
             output_len: 3,
         }];
         let map = first_column_map_if_needed(true, b"abc\ndefoo\n", &spans);
-        assert_eq!(map.unwrap().get(&2), Some(&3));
+        assert_eq!(map, Some(vec![(2, 3)]));
     }
 
     #[test]
@@ -896,9 +905,7 @@ mod tests {
         let expressions = compile_expressions(&cli).unwrap();
         // line 1 "ab" has no match; line 2 "  cat x" matches at byte column 3.
         let map = first_column_map_for_expressions(true, b"ab\n  cat x\n", &expressions).unwrap();
-        let mut got: Vec<(usize, usize)> = map.into_iter().collect();
-        got.sort_unstable();
-        assert_eq!(got, vec![(2, 3)]);
+        assert_eq!(map, vec![(2, 3)]);
     }
 
     #[test]

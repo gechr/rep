@@ -48,13 +48,14 @@ struct Hyperlinks<'a> {
     /// Pre-encoded path used by `{path}`. Empty when the template doesn't
     /// reference `{path}` (caller skips the encoding work in that case).
     encoded_path: &'a str,
-    /// 1-indexed line -> first-match column. `None` when not tracked; lookups
-    /// for absent lines fall back to column 1 inside `HyperlinkTemplate::render`.
-    columns: Option<&'a std::collections::HashMap<usize, usize>>,
+    /// 1-indexed `(line, first-match column)` pairs sorted by line. `None`
+    /// when not tracked; lookups for absent lines fall back to column 1
+    /// inside `HyperlinkTemplate::render`.
+    columns: Option<&'a [(usize, usize)]>,
     /// Same map keyed by the rewritten file's line numbers. When present, the
     /// new/green side resolves `{column}` against this instead of `columns`, so
     /// links on a line-shifting diff land on the correct output column.
-    out_columns: Option<&'a std::collections::HashMap<usize, usize>>,
+    out_columns: Option<&'a [(usize, usize)]>,
     /// Cached: emit a per-line OSC 8 link only when colored (`!plain`) and the
     /// template varies by line (`{line}`/`{column}`). A format that references
     /// only `{path}`/`{host}` produces the same link on every line as the file
@@ -72,8 +73,8 @@ impl<'a> Hyperlinks<'a> {
     fn new(
         template: Option<&'a crate::HyperlinkTemplate<'a>>,
         encoded_path: &'a str,
-        columns: Option<&'a std::collections::HashMap<usize, usize>>,
-        out_columns: Option<&'a std::collections::HashMap<usize, usize>>,
+        columns: Option<&'a [(usize, usize)]>,
+        out_columns: Option<&'a [(usize, usize)]>,
         plain: bool,
         link_side: Color,
     ) -> Self {
@@ -103,10 +104,10 @@ impl<'a> Hyperlinks<'a> {
         let column = if side == Color::Green
             && let Some(out_columns) = self.out_columns
         {
-            out_columns.get(&line).copied().unwrap_or(0)
+            crate::expressions::first_column_for_line(out_columns, line).unwrap_or(0)
         } else {
             self.columns
-                .and_then(|m| m.get(&line).copied())
+                .and_then(|m| crate::expressions::first_column_for_line(m, line))
                 .unwrap_or(0)
         };
         out.push_str("\x1b]8;;");
@@ -125,8 +126,8 @@ pub(crate) fn print_file_line_diff(
     styles: Styles,
     hyperlink_template: Option<&crate::HyperlinkTemplate<'_>>,
     encoded_path: &str,
-    columns: Option<&std::collections::HashMap<usize, usize>>,
-    out_columns: Option<&std::collections::HashMap<usize, usize>>,
+    columns: Option<&[(usize, usize)]>,
+    out_columns: Option<&[(usize, usize)]>,
     on_disk_side: Color,
     out: &mut String,
 ) {
@@ -2067,7 +2068,7 @@ mod tests {
         let mut out = String::new();
         let old_line_spans = LineSpans::default();
         let new_line_spans = LineSpans::default();
-        let columns = std::collections::HashMap::new();
+        let columns: Vec<(usize, usize)> = Vec::new();
         let mut writer = NumberedDiffWriter {
             out: &mut out,
             width: 1,
@@ -2089,7 +2090,7 @@ mod tests {
         let mut out = String::new();
         let old_line_spans = LineSpans::default();
         let new_line_spans = LineSpans::default();
-        let columns = std::collections::HashMap::new();
+        let columns: Vec<(usize, usize)> = Vec::new();
         let mut writer = NumberedDiffWriter {
             out: &mut out,
             width: 4,
@@ -2111,7 +2112,7 @@ mod tests {
         let mut out = String::new();
         let old_line_spans = LineSpans::default();
         let new_line_spans = LineSpans::default();
-        let columns = std::collections::HashMap::new();
+        let columns: Vec<(usize, usize)> = Vec::new();
         let mut writer = NumberedDiffWriter {
             out: &mut out,
             width: 1,
@@ -2210,9 +2211,8 @@ mod tests {
         // The new side renumbers its lines, so its `{column}` must come from the
         // output-keyed map, never the input `columns` map keyed by old lines.
         let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
-        let columns: std::collections::HashMap<usize, usize> = [(2, 99)].into_iter().collect();
-        let out_columns: std::collections::HashMap<usize, usize> =
-            [(2, 7), (3, 4)].into_iter().collect();
+        let columns = vec![(2, 99)];
+        let out_columns = vec![(2, 7), (3, 4)];
         let mut out = String::new();
         print_file_line_diff(
             "a\nb\nc\n",
