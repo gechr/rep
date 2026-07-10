@@ -1719,12 +1719,13 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                     let columns =
                         first_column_map_if_needed(needs_first_column, &scratch, &spans);
                     let updated = updated.into_owned();
-                    // The new side renumbers its lines only when a replacement
-                    // adds or removes newlines (`multiline_span_diff`); the
-                    // output-keyed map lets green-side `{column}` links resolve
-                    // there. Boundary-preserving diffs reuse the input map.
+                    // The output-keyed map resolves green-side `{column}` links
+                    // when a replacement adds or removes newlines
+                    // (`multiline_span_diff`). Only the on-disk side links, so
+                    // the green side needs it only after a write; dry-run and
+                    // boundary-preserving diffs use the input map.
                     let out_columns = output_first_column_map(
-                        needs_first_column && multiline_span_diff,
+                        needs_first_column && multiline_span_diff && write,
                         &updated,
                         &spans,
                     );

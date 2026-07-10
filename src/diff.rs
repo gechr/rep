@@ -60,12 +60,12 @@ struct Hyperlinks<'a> {
     /// only `{path}`/`{host}` produces the same link on every line as the file
     /// header already carries, so per-line links are pure terminal overhead.
     link_lines: bool,
-    /// Restricts per-line links to one diff side. `None` links both (line
-    /// numbers agree across sides). Diff paths whose old/new line numbers can
-    /// diverge set this to the side whose numbers match the file on disk - old
-    /// in dry-run, new after `--write` - so the other side, which only exists
-    /// in the version not on disk, stays plain.
-    link_side: Option<Color>,
+    /// The single diff side that gets per-line links: the one whose gutter
+    /// numbers match the file on disk - old in dry-run, new after `--write`.
+    /// The other side duplicates the same target on paired lines and points at
+    /// lines the on-disk version may not contain on shifting diffs, so it
+    /// stays plain; this also halves the OSC 8 volume sent to the terminal.
+    link_side: Color,
 }
 
 impl<'a> Hyperlinks<'a> {
@@ -75,6 +75,7 @@ impl<'a> Hyperlinks<'a> {
         columns: Option<&'a std::collections::HashMap<usize, usize>>,
         out_columns: Option<&'a std::collections::HashMap<usize, usize>>,
         plain: bool,
+        link_side: Color,
     ) -> Self {
         let link_lines = !plain && template.is_some_and(crate::HyperlinkTemplate::links_lines);
         Self {
@@ -83,18 +84,7 @@ impl<'a> Hyperlinks<'a> {
             columns,
             out_columns,
             link_lines,
-            link_side: None,
-        }
-    }
-
-    /// Returns a copy that links only `side`'s gutter numbers. Diff paths whose
-    /// old and new line numbers can diverge (newline-changing replacements) use
-    /// this to link just the side that matches the file on disk; the other
-    /// side's number would point at a line that version doesn't contain.
-    const fn link_only(self, side: Color) -> Self {
-        Self {
-            link_side: Some(side),
-            ..self
+            link_side,
         }
     }
 
@@ -103,7 +93,7 @@ impl<'a> Hyperlinks<'a> {
             out.push_str(text);
             return;
         };
-        if !self.link_lines || self.link_side.is_some_and(|only| only != side) {
+        if !self.link_lines || side != self.link_side {
             out.push_str(text);
             return;
         }
@@ -146,6 +136,7 @@ pub(crate) fn print_file_line_diff(
         columns,
         out_columns,
         styles.is_plain(),
+        on_disk_side,
     );
     let mut trimmed: Vec<Replacement> = Vec::with_capacity(hints.spans.len());
     for &span in hints.spans {
@@ -196,7 +187,7 @@ pub(crate) fn print_file_line_diff(
             new,
             spans,
             styles,
-            hyperlinks.link_only(on_disk_side),
+            hyperlinks,
             &old_line_spans,
             &new_line_spans,
             out,
@@ -260,7 +251,7 @@ pub(crate) fn print_file_line_diff(
         out,
         width,
         styles,
-        hyperlinks: hyperlinks.link_only(on_disk_side),
+        hyperlinks,
         span_highlighting,
         old_line_spans: &old_line_spans,
         new_line_spans: &new_line_spans,
@@ -2081,7 +2072,7 @@ mod tests {
             out: &mut out,
             width: 1,
             styles: Styles::ansi(),
-            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), None, false),
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), None, false, Color::Red),
             span_highlighting: true,
             old_line_spans: &old_line_spans,
             new_line_spans: &new_line_spans,
@@ -2103,7 +2094,7 @@ mod tests {
             out: &mut out,
             width: 4,
             styles: Styles::PLAIN,
-            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), None, true),
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), None, true, Color::Red),
             span_highlighting: true,
             old_line_spans: &old_line_spans,
             new_line_spans: &new_line_spans,
@@ -2125,7 +2116,7 @@ mod tests {
             out: &mut out,
             width: 1,
             styles: Styles::ansi(),
-            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), None, false),
+            hyperlinks: Hyperlinks::new(None, "a.txt", Some(&columns), None, false, Color::Red),
             span_highlighting: true,
             old_line_spans: &old_line_spans,
             new_line_spans: &new_line_spans,
@@ -2254,9 +2245,9 @@ mod tests {
     }
 
     #[test]
-    fn line_preserving_diff_links_both_sides_regardless_of_mode() {
-        // Same line count: gutter numbers agree across sides, so both link even
-        // though only one side matches the file on disk.
+    fn line_preserving_diff_links_only_the_on_disk_side() {
+        // Both sides of a paired line share the same gutter number and would
+        // link to the same target, so only the on-disk side carries the link.
         let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
         let mut out = String::new();
         print_file_line_diff(
@@ -2277,8 +2268,15 @@ mod tests {
         );
         assert_eq!(
             out.matches("\x1b]8;;app://a.txt:2:").count(),
-            2,
-            "both old and new line 2 must be linked: {out:?}"
+            1,
+            "only the on-disk (old) line 2 must be linked: {out:?}"
+        );
+        let link_pos = out.find("\x1b]8;;app://a.txt:2:").unwrap();
+        let red_pos = out.find("\x1b[31").unwrap();
+        let green_pos = out.find("\x1b[32").unwrap();
+        assert!(
+            link_pos >= red_pos && link_pos < green_pos,
+            "the link must sit on the red row: {out:?}"
         );
     }
 
