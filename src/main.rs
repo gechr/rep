@@ -454,6 +454,12 @@ const DEFAULT_HYPERLINK_LIMIT: u64 = 50_000;
 /// parse per wakeup than the 8 KiB `BufWriter` default would.
 const OUTPUT_BUFFER_CAPACITY: usize = 256 * 1024;
 
+/// Colored blocks become worthwhile to render across threads either when
+/// there are many independent files or when a smaller set carries enough text
+/// to amortize the scoped-thread setup.
+const PARALLEL_RENDER_FILE_THRESHOLD: usize = 32;
+const PARALLEL_RENDER_BYTE_THRESHOLD: usize = 1024 * 1024;
+
 const HELP_SECTIONS: &[&str] = &["Filter", "Match", "Replace", "Mode", "Miscellaneous"];
 const LONG_HELP_SECTIONS: &[&str] = &[
     "Filter",
@@ -2013,36 +2019,56 @@ impl ResultPrinter<'_> {
         styles: Styles,
         template: Option<&HyperlinkTemplate<'_>>,
     ) -> Vec<Vec<u8>> {
-        // Below this many files, the serial path wins: scoped-thread spawn and
-        // join overhead exceeds the render work for a handful of small diffs.
-        const PARALLEL_THRESHOLD: usize = 32;
-        if results.len() < PARALLEL_THRESHOLD {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let threads = std::cmp::min(
+            results.len(),
+            std::cmp::min(
+                12,
+                std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+            ),
+        );
+        let work_bytes = results.iter().fold(0usize, |total, result| {
+            let diff_bytes = result
+                .diff
+                .as_ref()
+                .map_or(0, |(old, new)| old.len().saturating_add(new.len()));
+            total.saturating_add(diff_bytes)
+        });
+        if !should_render_in_parallel(results.len(), work_bytes, threads) {
             return results
                 .iter()
                 .map(|result| self.render_block(result, styles, template))
                 .collect();
         }
-        let threads = std::cmp::min(
-            12,
-            std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
-        );
-        let chunk_size = results.len().div_ceil(threads);
+
+        let next = AtomicUsize::new(0);
         std::thread::scope(|scope| {
-            let handles: Vec<_> = results
-                .chunks(chunk_size)
-                .map(|chunk| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let next = &next;
                     scope.spawn(move || {
-                        chunk
-                            .iter()
-                            .map(|result| self.render_block(result, styles, template))
-                            .collect::<Vec<_>>()
+                        let mut blocks = Vec::new();
+                        loop {
+                            let idx = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(result) = results.get(idx) else {
+                                break;
+                            };
+                            blocks.push((idx, self.render_block(result, styles, template)));
+                        }
+                        blocks
                     })
                 })
                 .collect();
-            handles
-                .into_iter()
-                .flat_map(|handle| handle.join().unwrap_or_default())
-                .collect()
+            let mut ordered: Vec<Option<Vec<u8>>> = std::iter::repeat_with(|| None)
+                .take(results.len())
+                .collect();
+            for handle in handles {
+                for (idx, block) in handle.join().unwrap_or_default() {
+                    ordered[idx] = Some(block);
+                }
+            }
+            ordered.into_iter().map(Option::unwrap_or_default).collect()
         })
     }
 
@@ -2127,6 +2153,13 @@ impl ResultPrinter<'_> {
         }
         Ok(())
     }
+}
+
+const fn should_render_in_parallel(result_count: usize, work_bytes: usize, threads: usize) -> bool {
+    threads > 1
+        && result_count > 1
+        && (result_count >= PARALLEL_RENDER_FILE_THRESHOLD
+            || work_bytes >= PARALLEL_RENDER_BYTE_THRESHOLD)
 }
 
 fn print_error(err: &anyhow::Error) {
@@ -3015,6 +3048,27 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("a.txt"), "expected path in output: {s:?}");
         assert!(s.contains("(1)"), "expected match count in output: {s:?}");
+    }
+
+    #[test]
+    fn test_parallel_render_selection_uses_file_count_or_bytes() {
+        assert!(!should_render_in_parallel(1, usize::MAX, 12));
+        assert!(!should_render_in_parallel(
+            2,
+            PARALLEL_RENDER_BYTE_THRESHOLD - 1,
+            12
+        ));
+        assert!(!should_render_in_parallel(32, usize::MAX, 1));
+        assert!(should_render_in_parallel(
+            2,
+            PARALLEL_RENDER_BYTE_THRESHOLD,
+            12
+        ));
+        assert!(should_render_in_parallel(
+            PARALLEL_RENDER_FILE_THRESHOLD,
+            0,
+            12
+        ));
     }
 
     #[test]
