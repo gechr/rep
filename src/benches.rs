@@ -82,7 +82,7 @@ fn render_colored_diff(b: &mut Bencher) {
         multiline_spans: false,
     };
     let styles = Styles::ansi();
-    let mut sink = Vec::with_capacity(text.len() * 2);
+    let mut sink = String::with_capacity(text.len() * 2);
     b.iter(|| {
         sink.clear();
         diff::print_file_line_diff(

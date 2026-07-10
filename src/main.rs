@@ -2081,15 +2081,15 @@ impl ResultPrinter<'_> {
         styles: Styles,
         template: Option<&HyperlinkTemplate<'_>>,
     ) -> Vec<u8> {
-        use std::io::Write as _;
+        use std::fmt::Write as _;
 
-        let mut buf = Vec::new();
+        let mut buf = String::new();
         let count = with_commas(result.count);
         let encoded_path = template
             .filter(|t| t.uses_path())
             .map_or(String::new(), |_| percent_encode_path(&result.link_path));
         let path = hyperlink_with_template(template, &encoded_path, 0, &result.path);
-        drop(writeln!(
+        let _ = writeln!(
             buf,
             "{}{} {}({count}){}",
             if self.quiet {
@@ -2100,7 +2100,7 @@ impl ResultPrinter<'_> {
             path,
             styles.fg(Color::Grey),
             styles.reset()
-        ));
+        );
 
         if !self.quiet
             && let Some((old, new)) = &result.diff
@@ -2125,7 +2125,7 @@ impl ResultPrinter<'_> {
                 &mut buf,
             );
         }
-        buf
+        buf.into_bytes()
     }
 
     fn print_patch_results(&self, results: &[ReplacementResult]) {

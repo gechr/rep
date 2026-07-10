@@ -128,7 +128,7 @@ impl<'a> Hyperlinks<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn print_file_line_diff<W: std::io::Write>(
+pub(crate) fn print_file_line_diff(
     old: &str,
     new: &str,
     hints: DiffHints<'_>,
@@ -138,7 +138,7 @@ pub(crate) fn print_file_line_diff<W: std::io::Write>(
     columns: Option<&std::collections::HashMap<usize, usize>>,
     out_columns: Option<&std::collections::HashMap<usize, usize>>,
     on_disk_side: Color,
-    out: &mut W,
+    out: &mut String,
 ) {
     let hyperlinks = Hyperlinks::new(
         hyperlink_template,
@@ -251,13 +251,13 @@ pub(crate) fn print_file_line_diff<W: std::io::Write>(
     // Output is roughly the diff text plus per-line ANSI/OSC-8 overhead. The
     // up-front capacity keeps the per-line `push_str` calls off the realloc
     // path, capped to avoid pathologically large reservations on huge diffs.
-    let mut buf = String::with_capacity(
+    out.reserve(
         (old.len() + new.len())
             .saturating_mul(2)
             .min(8 * 1024 * 1024),
     );
     let mut writer = NumberedDiffWriter {
-        out: &mut buf,
+        out,
         width,
         styles,
         hyperlinks: hyperlinks.link_only(on_disk_side),
@@ -269,7 +269,6 @@ pub(crate) fn print_file_line_diff<W: std::io::Write>(
     for (old_lines, new_lines) in blocks {
         writer.write_block(&old_lines, &new_lines);
     }
-    drop(out.write_all(buf.as_bytes()));
 }
 
 /// Shrink a span by stripping the longest common prefix and suffix shared by
@@ -416,14 +415,14 @@ fn replacements_preserve_line_boundaries(old: &str, new: &str, spans: &[Replacem
         })
 }
 
-fn print_same_line_span_diff<W: std::io::Write>(
+fn print_same_line_span_diff(
     old: &str,
     new: &str,
     styles: Styles,
     hyperlinks: Hyperlinks<'_>,
     old_line_spans: &LineSpans,
     new_line_spans: &LineSpans,
-    out: &mut W,
+    out: &mut String,
 ) -> bool {
     let mut changed_lines: Vec<usize> = old_line_spans
         .lines()
@@ -447,9 +446,8 @@ fn print_same_line_span_diff<W: std::io::Write>(
         .map(|line_no| line_no.to_string().len())
         .max()
         .unwrap_or(1);
-    let mut buf = String::new();
     let mut writer = NumberedDiffWriter {
-        out: &mut buf,
+        out,
         width,
         styles,
         hyperlinks,
@@ -466,12 +464,11 @@ fn print_same_line_span_diff<W: std::io::Write>(
             block_start = idx;
         }
     }
-    drop(out.write_all(buf.as_bytes()));
     true
 }
 
 #[allow(clippy::too_many_arguments)]
-fn print_linewise_diff<W: std::io::Write>(
+fn print_linewise_diff(
     old: &str,
     new: &str,
     styles: Styles,
@@ -479,7 +476,7 @@ fn print_linewise_diff<W: std::io::Write>(
     span_highlighting: bool,
     old_line_spans: &LineSpans,
     new_line_spans: &LineSpans,
-    out: &mut W,
+    out: &mut String,
 ) -> bool {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
@@ -502,9 +499,8 @@ fn print_linewise_diff<W: std::io::Write>(
         .map(|line_no| line_no.to_string().len())
         .max()
         .unwrap_or(1);
-    let mut buf = String::new();
     let mut writer = NumberedDiffWriter {
-        out: &mut buf,
+        out,
         width,
         styles,
         hyperlinks,
@@ -529,12 +525,11 @@ fn print_linewise_diff<W: std::io::Write>(
             block_start = idx;
         }
     }
-    drop(out.write_all(buf.as_bytes()));
     true
 }
 
 #[allow(clippy::too_many_arguments)]
-fn print_multiline_span_diff<W: std::io::Write>(
+fn print_multiline_span_diff(
     old: &str,
     new: &str,
     spans: &[Replacement],
@@ -542,7 +537,7 @@ fn print_multiline_span_diff<W: std::io::Write>(
     hyperlinks: Hyperlinks<'_>,
     old_line_spans: &LineSpans,
     new_line_spans: &LineSpans,
-    out: &mut W,
+    out: &mut String,
 ) -> bool {
     let Some(mut hunks) = multiline_span_hunks(old, new, spans) else {
         return false;
@@ -561,9 +556,8 @@ fn print_multiline_span_diff<W: std::io::Write>(
         })
         .max()
         .unwrap_or(1);
-    let mut buf = String::new();
     let mut writer = NumberedDiffWriter {
-        out: &mut buf,
+        out,
         width,
         styles,
         hyperlinks,
@@ -575,7 +569,6 @@ fn print_multiline_span_diff<W: std::io::Write>(
     for hunk in &mut hunks {
         writer.write_block(&hunk.old_lines, &hunk.new_lines);
     }
-    drop(out.write_all(buf.as_bytes()));
     true
 }
 
@@ -2160,7 +2153,7 @@ mod tests {
         // Inserting a line diverges the gutter numbering. In dry-run the file on
         // disk is the original, so only the old/red side is a valid target.
         let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
-        let mut out = Vec::new();
+        let mut out = String::new();
         print_file_line_diff(
             "a\nb\nc\n",
             "a\nB\nB2\nc\n",
@@ -2177,7 +2170,6 @@ mod tests {
             Color::Red,
             &mut out,
         );
-        let out = String::from_utf8(out).unwrap();
         // Old line 2 (red) is linked; the inserted new line 3 (green-only) is not.
         assert!(
             out.contains("\x1b]8;;app://a.txt:2:"),
@@ -2194,7 +2186,7 @@ mod tests {
         // After --write the file on disk is the rewritten version, so only the
         // new/green side is a valid target; the deleted old line stays plain.
         let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
-        let mut out = Vec::new();
+        let mut out = String::new();
         print_file_line_diff(
             "a\nb\nDEL\nc\n",
             "a\nB\nc\n",
@@ -2211,7 +2203,6 @@ mod tests {
             Color::Green,
             &mut out,
         );
-        let out = String::from_utf8(out).unwrap();
         // New line 2 (green) is linked; the deleted old line 3 (red-only) is not.
         assert!(
             out.contains("\x1b]8;;app://a.txt:2:"),
@@ -2231,7 +2222,7 @@ mod tests {
         let columns: std::collections::HashMap<usize, usize> = [(2, 99)].into_iter().collect();
         let out_columns: std::collections::HashMap<usize, usize> =
             [(2, 7), (3, 4)].into_iter().collect();
-        let mut out = Vec::new();
+        let mut out = String::new();
         print_file_line_diff(
             "a\nb\nc\n",
             "a\nB\nB2\nc\n",
@@ -2248,7 +2239,6 @@ mod tests {
             Color::Green,
             &mut out,
         );
-        let out = String::from_utf8(out).unwrap();
         assert!(
             out.contains("\x1b]8;;app://a.txt:2:7"),
             "green line 2 must use the output map column: {out:?}"
@@ -2268,7 +2258,7 @@ mod tests {
         // Same line count: gutter numbers agree across sides, so both link even
         // though only one side matches the file on disk.
         let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
-        let mut out = Vec::new();
+        let mut out = String::new();
         print_file_line_diff(
             "a\nb\nc\n",
             "a\nX\nc\n",
@@ -2285,7 +2275,6 @@ mod tests {
             Color::Red,
             &mut out,
         );
-        let out = String::from_utf8(out).unwrap();
         assert_eq!(
             out.matches("\x1b]8;;app://a.txt:2:").count(),
             2,
