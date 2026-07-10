@@ -33,7 +33,9 @@ need python3
 # is sprinkled at a fixed rate so match density is stable across runs; the
 # replacement keeps the byte length close so diffs stay realistic.
 gen_corpus() {
-    if [[ -d "$corpus_root" && -z "${REGEN:-}" ]]; then
+    if [[ -d "$many_dir" && -d "$large_dir" && -z "${REGEN:-}" ]] \
+        && grep -R -q needle "$many_dir" \
+        && grep -R -q needle "$large_dir"; then
         echo "corpus: reusing $corpus_root (REGEN=1 to rebuild)"
         return
     fi
@@ -95,27 +97,31 @@ run() {
 gen_corpus
 
 # Non-destructive read/render scenarios (stdout sent to /dev/null so the
-# terminal is never the bottleneck - we are timing rep, not the tty).
-run "many-small: quiet scan only" \
-    'env REP_COLOR=never @BIN@ -q needle replaced '"$many_dir"
+# terminal is never the bottleneck - we are timing rep, not the tty). Disable
+# the user's config so local mode/style defaults cannot change the workload.
+run "many-small: count/scan only" \
+    'sh -c '\''env REP_CONFIG_PATH= '"'"'@BIN@'"'"' --count needle replaced '"$many_dir"' >/dev/null'\'''
 
 run "many-small: plain patch output" \
-    'sh -c '\''env REP_COLOR=never '"'"'@BIN@'"'"' needle replaced '"$many_dir"' >/dev/null'\'''
+    'sh -c '\''env REP_CONFIG_PATH= '"'"'@BIN@'"'"' --dry-run --color never needle replaced '"$many_dir"' >/dev/null'\'''
 
 run "many-small: colored diff render" \
-    'sh -c '\''env REP_COLOR=always '"'"'@BIN@'"'"' needle replaced '"$many_dir"' >/dev/null'\'''
+    'sh -c '\''env REP_CONFIG_PATH= '"'"'@BIN@'"'"' --dry-run --color always --hyperlink-format none needle replaced '"$many_dir"' >/dev/null'\'''
 
 run "many-small: list files (-l)" \
-    'sh -c '\''@BIN@ -l needle '"$many_dir"' >/dev/null'\'''
+    'sh -c '\''env REP_CONFIG_PATH= '"'"'@BIN@'"'"' -l needle '"$many_dir"' >/dev/null'\'''
 
 run "many-small: multi-expression" \
-    'sh -c '\''env REP_COLOR=always '"'"'@BIN@'"'"' -e needle replaced -e compute derive '"$many_dir"' >/dev/null'\'''
+    'sh -c '\''env REP_CONFIG_PATH= '"'"'@BIN@'"'"' --dry-run --color always --hyperlink-format none -e needle replaced -e compute derive '"$many_dir"' >/dev/null'\'''
 
 run "few-large: colored diff render" \
-    'sh -c '\''env REP_COLOR=always '"'"'@BIN@'"'"' needle replaced '"$large_dir"' >/dev/null'\'''
+    'sh -c '\''env REP_CONFIG_PATH= '"'"'@BIN@'"'"' --dry-run --color always --hyperlink-format none needle replaced '"$large_dir"' >/dev/null'\'''
 
 run "few-large: colored, file-only hyperlinks" \
-    'sh -c '\''env REP_COLOR=always REP_HYPERLINK_FORMAT=file '"'"'@BIN@'"'"' needle replaced '"$large_dir"' >/dev/null'\'''
+    'sh -c '\''env REP_CONFIG_PATH= '"'"'@BIN@'"'"' --dry-run --color always --hyperlink-format file needle replaced '"$large_dir"' >/dev/null'\'''
+
+run "few-large: colored, line/column hyperlinks" \
+    'sh -c '\''env REP_CONFIG_PATH= '"'"'@BIN@'"'"' --dry-run --color always --hyperlink-format vscode needle replaced '"$large_dir"' >/dev/null'\'''
 
 # Destructive write bench: restore the corpus from a pristine copy before each
 # timed run via hyperfine --prepare. Opt-in because the copy dominates timing.
@@ -123,8 +129,9 @@ if [[ -n "${WRITE:-}" ]]; then
     pristine="$corpus_root/.pristine-many"
     [[ -d "$pristine" ]] || cp -R "$many_dir" "$pristine"
     run "many-small: write to disk" \
-        'sh -c '\''env REP_COLOR=never '"'"'@BIN@'"'"' --write needle replaced '"$many_dir"' >/dev/null'\''' \
-        --prepare "rm -rf '$many_dir' && cp -R '$pristine' '$many_dir'"
+        'sh -c '\''env REP_CONFIG_PATH= '"'"'@BIN@'"'"' --write --color never needle replaced '"$many_dir"' >/dev/null'\''' \
+        --prepare "rm -rf '$many_dir' && cp -R '$pristine' '$many_dir'" \
+        --cleanup "rm -rf '$many_dir' && cp -R '$pristine' '$many_dir'"
 fi
 
 echo
