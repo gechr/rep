@@ -688,16 +688,34 @@ fn resolve_mutex_groups(
     matches: &ArgMatches,
     origin: &config::Origin,
 ) -> Result<()> {
-    let mode = resolve_group(
+    let mut mode = resolve_group(
         matches,
         origin,
-        &["dry_run", "write", "preview", "list_files", "count"],
+        &["dry_run", "write", "preview", "list_files"],
     )?;
+
+    // Counting controls output and composes with the non-interactive write
+    // policy (`--dry-run` or `--write`). Preview and file listing own their
+    // output, so they remain mutually exclusive with count. Preserve the
+    // normal source precedence when one of those modes came from env/config.
+    if cli.count
+        && let Some(mode_id @ ("preview" | "list_files")) = mode
+    {
+        let count_tier = tier_of("count", matches, origin).expect("active count has a source");
+        let mode_tier = tier_of(mode_id, matches, origin).expect("active mode has a source");
+        if count_tier == mode_tier {
+            bail!(same_tier_error(count_tier, &[mode_id, "count"]));
+        } else if count_tier > mode_tier {
+            mode = None;
+        } else {
+            cli.count = false;
+        }
+    }
+
     cli.dry_run = mode == Some("dry_run");
     cli.write = mode == Some("write");
     cli.preview = mode == Some("preview");
     cli.list_files = mode == Some("list_files");
-    cli.count = mode == Some("count");
 
     if cli.list_files && preview_tool_active(cli, matches) {
         resolve_list_files_vs_preview_tool(cli, matches, origin)?;
@@ -1887,15 +1905,16 @@ fn run_stdin(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// `--count` mode: apply the replacements and print only the total number of
+/// `--count` output: apply the replacements and print only the total number of
 /// replacements to stdout, one integer with no separators (script-friendly).
-/// Nothing is written to disk and no diff is rendered. When reading from stdin
-/// the whole input is transformed once; otherwise the file tree is walked in
-/// parallel and each file's replacement count is summed.
-fn run_count(cli: &Cli, is_stdin: bool) -> Result<()> {
+/// Files are written only when `write` is true; no diff is rendered. When
+/// reading from stdin the whole input is transformed once; otherwise the file
+/// tree is walked in parallel and each file's replacement count is summed.
+fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
     use std::io::Read as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::channel;
 
     use ignore::WalkState;
 
@@ -1930,6 +1949,7 @@ fn run_count(cli: &Cli, is_stdin: bool) -> Result<()> {
     let total = Arc::new(AtomicUsize::new(0));
     let walk_expressions = Arc::clone(&expressions);
     let walk_total = Arc::clone(&total);
+    let (error_tx, error_rx) = channel::<anyhow::Error>();
 
     walk.run(|| {
         let mut searcher = scan::make_searcher();
@@ -1937,6 +1957,7 @@ fn run_count(cli: &Cli, is_stdin: bool) -> Result<()> {
         let expressions = Arc::clone(&walk_expressions);
         let pre_filter = pre_filter.clone();
         let total = Arc::clone(&walk_total);
+        let error_tx = error_tx.clone();
         Box::new(move |result| {
             let dirent = match result {
                 Ok(d) => d,
@@ -1952,28 +1973,42 @@ fn run_count(cli: &Cli, is_stdin: bool) -> Result<()> {
             if !scan::is_candidate_path(path) {
                 return WalkState::Continue;
             }
-            let count = if single_expression {
+            let (updated, count) = if single_expression {
                 if !scan::read_text_file(path, &mut scratch) {
                     return WalkState::Continue;
                 }
-                let (_, count, _) = apply_compiled_expressions(&scratch, &expressions, false);
-                count
+                let (updated, count, _) = apply_compiled_expressions(&scratch, &expressions, false);
+                if count == 0 {
+                    return WalkState::Continue;
+                }
+                (updated.into_owned(), count)
             } else {
                 let Some(contents) =
                     scan::file_contents_if_matches(&mut searcher, &pre_filter, path, &mut scratch)
                 else {
                     return WalkState::Continue;
                 };
-                let (_, count, _) = apply_compiled_expressions(&contents, &expressions, false);
-                count
+                let (updated, count, _) =
+                    apply_compiled_expressions(&contents, &expressions, false);
+                if count == 0 {
+                    return WalkState::Continue;
+                }
+                (updated.into_owned(), count)
             };
-            if count > 0 {
-                total.fetch_add(count, Ordering::Relaxed);
+            if write && let Err(e) = std::fs::write(path, &updated) {
+                let error = anyhow::Error::new(e).context(format!("Unable to write to {path:?}"));
+                drop(error_tx.send(error));
+                return WalkState::Quit;
             }
+            total.fetch_add(count, Ordering::Relaxed);
             WalkState::Continue
         })
     });
 
+    drop(error_tx);
+    if let Ok(error) = error_rx.try_recv() {
+        return Err(error);
+    }
     println!("{}", total.load(Ordering::Relaxed));
     Ok(())
 }
@@ -2417,7 +2452,7 @@ fn run() -> Result<()> {
     }
 
     if cli.count {
-        run_count(&cli, is_stdin_mode)
+        run_count(&cli, is_stdin_mode, cli.write)
     } else if is_stdin_mode {
         run_stdin(&cli)
     } else if cli.write {
@@ -2502,8 +2537,6 @@ mod tests {
             ["rep", "--list-files", "--write", "a", "b"].as_slice(),
             ["rep", "--list-files", "--preview", "a", "b"].as_slice(),
             ["rep", "--list-files", "--dry-run", "a", "b"].as_slice(),
-            ["rep", "--count", "--write", "a", "b"].as_slice(),
-            ["rep", "--count", "--dry-run", "a", "b"].as_slice(),
             ["rep", "--count", "--preview", "a", "b"].as_slice(),
             ["rep", "--count", "--list-files", "a", "b"].as_slice(),
         ] {
@@ -2512,6 +2545,17 @@ mod tests {
                 "expected mode flags {args:?} to conflict, but parse succeeded"
             );
         }
+    }
+
+    #[test]
+    fn test_count_composes_with_write_policy() {
+        let write = parse_and_resolve(&["rep", "--write", "--count", "a", "b"]).unwrap();
+        assert!(write.write);
+        assert!(write.count);
+
+        let dry_run = parse_and_resolve(&["rep", "--dry-run", "--count", "a", "b"]).unwrap();
+        assert!(dry_run.dry_run);
+        assert!(dry_run.count);
     }
 
     #[test]

@@ -171,6 +171,43 @@ fn dry_run_leaves_file_untouched() {
 }
 
 #[test]
+fn dry_run_and_count_prints_total_without_writing() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    let original = "foo and foo";
+    write(&file, original);
+
+    let output = rep_command()
+        .args(["--dry-run", "--count", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(output.stdout, b"2\n");
+    assert_eq!(read(&file), original);
+}
+
+#[test]
+fn write_and_count_prints_total_and_writes() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(&file, "foo and foo");
+
+    let output = rep_command()
+        .args(["--write", "--count", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(output.stdout, b"2\n");
+    assert_eq!(read(&file), "bar and bar");
+}
+
+#[test]
 fn dry_run_prints_per_file_diffs() {
     let dir = tempdir().unwrap();
     let a = dir.path().join("a.txt");
