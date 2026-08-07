@@ -58,6 +58,78 @@ fn basic_replace_rewrites_file_contents() {
 }
 
 #[test]
+fn line_range_rewrites_only_selected_lines() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    write(
+        &file,
+        "foo one\nfoo two\nfoo three\nfoo four\nfoo five\nfoo six\n",
+    );
+
+    let status = rep_command()
+        .args([
+            "-W", "-L", "2:3", "-L", "1:3", "-L", "2-5", "foo", "bar", ".",
+        ])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert_eq!(
+        read(&file),
+        "bar one\nbar two\nbar three\nbar four\nbar five\nfoo six\n"
+    );
+}
+
+#[test]
+fn line_range_applies_to_stdin() {
+    let mut child = rep_command()
+        .args(["-L", "2:3,3:4", "foo", "bar"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"foo one\nfoo two\nfoo three\nfoo four\nfoo five\n")
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        output.stdout,
+        b"foo one\nbar two\nbar three\nbar four\nfoo five\n"
+    );
+}
+
+#[test]
+fn line_range_limits_count_and_file_listing() {
+    let dir = tempdir().unwrap();
+    let inside = dir.path().join("inside.txt");
+    let outside = dir.path().join("outside.txt");
+    write(&inside, "plain\nfoo foo\nplain\n");
+    write(&outside, "foo\nplain\nfoo\n");
+
+    let count = rep_command()
+        .args(["--count", "-L", "2", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(count.status.success());
+    assert_eq!(count.stdout, b"2\n");
+
+    let listed = rep_command()
+        .args(["--list-files", "-L", "2", "foo", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    assert_eq!(listed.stdout, b"inside.txt\n");
+}
+
+#[test]
 fn expression_replace_accepts_hyphen_leading_values() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("notes.txt");
@@ -943,6 +1015,7 @@ Match
   -r, --regex                   Treat patterns as regular expressions
   -w, --word-regexp             Match only whole words
   -x, --line-regexp             Match only whole lines
+  -L, --line-range <range>      Restrict matching to inclusive line ranges
 
 Replace
 
@@ -1014,6 +1087,7 @@ Match
   -r, --regex                   Treat patterns as regular expressions
   -w, --word-regexp             Match only whole words
   -x, --line-regexp             Match only whole lines
+  -L, --line-range <range>      Restrict matching to inclusive line ranges
 
 Replace
 
@@ -1637,7 +1711,7 @@ fn color_always_multi_expression_linewise_fast_path_preserves_layout() {
 fn color_always_multi_expression_symbols_only_highlights_replacements() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");
-    write(&file, "alpha.foo\nbeta—gamma\n");
+    write(&file, "alpha.foo\nbeta…gamma\n");
 
     let output = rep_command()
         .args([
@@ -1648,7 +1722,7 @@ fn color_always_multi_expression_symbols_only_highlights_replacements() {
             ".",
             ":",
             "-e",
-            "—",
+            "…",
             "-",
             ".",
         ])
@@ -1663,7 +1737,7 @@ fn color_always_multi_expression_symbols_only_highlights_replacements() {
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
 \x1b[31;2m1\x1b[m alpha\x1b[31;4m.\x1b[mfoo
 \x1b[32;2m1\x1b[m alpha\x1b[32;4m:\x1b[mfoo
-\x1b[31;2m2\x1b[m beta\x1b[31;4m—\x1b[mgamma
+\x1b[31;2m2\x1b[m beta\x1b[31;4m…\x1b[mgamma
 \x1b[32;2m2\x1b[m beta\x1b[32;4m-\x1b[mgamma
 
 \x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
@@ -1675,7 +1749,7 @@ fn color_always_multi_expression_symbols_only_highlights_replacements() {
 fn color_always_apply_multi_expression_symbols_only_highlights_replacements() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");
-    write(&file, "alpha.foo\nbeta—gamma\n");
+    write(&file, "alpha.foo\nbeta…gamma\n");
 
     let output = rep_command()
         .args([
@@ -1686,7 +1760,7 @@ fn color_always_apply_multi_expression_symbols_only_highlights_replacements() {
             ".",
             ":",
             "-e",
-            "—",
+            "…",
             "-",
             ".",
         ])
@@ -1702,7 +1776,7 @@ fn color_always_apply_multi_expression_symbols_only_highlights_replacements() {
 \x1b[35ma.txt \x1b[38;5;248m(2)\x1b[m
 \x1b[31;2m1\x1b[m alpha\x1b[31;4m.\x1b[mfoo
 \x1b[32;2m1\x1b[m alpha\x1b[32;4m:\x1b[mfoo
-\x1b[31;2m2\x1b[m beta\x1b[31;4m—\x1b[mgamma
+\x1b[31;2m2\x1b[m beta\x1b[31;4m…\x1b[mgamma
 \x1b[32;2m2\x1b[m beta\x1b[32;4m-\x1b[mgamma
 
 \x1b[1m\x1b[32mPerformed 2 replacements in 1 file\x1b[m

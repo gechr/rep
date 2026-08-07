@@ -52,7 +52,7 @@ impl CompiledExpression {
                 .regex
                 .as_ref()
                 .expect("str regex is compiled whenever preview mode is active"),
-            replacer: &*self.replacer,
+            replacer: self.replacer.as_ref(),
         }
     }
 }
@@ -117,6 +117,107 @@ fn project_case(source: &str, replacement: &str) -> String {
         }
         CaseShape::Mixed => replacement.to_string(),
     }
+}
+
+/// Inclusive 1-based line range parsed from `-L`/`--line-range`. `end` of
+/// `None` means "through the last line".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LineRange {
+    pub(crate) start: usize,
+    pub(crate) end: Option<usize>,
+}
+
+impl LineRange {
+    /// Accepts `n` (a single line), `n:m`, `n:` (through EOF), and `:m`
+    /// (from line 1). `-` works as a separator too.
+    pub(crate) fn parse(input: &str) -> Result<Self, String> {
+        let trimmed = input.trim();
+        let parse_line = |part: &str| -> Result<usize, String> {
+            let Ok(n) = part.parse::<usize>() else {
+                return Err(format!(
+                    "invalid line range {input:?}: expected <start>:<end> (e.g. 10:20)"
+                ));
+            };
+            if n == 0 {
+                return Err(format!(
+                    "invalid line range {input:?}: line numbers are 1-based"
+                ));
+            }
+            Ok(n)
+        };
+        let (start, end) = match trimmed.find([':', '-']) {
+            None => {
+                let n = parse_line(trimmed)?;
+                (n, Some(n))
+            }
+            Some(sep) => {
+                let (before, after) = (&trimmed[..sep], &trimmed[sep + 1..]);
+                let start = if before.is_empty() {
+                    1
+                } else {
+                    parse_line(before)?
+                };
+                let end = if after.is_empty() {
+                    None
+                } else {
+                    Some(parse_line(after)?)
+                };
+                (start, end)
+            }
+        };
+        if let Some(end) = end
+            && end < start
+        {
+            return Err(format!(
+                "invalid line range {input:?}: start {start} is past end {end}"
+            ));
+        }
+        Ok(Self { start, end })
+    }
+}
+
+/// Byte window covering `range`'s lines in `input`, including the end line's
+/// trailing newline (so delete-mode's `\n?` consumption stays in-window).
+/// Both bounds land on line boundaries, keeping `^`/`$` anchors valid on the
+/// slice. A range starting past the last line yields an empty window at EOF.
+pub(crate) fn line_range_window(input: &[u8], range: LineRange) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut start = (range.start == 1).then_some(0);
+    for nl in memchr::memchr_iter(b'\n', input) {
+        if range.end == Some(line) {
+            return (start.unwrap_or(input.len()), nl + 1);
+        }
+        line += 1;
+        if start.is_none() && line == range.start {
+            start = Some(nl + 1);
+        }
+    }
+    (start.unwrap_or(input.len()), input.len())
+}
+
+/// Resolves line ranges to byte windows and merges every overlap or adjacency.
+/// An empty range list selects the whole input.
+pub(crate) fn line_range_windows(input: &[u8], ranges: &[LineRange]) -> Vec<(usize, usize)> {
+    if ranges.is_empty() {
+        return vec![(0, input.len())];
+    }
+    let mut windows: Vec<_> = ranges
+        .iter()
+        .map(|&range| line_range_window(input, range))
+        .filter(|(start, end)| start < end)
+        .collect();
+    windows.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(windows.len());
+    for (start, end) in windows {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    merged
 }
 
 /// Byte-level record of one replacement: the span it consumed in the input
@@ -634,7 +735,59 @@ pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> 
 /// Only the first expression's positions are tracked: later expressions
 /// match against the rewritten text, so their offsets wouldn't index into
 /// either the displayed `-` (original) or `+` (final) lines correctly.
+///
+/// With `ranges`, the whole expression chain runs independently on each
+/// merged byte window covering those lines of the original input. Unselected
+/// bytes are stitched back untouched and span offsets use full-buffer
+/// coordinates.
 pub(crate) fn apply_compiled_expressions<'a>(
+    contents: &'a [u8],
+    expressions: &[CompiledExpression],
+    track_spans: bool,
+    ranges: &[LineRange],
+) -> (Cow<'a, [u8]>, usize, Vec<Replacement>) {
+    if ranges.is_empty() {
+        return apply_compiled_expressions_in_window(contents, expressions, track_spans);
+    }
+    let windows = line_range_windows(contents, ranges);
+    if windows.is_empty() {
+        return (Cow::Borrowed(contents), 0, Vec::new());
+    }
+    if windows == [(0, contents.len())] {
+        return apply_compiled_expressions_in_window(contents, expressions, track_spans);
+    }
+
+    let mut applied = Vec::with_capacity(windows.len());
+    let mut replacements = 0;
+    for (start, end) in windows {
+        let (current, count, spans) =
+            apply_compiled_expressions_in_window(&contents[start..end], expressions, track_spans);
+        replacements += count;
+        applied.push((start, end, current, spans));
+    }
+    if replacements == 0 {
+        return (Cow::Borrowed(contents), 0, Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(contents.len());
+    let mut all_spans = Vec::new();
+    let mut cursor = 0;
+    for (start, end, current, mut spans) in applied {
+        out.extend_from_slice(&contents[cursor..start]);
+        let output_start = out.len();
+        for span in &mut spans {
+            span.input_start += start;
+            span.output_start += output_start;
+        }
+        all_spans.extend(spans);
+        out.extend_from_slice(&current);
+        cursor = end;
+    }
+    out.extend_from_slice(&contents[cursor..]);
+    (Cow::Owned(out), replacements, all_spans)
+}
+
+fn apply_compiled_expressions_in_window<'a>(
     contents: &'a [u8],
     expressions: &[CompiledExpression],
     track_spans: bool,
@@ -735,13 +888,20 @@ pub(crate) fn first_column_map_for_expressions(
     needs_first_column: bool,
     input: &[u8],
     expressions: &[CompiledExpression],
+    ranges: &[LineRange],
 ) -> Option<Vec<(usize, usize)>> {
     if !needs_first_column {
         return None;
     }
     let mut offsets: Vec<usize> = Vec::new();
-    for expr in expressions {
-        offsets.extend(expr.bytes_regex.find_iter(input).map(|m| m.start()));
+    for (window_start, window_end) in line_range_windows(input, ranges) {
+        for expr in expressions {
+            offsets.extend(
+                expr.bytes_regex
+                    .find_iter(&input[window_start..window_end])
+                    .map(|m| m.start() + window_start),
+            );
+        }
     }
     offsets.sort_unstable();
     Some(byte_offsets_to_line_first_column(input, &offsets))
@@ -904,7 +1064,8 @@ mod tests {
         let cli = parse_cli(&["rep", "-e", "zzz", "qqq", "-e", "cat", "dog"]);
         let expressions = compile_expressions(&cli).unwrap();
         // line 1 "ab" has no match; line 2 "  cat x" matches at byte column 3.
-        let map = first_column_map_for_expressions(true, b"ab\n  cat x\n", &expressions).unwrap();
+        let map =
+            first_column_map_for_expressions(true, b"ab\n  cat x\n", &expressions, &[]).unwrap();
         assert_eq!(map, vec![(2, 3)]);
     }
 
@@ -912,7 +1073,7 @@ mod tests {
     fn test_first_column_map_for_expressions_skips_when_not_needed() {
         let cli = parse_cli(&["rep", "cat", "dog"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let map = first_column_map_for_expressions(false, b"cat\n", &expressions);
+        let map = first_column_map_for_expressions(false, b"cat\n", &expressions, &[]);
         assert!(map.is_none());
     }
 
@@ -924,7 +1085,7 @@ mod tests {
         // Each match is 3 bytes ("foo") and produces 3 bytes ("bar"), so
         // input/output offsets line up.
         let (_out, count, spans) =
-            apply_compiled_expressions(b"foo bar\nfoo baz\n", &expressions, true);
+            apply_compiled_expressions(b"foo bar\nfoo baz\n", &expressions, true, &[]);
         assert_eq!(count, 2);
         assert_eq!(
             spans,
@@ -950,7 +1111,7 @@ mod tests {
         let cli = parse_cli(&["rep", "foo", "bar"]);
         let expressions = compile_expressions(&cli).unwrap();
         let (_out, count, spans) =
-            apply_compiled_expressions(b"foo bar\nfoo baz\n", &expressions, false);
+            apply_compiled_expressions(b"foo bar\nfoo baz\n", &expressions, false, &[]);
         assert_eq!(count, 2);
         assert!(spans.is_empty());
     }
@@ -961,7 +1122,7 @@ mod tests {
         // the second match relative to input offsets.
         let cli = parse_cli(&["rep", "ab", "xyz"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (_out, count, spans) = apply_compiled_expressions(b"ab cd ab", &expressions, true);
+        let (_out, count, spans) = apply_compiled_expressions(b"ab cd ab", &expressions, true, &[]);
         assert_eq!(count, 2);
         assert_eq!(
             spans,
@@ -986,7 +1147,7 @@ mod tests {
         contents: &'a str,
         expressions: &[CompiledExpression],
     ) -> (Cow<'a, str>, usize) {
-        let (out, n, _) = apply_compiled_expressions(contents.as_bytes(), expressions, false);
+        let (out, n, _) = apply_compiled_expressions(contents.as_bytes(), expressions, false, &[]);
         let cow = match out {
             Cow::Borrowed(b) => Cow::Borrowed(std::str::from_utf8(b).unwrap()),
             Cow::Owned(o) => Cow::Owned(String::from_utf8(o).unwrap()),
@@ -1576,5 +1737,277 @@ mod tests {
         let preview = expressions[0].preview_expr();
         let caps = preview.regex.captures("FooBar").unwrap();
         assert_eq!((preview.replacer)(&caps), "HelloWorld");
+    }
+
+    #[test]
+    fn test_line_range_parse_forms() {
+        assert_eq!(
+            LineRange::parse("5"),
+            Ok(LineRange {
+                start: 5,
+                end: Some(5)
+            })
+        );
+        for input in ["10:20", "10-20", " 10:20 "] {
+            assert_eq!(
+                LineRange::parse(input),
+                Ok(LineRange {
+                    start: 10,
+                    end: Some(20)
+                }),
+                "input: {input:?}"
+            );
+        }
+        assert_eq!(
+            LineRange::parse("10:"),
+            Ok(LineRange {
+                start: 10,
+                end: None
+            })
+        );
+        assert_eq!(
+            LineRange::parse(":20"),
+            Ok(LineRange {
+                start: 1,
+                end: Some(20)
+            })
+        );
+    }
+
+    #[test]
+    fn test_line_range_parse_rejects_invalid_input() {
+        for input in ["", "abc", "1:2:3", "1,2", "1.5:2"] {
+            let err = LineRange::parse(input).expect_err(input);
+            assert!(err.contains("expected <start>:<end>"), "{input:?}: {err}");
+        }
+        for input in ["0", "0:5", "5:0"] {
+            let err = LineRange::parse(input).expect_err(input);
+            assert!(err.contains("1-based"), "{input:?}: {err}");
+        }
+        let err = LineRange::parse("20:10").expect_err("reversed");
+        assert!(err.contains("start 20 is past end 10"), "{err}");
+    }
+
+    #[test]
+    fn test_line_range_window_selects_line_boundaries() {
+        let input = b"aa\nbb\ncc\ndd\n";
+        let window = |s, e| line_range_window(input, LineRange { start: s, end: e });
+        assert_eq!(window(1, Some(1)), (0, 3));
+        assert_eq!(window(2, Some(3)), (3, 9));
+        assert_eq!(window(2, None), (3, 12));
+        assert_eq!(window(4, Some(4)), (9, 12));
+        // End past the last line clamps to EOF; start past it is empty.
+        assert_eq!(window(3, Some(99)), (6, 12));
+        assert_eq!(window(99, None), (12, 12));
+    }
+
+    #[test]
+    fn test_line_range_window_without_trailing_newline() {
+        assert_eq!(
+            line_range_window(
+                b"aa\nbb",
+                LineRange {
+                    start: 2,
+                    end: Some(2)
+                }
+            ),
+            (3, 5)
+        );
+    }
+
+    #[test]
+    fn test_line_range_windows_merges_overlapping_and_adjacent_ranges() {
+        let input = b"1\n2\n3\n4\n5\n6\n7\n";
+        let ranges = [
+            LineRange {
+                start: 2,
+                end: Some(3),
+            },
+            LineRange {
+                start: 1,
+                end: Some(3),
+            },
+            LineRange {
+                start: 2,
+                end: Some(5),
+            },
+            LineRange {
+                start: 7,
+                end: Some(7),
+            },
+        ];
+        assert_eq!(line_range_windows(input, &ranges), vec![(0, 10), (12, 14)]);
+        assert!(
+            line_range_windows(
+                input,
+                &[LineRange {
+                    start: 99,
+                    end: Some(100),
+                }]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_apply_with_line_range_replaces_only_in_range() {
+        let cli = parse_cli(&["rep", "foo", "bar"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let ranges = [LineRange {
+            start: 2,
+            end: Some(3),
+        }];
+        let (output, count, _) = apply_compiled_expressions(
+            b"foo 1\nfoo 2\nfoo 3\nfoo 4\n",
+            &expressions,
+            false,
+            &ranges,
+        );
+        assert_eq!(output.as_ref(), b"foo 1\nbar 2\nbar 3\nfoo 4\n");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_apply_with_line_range_shifts_spans_to_full_buffer_offsets() {
+        let cli = parse_cli(&["rep", "foo", "barbar"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let ranges = [LineRange {
+            start: 2,
+            end: Some(2),
+        }];
+        // Line 2 starts at byte 6; its "foo" sits at bytes 6..9 in both the
+        // input and (prefix is untouched) the output.
+        let (output, count, spans) =
+            apply_compiled_expressions(b"foo 1\nfoo 2\nfoo 3\n", &expressions, true, &ranges);
+        assert_eq!(output.as_ref(), b"foo 1\nbarbar 2\nfoo 3\n");
+        assert_eq!(count, 1);
+        assert_eq!(
+            spans,
+            vec![Replacement {
+                input_start: 6,
+                input_len: 3,
+                output_start: 6,
+                output_len: 6,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_apply_with_line_range_no_match_in_range_borrows() {
+        let cli = parse_cli(&["rep", "foo", "bar"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let ranges = [LineRange {
+            start: 2,
+            end: Some(2),
+        }];
+        let (output, count, _) =
+            apply_compiled_expressions(b"foo\nxxx\nfoo\n", &expressions, false, &ranges);
+        assert!(matches!(output, Cow::Borrowed(_)));
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_apply_with_line_range_past_eof_does_not_match_empty_regex() {
+        let cli = parse_cli(&["rep", "-r", "^", "inserted"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let ranges = [LineRange {
+            start: 99,
+            end: Some(100),
+        }];
+        let (output, count, _) =
+            apply_compiled_expressions(b"one\ntwo\n", &expressions, false, &ranges);
+        assert_eq!(output.as_ref(), b"one\ntwo\n");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_apply_with_line_range_delete_mode_removes_only_in_range() {
+        let cli = parse_cli(&["rep", "-d", "foo"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let ranges = [LineRange {
+            start: 2,
+            end: Some(3),
+        }];
+        let (output, count, _) = apply_compiled_expressions(
+            b"foo a\nfoo b\nkeep\nfoo c\n",
+            &expressions,
+            false,
+            &ranges,
+        );
+        assert_eq!(output.as_ref(), b"foo a\nkeep\nfoo c\n");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_apply_with_line_range_chains_expressions_within_window() {
+        let cli = parse_cli(&["rep", "-e", "a", "b", "-e", "b", "c"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let ranges = [LineRange {
+            start: 2,
+            end: Some(2),
+        }];
+        let (output, count, _) =
+            apply_compiled_expressions(b"a b\na b\na b\n", &expressions, false, &ranges);
+        // Both expressions apply inside the window only: a -> b -> c.
+        assert_eq!(output.as_ref(), b"a b\nc c\na b\n");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_apply_with_multiple_line_ranges_replaces_union_once() {
+        let cli = parse_cli(&["rep", "foo", "longer"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let ranges = [
+            LineRange {
+                start: 2,
+                end: Some(3),
+            },
+            LineRange {
+                start: 3,
+                end: Some(4),
+            },
+            LineRange {
+                start: 6,
+                end: Some(6),
+            },
+        ];
+        let (output, count, spans) = apply_compiled_expressions(
+            b"foo1\nfoo2\nfoo3\nfoo4\nfoo5\nfoo6\n",
+            &expressions,
+            true,
+            &ranges,
+        );
+        assert_eq!(
+            output.as_ref(),
+            b"foo1\nlonger2\nlonger3\nlonger4\nfoo5\nlonger6\n"
+        );
+        assert_eq!(count, 4);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.input_start)
+                .collect::<Vec<_>>(),
+            vec![5, 10, 15, 25]
+        );
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.output_start)
+                .collect::<Vec<_>>(),
+            vec![5, 13, 21, 34]
+        );
+    }
+
+    #[test]
+    fn test_first_column_map_for_expressions_respects_line_range() {
+        let cli = parse_cli(&["rep", "-e", "zzz", "qqq", "-e", "cat", "dog"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let ranges = [LineRange {
+            start: 2,
+            end: Some(2),
+        }];
+        let input = b"cat\n  cat\ncat\n";
+        let map = first_column_map_for_expressions(true, input, &expressions, &ranges).unwrap();
+        assert_eq!(map, vec![(2, 3)]);
     }
 }

@@ -44,7 +44,8 @@ fn apply_single_expression(b: &mut Bencher) {
     let text = corpus();
     let exprs = compile(&["rep", "needle", "replaced"]);
     b.iter(|| {
-        let (out, count, _) = apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false);
+        let (out, count, _) =
+            apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false, &[]);
         black_box((out, count));
     });
 }
@@ -55,7 +56,7 @@ fn apply_single_expression_with_spans(b: &mut Bencher) {
     let exprs = compile(&["rep", "needle", "replaced"]);
     b.iter(|| {
         let (out, count, spans) =
-            apply_compiled_expressions(black_box(text.as_bytes()), &exprs, true);
+            apply_compiled_expressions(black_box(text.as_bytes()), &exprs, true, &[]);
         black_box((out, count, spans));
     });
 }
@@ -65,7 +66,8 @@ fn apply_multi_expression(b: &mut Bencher) {
     let text = corpus();
     let exprs = compile(&["rep", "-e", "needle", "replaced", "-e", "compute", "derive"]);
     b.iter(|| {
-        let (out, count, _) = apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false);
+        let (out, count, _) =
+            apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false, &[]);
         black_box((out, count));
     });
 }
@@ -74,7 +76,7 @@ fn apply_multi_expression(b: &mut Bencher) {
 fn render_colored_diff(b: &mut Bencher) {
     let text = corpus();
     let exprs = compile(&["rep", "needle", "replaced"]);
-    let (out, _, spans) = apply_compiled_expressions(text.as_bytes(), &exprs, true);
+    let (out, _, spans) = apply_compiled_expressions(text.as_bytes(), &exprs, true, &[]);
     let new = String::from_utf8(out.into_owned()).expect("utf8 output");
     let hints = DiffHints {
         spans: &spans,

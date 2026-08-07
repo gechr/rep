@@ -180,6 +180,34 @@ struct PatchPrompt<'a> {
     has_history: bool,
 }
 
+struct PatchHistory {
+    contents: String,
+    offset: usize,
+    windows: Vec<(usize, usize)>,
+    window_index: usize,
+    expression_index: usize,
+    match_index: usize,
+    match_total: usize,
+}
+
+fn resize_window(windows: &mut [(usize, usize)], index: usize, old_len: usize, new_len: usize) {
+    if new_len >= old_len {
+        let delta = new_len - old_len;
+        windows[index].1 += delta;
+        for window in &mut windows[index + 1..] {
+            window.0 += delta;
+            window.1 += delta;
+        }
+    } else {
+        let delta = old_len - new_len;
+        windows[index].1 = windows[index].1.saturating_sub(delta);
+        for window in &mut windows[index + 1..] {
+            window.0 = window.0.saturating_sub(delta);
+            window.1 = window.1.saturating_sub(delta);
+        }
+    }
+}
+
 pub(crate) struct InteractivePatcher {
     yes_to_all: bool,
     preview_tool: Option<String>,
@@ -212,29 +240,38 @@ impl InteractivePatcher {
         expressions: &[PreviewExpr<'_>],
         path: &Path,
         contents: String,
+        windows: Vec<(usize, usize)>,
     ) -> Result<()> {
-        // History: (contents, offset, expr_idx, match_index, match_total)
-        let mut history: Vec<(String, usize, usize, usize, usize)> = Vec::new();
+        let mut history: Vec<PatchHistory> = Vec::new();
         let mut contents = contents;
+        let mut windows = windows;
+        let mut window_index = 0;
         let mut expr_idx = 0;
-        let mut offset = 0;
+        let mut offset = windows[0].0;
         let mut match_index = 0;
         let mut match_total = 0;
         let mut active_expr = usize::MAX; // sentinel to force initial computation
 
         while expr_idx < expressions.len() {
-            if offset >= contents.len() {
-                expr_idx += 1;
-                offset = 0;
-                match_index = 0;
-                active_expr = usize::MAX;
+            if offset >= windows[window_index].1 {
+                window_index += 1;
+                if window_index == windows.len() {
+                    expr_idx += 1;
+                    window_index = 0;
+                    match_index = 0;
+                    active_expr = usize::MAX;
+                }
+                offset = windows[window_index].0;
                 continue;
             }
 
             let PreviewExpr { regex, replacer } = expressions[expr_idx];
 
             if expr_idx != active_expr {
-                match_total = regex.find_iter(&contents).count();
+                match_total = windows
+                    .iter()
+                    .map(|&(start, end)| regex.find_iter(&contents[start..end]).count())
+                    .sum();
                 active_expr = expr_idx;
             }
 
@@ -247,10 +284,9 @@ impl InteractivePatcher {
                 start_line,
                 end_line,
             ) = {
-                let Some(caps) = regex.captures(&contents[offset..]) else {
-                    expr_idx += 1;
-                    offset = 0;
-                    match_index = 0;
+                let end = windows[window_index].1;
+                let Some(caps) = regex.captures(&contents[offset..end]) else {
+                    offset = end;
                     continue;
                 };
                 let mat = caps.get(0).expect("full regex match is always present");
@@ -295,14 +331,22 @@ impl InteractivePatcher {
                         to_char_boundary(&contents, offset + mat_end + usize::from(is_zero_length));
                 }
                 PatchAction::Accept => {
-                    history.push((
-                        contents.clone(),
+                    history.push(PatchHistory {
+                        contents: contents.clone(),
                         offset,
-                        expr_idx,
-                        match_index - 1,
+                        windows: windows.clone(),
+                        window_index,
+                        expression_index: expr_idx,
+                        match_index: match_index - 1,
                         match_total,
-                    ));
+                    });
                     Self::save(path, &new_contents)?;
+                    resize_window(
+                        &mut windows,
+                        window_index,
+                        mat_end - mat_start,
+                        replacement.len(),
+                    );
                     offset = to_char_boundary(
                         &new_contents,
                         offset + mat_start + replacement.len() + usize::from(is_zero_length),
@@ -310,27 +354,37 @@ impl InteractivePatcher {
                     contents = read_to_string(path)?;
                 }
                 PatchAction::Reject => {
-                    history.push((
-                        contents.clone(),
+                    history.push(PatchHistory {
+                        contents: contents.clone(),
                         offset,
-                        expr_idx,
-                        match_index - 1,
+                        windows: windows.clone(),
+                        window_index,
+                        expression_index: expr_idx,
+                        match_index: match_index - 1,
                         match_total,
-                    ));
+                    });
                     offset =
                         to_char_boundary(&contents, offset + mat_end + usize::from(is_zero_length));
                 }
                 PatchAction::Edit => {
-                    history.push((
-                        contents.clone(),
+                    history.push(PatchHistory {
+                        contents: contents.clone(),
                         offset,
-                        expr_idx,
-                        match_index - 1,
+                        windows: windows.clone(),
+                        window_index,
+                        expression_index: expr_idx,
+                        match_index: match_index - 1,
                         match_total,
-                    ));
+                    });
                     Self::save(path, &new_contents)?;
                     run_editor(path, start_line + 1)?;
+                    let old_len = contents.len();
                     contents = read_to_string(path)?;
+                    resize_window(&mut windows, window_index, old_len, contents.len());
+                    for window in &mut windows {
+                        window.0 = window.0.min(contents.len());
+                        window.1 = window.1.clamp(window.0, contents.len());
+                    }
                     offset = to_char_boundary(
                         &contents,
                         offset + mat_start + replacement.len() + usize::from(is_zero_length),
@@ -339,6 +393,12 @@ impl InteractivePatcher {
                 PatchAction::AcceptAll => {
                     self.yes_to_all = true;
                     Self::save(path, &new_contents)?;
+                    resize_window(
+                        &mut windows,
+                        window_index,
+                        mat_end - mat_start,
+                        replacement.len(),
+                    );
                     offset = to_char_boundary(
                         &new_contents,
                         offset + mat_start + replacement.len() + usize::from(is_zero_length),
@@ -346,16 +406,16 @@ impl InteractivePatcher {
                     contents = read_to_string(path)?;
                 }
                 PatchAction::Back => {
-                    if let Some((prev_contents, prev_offset, prev_expr, prev_match, prev_total)) =
-                        history.pop()
-                    {
-                        fs::write(path, &prev_contents)?;
-                        contents = prev_contents;
-                        offset = prev_offset;
-                        expr_idx = prev_expr;
-                        match_index = prev_match;
-                        match_total = prev_total;
-                        active_expr = prev_expr;
+                    if let Some(previous) = history.pop() {
+                        fs::write(path, &previous.contents)?;
+                        contents = previous.contents;
+                        offset = previous.offset;
+                        windows = previous.windows;
+                        window_index = previous.window_index;
+                        expr_idx = previous.expression_index;
+                        match_index = previous.match_index;
+                        match_total = previous.match_total;
+                        active_expr = expr_idx;
                     }
                 }
             }
@@ -544,7 +604,16 @@ impl InteractivePatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{backward_to_char_boundary, to_char_boundary};
+    use super::{backward_to_char_boundary, resize_window, to_char_boundary};
+
+    #[test]
+    fn test_resize_window_shifts_following_windows() {
+        let mut windows = vec![(3, 9), (12, 18)];
+        resize_window(&mut windows, 0, 2, 5);
+        assert_eq!(windows, vec![(3, 12), (15, 21)]);
+        resize_window(&mut windows, 1, 4, 1);
+        assert_eq!(windows, vec![(3, 12), (15, 18)]);
+    }
 
     /// `to_char_boundary` advances forward past any mid-character byte indices,
     /// which `present_and_apply_patches_multi` relies on when bumping the

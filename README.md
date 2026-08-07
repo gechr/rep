@@ -2,7 +2,7 @@
 
 `rep` is a fast find-and-replace tool, based on [fastmod](https://github.com/facebookincubator/fastmod).
 
-Features plain and regex replacement, case-aware rewrites, interactive preview, line deletion, file listing, stdin mode, and multiple replacements in one pass.
+Features plain and regex replacement, case-aware rewrites, line-range scoping, interactive preview, line deletion, file listing, stdin mode, and multiple replacements in one pass.
 
 By default `rep` prints a diff without touching the filesystem; pass `--write` to apply changes or `--preview` to step through them interactively.
 
@@ -39,6 +39,13 @@ rep 1.2.3 4.5.6
 
 # Replace "foo" with "bar" in "*.txt" files
 rep -f txt foo bar
+
+# Replace "foo" with "bar" only on lines 10 through 20 (inclusive)
+rep --line-range 10:20 foo bar
+
+# Select a union by repeating the flag or separating ranges with commas
+rep -L 10:20 -L 30-40 foo bar
+rep -L 10:20,30-40 foo bar
 
 # Replace "foo" with "bar" in all (hidden) files
 rep --hidden foo bar

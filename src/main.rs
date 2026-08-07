@@ -55,9 +55,9 @@ use clap_complete::Shell;
 use diffy::DiffOptions;
 
 use crate::expressions::{
-    CompiledExpression, EXPR_SEP, Replacement, apply_compiled_expressions,
+    CompiledExpression, EXPR_SEP, LineRange, Replacement, apply_compiled_expressions,
     build_pre_filter_matcher, compile_expressions, first_column_map_for_expressions,
-    first_column_map_if_needed, output_first_column_map,
+    first_column_map_if_needed, line_range_windows, output_first_column_map,
 };
 use crate::ui::Color;
 use crate::ui::ColorChoice;
@@ -223,6 +223,18 @@ struct Cli {
         help_heading = "Match"
     )]
     line_regexp: bool,
+
+    #[arg(
+        short = 'L',
+        long = "line-range",
+        alias = "lines",
+        value_name = "range",
+        value_parser = LineRange::parse,
+        value_delimiter = ',',
+        help = "Restrict matching to inclusive line ranges",
+        help_heading = "Match"
+    )]
+    line_ranges: Vec<LineRange>,
 
     #[arg(
         short = 'd',
@@ -1529,11 +1541,14 @@ fn run_list_files(cli: &Cli) -> Result<()> {
         .then(|| build_pre_filter_matcher(cli, &expressions))
         .transpose()?;
     let filter_by_change = cli.positional_replace().is_some();
+    let line_ranges = cli.line_ranges.clone();
     // Match/no-match probes can stream line by line and stop at the first
     // hit when every pattern is confined to a single line. The change-filter
     // path needs full contents regardless, so it keeps the multi-line
-    // searcher that `file_contents_if_matches` expects.
+    // searcher that `file_contents_if_matches` expects. A line range also
+    // needs full contents: the probe must re-check within the byte window.
     let line_oriented = !filter_by_change
+        && line_ranges.is_empty()
         && expressions
             .iter()
             .all(|expr| expr.preserves_line_boundaries);
@@ -1562,6 +1577,7 @@ fn run_list_files(cli: &Cli) -> Result<()> {
             let tx = tx.clone();
             let pre_filter = pre_filter.clone();
             let expressions = Arc::clone(&walk_expressions);
+            let line_ranges = line_ranges.clone();
             Box::new(move |result| {
                 let dirent = match result {
                     Ok(d) => d,
@@ -1579,7 +1595,7 @@ fn run_list_files(cli: &Cli) -> Result<()> {
                 }
                 let listed = match &pre_filter {
                     None => true,
-                    Some(pre_filter) if filter_by_change => {
+                    Some(pre_filter) if filter_by_change || !line_ranges.is_empty() => {
                         let Some(contents) = scan::file_contents_if_matches(
                             &mut searcher,
                             pre_filter,
@@ -1588,9 +1604,13 @@ fn run_list_files(cli: &Cli) -> Result<()> {
                         ) else {
                             return WalkState::Continue;
                         };
-                        let (updated, count, _) =
-                            apply_compiled_expressions(&contents, &expressions, false);
-                        count > 0 && *updated != *contents
+                        let (updated, count, _) = apply_compiled_expressions(
+                            &contents,
+                            &expressions,
+                            false,
+                            &line_ranges,
+                        );
+                        count > 0 && (!filter_by_change || *updated != *contents)
                     }
                     Some(pre_filter) => scan::file_matches(&mut searcher, pre_filter, path),
                 };
@@ -1625,6 +1645,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
 
     let expressions = Arc::new(compile_expressions(cli)?);
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
+    let line_ranges = cli.line_ranges.clone();
     // A single expression's pre-filter matcher *is* its replacement regex, so
     // a separate match probe just re-scans what `replace_all` would scan
     // anyway. Read the file (NUL-probed for binary) and let the replacement
@@ -1691,6 +1712,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
             let tx = tx.clone();
             let expressions = Arc::clone(&walk_expressions);
             let pre_filter = pre_filter.clone();
+            let line_ranges = line_ranges.clone();
             Box::new(move |result| {
                 let dirent = match result {
                     Ok(d) => d,
@@ -1731,7 +1753,12 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                         return WalkState::Continue;
                     }
                     let (updated, count, spans) =
-                        apply_compiled_expressions(&scratch, &expressions, track_spans);
+                        apply_compiled_expressions(
+                            &scratch,
+                            &expressions,
+                            track_spans,
+                            &line_ranges,
+                        );
                     if count == 0 {
                         return WalkState::Continue;
                     }
@@ -1766,7 +1793,12 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                         return WalkState::Continue;
                     };
                     let (updated, count, spans) =
-                        apply_compiled_expressions(&contents, &expressions, track_spans);
+                        apply_compiled_expressions(
+                            &contents,
+                            &expressions,
+                            track_spans,
+                            &line_ranges,
+                        );
                     if count == 0 {
                         return WalkState::Continue;
                     }
@@ -1774,6 +1806,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                         needs_first_column,
                         &contents,
                         &expressions,
+                        &line_ranges,
                     );
                     let updated = updated.into_owned();
                     // Multi-expression replacement spans share no coordinate
@@ -1890,7 +1923,11 @@ fn run_preview(cli: &Cli) -> Result<()> {
             );
             continue;
         };
-        fm.present_and_apply_patches_multi(&expr_refs, &path, contents)?;
+        let windows = line_range_windows(contents.as_bytes(), &cli.line_ranges);
+        if windows.is_empty() {
+            continue;
+        }
+        fm.present_and_apply_patches_multi(&expr_refs, &path, contents, windows)?;
     }
     Ok(())
 }
@@ -1900,7 +1937,7 @@ fn run_stdin(cli: &Cli) -> Result<()> {
     let expressions = compile_expressions(cli)?;
     let mut input = Vec::new();
     io::stdin().lock().read_to_end(&mut input)?;
-    let (output, _, _) = apply_compiled_expressions(&input, &expressions, false);
+    let (output, _, _) = apply_compiled_expressions(&input, &expressions, false, &cli.line_ranges);
     io::stdout().lock().write_all(&output)?;
     Ok(())
 }
@@ -1919,11 +1956,12 @@ fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
     use ignore::WalkState;
 
     let expressions = Arc::new(compile_expressions(cli)?);
+    let line_ranges = cli.line_ranges.clone();
 
     if is_stdin {
         let mut input = Vec::new();
         std::io::stdin().lock().read_to_end(&mut input)?;
-        let (_, count, _) = apply_compiled_expressions(&input, &expressions, false);
+        let (_, count, _) = apply_compiled_expressions(&input, &expressions, false, &line_ranges);
         println!("{count}");
         return Ok(());
     }
@@ -1958,6 +1996,7 @@ fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
         let pre_filter = pre_filter.clone();
         let total = Arc::clone(&walk_total);
         let error_tx = error_tx.clone();
+        let line_ranges = line_ranges.clone();
         Box::new(move |result| {
             let dirent = match result {
                 Ok(d) => d,
@@ -1977,7 +2016,8 @@ fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
                 if !scan::read_text_file(path, &mut scratch) {
                     return WalkState::Continue;
                 }
-                let (updated, count, _) = apply_compiled_expressions(&scratch, &expressions, false);
+                let (updated, count, _) =
+                    apply_compiled_expressions(&scratch, &expressions, false, &line_ranges);
                 if count == 0 {
                     return WalkState::Continue;
                 }
@@ -1989,7 +2029,7 @@ fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
                     return WalkState::Continue;
                 };
                 let (updated, count, _) =
-                    apply_compiled_expressions(&contents, &expressions, false);
+                    apply_compiled_expressions(&contents, &expressions, false, &line_ranges);
                 if count == 0 {
                     return WalkState::Continue;
                 }
@@ -2944,6 +2984,28 @@ mod tests {
         assert!(parse_cli(&["rep", "-m", "a", "b"]).is_regex());
         assert!(parse_cli(&["rep", "-G", "a", "b"]).is_regex());
         assert!(parse_cli(&["rep", "--dotall", "a", "b"]).is_regex());
+    }
+
+    #[test]
+    fn test_cli_collects_repeated_and_comma_separated_line_ranges() {
+        let cli = parse_cli(&["rep", "-L", "2:3,3-4", "-L", "8", "foo", "bar"]);
+        assert_eq!(
+            cli.line_ranges,
+            vec![
+                LineRange {
+                    start: 2,
+                    end: Some(3),
+                },
+                LineRange {
+                    start: 3,
+                    end: Some(4),
+                },
+                LineRange {
+                    start: 8,
+                    end: Some(8),
+                },
+            ]
+        );
     }
 
     #[test]
