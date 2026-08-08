@@ -176,48 +176,97 @@ impl LineRange {
     }
 }
 
-/// Byte window covering `range`'s lines in `input`, including the end line's
-/// trailing newline (so delete-mode's `\n?` consumption stays in-window).
-/// Both bounds land on line boundaries, keeping `^`/`$` anchors valid on the
-/// slice. A range starting past the last line yields an empty window at EOF.
-pub(crate) fn line_range_window(input: &[u8], range: LineRange) -> (usize, usize) {
-    let mut line = 1usize;
-    let mut start = (range.start == 1).then_some(0);
-    for nl in memchr::memchr_iter(b'\n', input) {
-        if range.end == Some(line) {
-            return (start.unwrap_or(input.len()), nl + 1);
+/// Sorts line ranges and merges every overlap or adjacency in line space, so
+/// `line_range_windows` can resolve them all in a single forward scan. An
+/// unbounded range swallows every range at or after its start line.
+fn merge_line_ranges(ranges: &[LineRange]) -> Vec<LineRange> {
+    let mut sorted = ranges.to_vec();
+    sorted.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<LineRange> = Vec::with_capacity(sorted.len());
+    for range in sorted {
+        if let Some(last) = merged.last_mut() {
+            let Some(last_end) = last.end else {
+                continue;
+            };
+            if range.start <= last_end.saturating_add(1) {
+                last.end = range.end.map(|end| end.max(last_end));
+                continue;
+            }
         }
-        line += 1;
-        if start.is_none() && line == range.start {
-            start = Some(nl + 1);
-        }
+        merged.push(range);
     }
-    (start.unwrap_or(input.len()), input.len())
+    merged
 }
 
-/// Resolves line ranges to byte windows and merges every overlap or adjacency.
-/// An empty range list selects the whole input.
+/// Resolves line ranges to sorted, disjoint byte windows in one newline scan,
+/// merging every overlap or adjacency. Each window includes the end line's
+/// trailing newline (so delete-mode's `\n?` consumption stays in-window) and
+/// both bounds land on line boundaries, keeping `^`/`$` anchors valid on the
+/// slice. Ranges starting past the last line are dropped, an empty range list
+/// selects the whole input, and the scan stops at the last line any range
+/// needs: an unbounded tail range ends it as soon as its start line is found.
 pub(crate) fn line_range_windows(input: &[u8], ranges: &[LineRange]) -> Vec<(usize, usize)> {
     if ranges.is_empty() {
         return vec![(0, input.len())];
     }
-    let mut windows: Vec<_> = ranges
-        .iter()
-        .map(|&range| line_range_window(input, range))
-        .filter(|(start, end)| start < end)
-        .collect();
-    windows.sort_unstable();
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(windows.len());
-    for (start, end) in windows {
-        if let Some(last) = merged.last_mut()
-            && start <= last.1
-        {
-            last.1 = last.1.max(end);
-        } else {
-            merged.push((start, end));
+    let merged;
+    let ranges = if ranges.len() > 1 {
+        merged = merge_line_ranges(ranges);
+        &merged[..]
+    } else {
+        ranges
+    };
+    let mut pending = ranges.iter().copied();
+    let mut range = pending.next().expect("merged ranges are non-empty");
+    if range.start == 1 && range.end.is_none() {
+        return vec![(0, input.len())];
+    }
+    let mut windows = Vec::with_capacity(ranges.len());
+    let mut line = 1usize;
+    let mut start = (range.start == 1).then_some(0);
+    for nl in memchr::memchr_iter(b'\n', input) {
+        if range.end == Some(line) {
+            windows.push((start.expect("start line precedes end line"), nl + 1));
+            start = None;
+            let Some(next) = pending.next() else {
+                return windows;
+            };
+            range = next;
+        }
+        line += 1;
+        if start.is_none() && line == range.start {
+            if range.end.is_none() {
+                windows.push((nl + 1, input.len()));
+                return windows;
+            }
+            start = Some(nl + 1);
         }
     }
-    merged
+    if let Some(window_start) = start
+        && window_start < input.len()
+    {
+        windows.push((window_start, input.len()));
+    }
+    windows
+}
+
+/// True when any expression matches inside any of `ranges`' byte windows,
+/// without building the rewritten buffer. Equivalent to a nonzero count from
+/// `apply_compiled_expressions`: each expression runs against the previous
+/// expression's output, so the chain's first match always lands on unmodified
+/// text, which is exactly what a per-window `is_match` probes.
+pub(crate) fn expressions_match_in_ranges(
+    contents: &[u8],
+    expressions: &[CompiledExpression],
+    ranges: &[LineRange],
+) -> bool {
+    line_range_windows(contents, ranges)
+        .iter()
+        .any(|&(start, end)| {
+            expressions
+                .iter()
+                .any(|expr| expr.bytes_regex.is_match(&contents[start..end]))
+        })
 }
 
 /// Byte-level record of one replacement: the span it consumed in the input
@@ -769,7 +818,9 @@ pub(crate) fn apply_compiled_expressions<'a>(
         return (Cow::Borrowed(contents), 0, Vec::new());
     }
 
-    let mut out = Vec::with_capacity(contents.len());
+    let selected: usize = applied.iter().map(|&(start, end, ..)| end - start).sum();
+    let produced: usize = applied.iter().map(|(.., current, _)| current.len()).sum();
+    let mut out = Vec::with_capacity(contents.len() - selected + produced);
     let mut all_spans = Vec::new();
     let mut cursor = 0;
     for (start, end, current, mut spans) in applied {
@@ -1789,29 +1840,30 @@ mod tests {
     }
 
     #[test]
-    fn test_line_range_window_selects_line_boundaries() {
+    fn test_line_range_windows_selects_line_boundaries() {
         let input = b"aa\nbb\ncc\ndd\n";
-        let window = |s, e| line_range_window(input, LineRange { start: s, end: e });
-        assert_eq!(window(1, Some(1)), (0, 3));
-        assert_eq!(window(2, Some(3)), (3, 9));
-        assert_eq!(window(2, None), (3, 12));
-        assert_eq!(window(4, Some(4)), (9, 12));
-        // End past the last line clamps to EOF; start past it is empty.
-        assert_eq!(window(3, Some(99)), (6, 12));
-        assert_eq!(window(99, None), (12, 12));
+        let window = |s, e| line_range_windows(input, &[LineRange { start: s, end: e }]);
+        assert_eq!(window(1, Some(1)), vec![(0, 3)]);
+        assert_eq!(window(2, Some(3)), vec![(3, 9)]);
+        assert_eq!(window(2, None), vec![(3, 12)]);
+        assert_eq!(window(4, Some(4)), vec![(9, 12)]);
+        assert_eq!(window(1, None), vec![(0, 12)]);
+        // End past the last line clamps to EOF; start past it selects nothing.
+        assert_eq!(window(3, Some(99)), vec![(6, 12)]);
+        assert_eq!(window(99, None), Vec::new());
     }
 
     #[test]
-    fn test_line_range_window_without_trailing_newline() {
+    fn test_line_range_windows_without_trailing_newline() {
         assert_eq!(
-            line_range_window(
+            line_range_windows(
                 b"aa\nbb",
-                LineRange {
+                &[LineRange {
                     start: 2,
                     end: Some(2)
-                }
+                }]
             ),
-            (3, 5)
+            vec![(3, 5)]
         );
     }
 
@@ -1837,6 +1889,40 @@ mod tests {
             },
         ];
         assert_eq!(line_range_windows(input, &ranges), vec![(0, 10), (12, 14)]);
+        // Line-adjacent ranges fuse into one window; an unbounded range
+        // swallows every range at or after its start line.
+        assert_eq!(
+            line_range_windows(
+                input,
+                &[
+                    LineRange {
+                        start: 1,
+                        end: Some(2),
+                    },
+                    LineRange {
+                        start: 3,
+                        end: Some(5),
+                    },
+                ]
+            ),
+            vec![(0, 10)]
+        );
+        assert_eq!(
+            line_range_windows(
+                input,
+                &[
+                    LineRange {
+                        start: 3,
+                        end: None,
+                    },
+                    LineRange {
+                        start: 5,
+                        end: Some(6),
+                    },
+                ]
+            ),
+            vec![(4, 14)]
+        );
         assert!(
             line_range_windows(
                 input,
@@ -1847,6 +1933,40 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn test_expressions_match_in_ranges_probes_windows_only() {
+        let cli = parse_cli(&["rep", "-e", "foo", "bar", "-e", "baz", "qux"]);
+        let expressions = compile_expressions(&cli).unwrap();
+        let range = |s, e| {
+            [LineRange {
+                start: s,
+                end: Some(e),
+            }]
+        };
+        let input = b"foo\nplain\nbaz\n";
+        assert!(expressions_match_in_ranges(
+            input,
+            &expressions,
+            &range(1, 1)
+        ));
+        // The second expression matches even though the first has no hit.
+        assert!(expressions_match_in_ranges(
+            input,
+            &expressions,
+            &range(3, 3)
+        ));
+        assert!(!expressions_match_in_ranges(
+            input,
+            &expressions,
+            &range(2, 2)
+        ));
+        assert!(!expressions_match_in_ranges(
+            input,
+            &expressions,
+            &range(99, 99)
+        ));
     }
 
     #[test]

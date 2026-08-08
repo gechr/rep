@@ -13,7 +13,9 @@ use test::black_box;
 
 use crate::Cli;
 use crate::diff::{self, DiffHints};
-use crate::expressions::{CompiledExpression, apply_compiled_expressions, compile_expressions};
+use crate::expressions::{
+    CompiledExpression, LineRange, apply_compiled_expressions, compile_expressions,
+};
 use crate::theme::StyleSpec;
 use crate::ui::Styles;
 
@@ -58,6 +60,31 @@ fn apply_single_expression_with_spans(b: &mut Bencher) {
         let (out, count, spans) =
             apply_compiled_expressions(black_box(text.as_bytes()), &exprs, true, &[]);
         black_box((out, count, spans));
+    });
+}
+
+#[bench]
+fn apply_single_expression_line_ranges(b: &mut Bencher) {
+    let text = corpus();
+    let exprs = compile(&["rep", "needle", "replaced"]);
+    let ranges = [
+        LineRange {
+            start: 100,
+            end: Some(300),
+        },
+        LineRange {
+            start: 900,
+            end: Some(1100),
+        },
+        LineRange {
+            start: 1700,
+            end: Some(1900),
+        },
+    ];
+    b.iter(|| {
+        let (out, count, _) =
+            apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false, &ranges);
+        black_box((out, count));
     });
 }
 

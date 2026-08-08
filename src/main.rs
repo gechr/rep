@@ -56,8 +56,9 @@ use diffy::DiffOptions;
 
 use crate::expressions::{
     CompiledExpression, EXPR_SEP, LineRange, Replacement, apply_compiled_expressions,
-    build_pre_filter_matcher, compile_expressions, first_column_map_for_expressions,
-    first_column_map_if_needed, line_range_windows, output_first_column_map,
+    build_pre_filter_matcher, compile_expressions, expressions_match_in_ranges,
+    first_column_map_for_expressions, first_column_map_if_needed, line_range_windows,
+    output_first_column_map,
 };
 use crate::ui::Color;
 use crate::ui::ColorChoice;
@@ -1604,13 +1605,19 @@ fn run_list_files(cli: &Cli) -> Result<()> {
                         ) else {
                             return WalkState::Continue;
                         };
-                        let (updated, count, _) = apply_compiled_expressions(
-                            &contents,
-                            &expressions,
-                            false,
-                            &line_ranges,
-                        );
-                        count > 0 && (!filter_by_change || *updated != *contents)
+                        if filter_by_change {
+                            let (updated, count, _) = apply_compiled_expressions(
+                                &contents,
+                                &expressions,
+                                false,
+                                &line_ranges,
+                            );
+                            count > 0 && *updated != *contents
+                        } else {
+                            // Line-range listing needs only match presence, so
+                            // probe the windows without building the rewrite.
+                            expressions_match_in_ranges(&contents, &expressions, &line_ranges)
+                        }
                     }
                     Some(pre_filter) => scan::file_matches(&mut searcher, pre_filter, path),
                 };
