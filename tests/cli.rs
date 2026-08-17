@@ -960,6 +960,40 @@ fn stdin_mode_writes_replaced_text_to_stdout() {
 }
 
 #[test]
+fn stdin_mode_expands_replacement_escapes() {
+    let mut child = rep_command()
+        .args(["a", r"b\nc\tend"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"a").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"b\nc\tend");
+}
+
+#[test]
+fn stdin_mode_doubled_backslash_quotes_replacement_escape() {
+    let mut child = rep_command()
+        .args(["a", r"b\\nc"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"a").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, br"b\nc");
+}
+
+#[test]
 fn explicit_stdin_path_reads_replaced_text_from_stdin() {
     let mut child = rep_command()
         .args(["foo", "bar", "-"])

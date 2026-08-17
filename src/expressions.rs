@@ -535,6 +535,41 @@ fn parse_expressions(cli: &Cli) -> Result<Vec<Expression>> {
         .collect()
 }
 
+/// Expand visible control-character escapes in replacement arguments.
+/// Unknown escapes retain their backslash so path-like replacement text is
+/// not silently changed. A doubled backslash quotes the escape that follows.
+fn expand_replacement_escapes(replacement: &str) -> String {
+    let mut expanded = String::with_capacity(replacement.len());
+    let mut chars = replacement.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            expanded.push(c);
+            continue;
+        }
+
+        match chars.peek().copied() {
+            Some('n') => {
+                chars.next();
+                expanded.push('\n');
+            }
+            Some('r') => {
+                chars.next();
+                expanded.push('\r');
+            }
+            Some('t') => {
+                chars.next();
+                expanded.push('\t');
+            }
+            Some('\\') => {
+                chars.next();
+                expanded.push('\\');
+            }
+            _ => expanded.push('\\'),
+        }
+    }
+    expanded
+}
+
 fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression> {
     if cli.preserve {
         // Literal pattern, case-insensitive via embedded `(?i:...)` so the
@@ -731,7 +766,7 @@ pub(crate) fn build_pre_filter_matcher(
 }
 
 pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> {
-    let expressions = if cli.uses_expressions() {
+    let mut expressions = if cli.uses_expressions() {
         if cli.delete {
             // In delete mode the replace half of `-e <find> <replace>` is
             // ignored. Extract only the find part (before the \x00 separator).
@@ -762,6 +797,10 @@ pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> 
                 .unwrap_or_default(),
         }]
     };
+
+    for expr in &mut expressions {
+        expr.replace = expand_replacement_escapes(&expr.replace);
+    }
 
     expressions
         .iter()
@@ -1282,6 +1321,16 @@ mod tests {
     #[test]
     fn test_parse_expression_missing_null_byte() {
         assert!(parse_expression("no-null-here").is_err());
+    }
+
+    #[test]
+    fn test_expand_replacement_escapes() {
+        assert_eq!(
+            expand_replacement_escapes(r"line\nnext\r\ttab\\slash"),
+            "line\nnext\r\ttab\\slash"
+        );
+        assert_eq!(expand_replacement_escapes(r"keep\q\"), r"keep\q\");
+        assert_eq!(expand_replacement_escapes(r"literal\\n"), r"literal\n");
     }
 
     #[test]
