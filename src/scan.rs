@@ -72,6 +72,10 @@ pub(crate) fn apply_walk_flags(builder: &mut WalkBuilder, hidden: bool, no_ignor
             .git_ignore(false)
             .git_exclude(false)
             .git_global(false);
+    } else {
+        // Custom ignore filenames take precedence over .ignore and
+        // .gitignore in the `ignore` crate.
+        builder.add_custom_ignore_filename(".repignore");
     }
     builder.filter_entry(|entry| {
         // Entries at depth >= 2 only need their own name checked: any VCS

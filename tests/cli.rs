@@ -1213,6 +1213,57 @@ fn no_ignore_with_hidden_still_skips_vcs_paths() {
 }
 
 #[test]
+fn repignore_skips_matching_files() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join(".repignore"), "ignored.txt\n");
+    write(&dir.path().join("ignored.txt"), "foo");
+    write(&dir.path().join("file.txt"), "foo");
+
+    let status = rep_command()
+        .args(["-W", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(read(&dir.path().join("file.txt")), "bar");
+    assert_eq!(read(&dir.path().join("ignored.txt")), "foo");
+}
+
+#[test]
+fn repignore_takes_precedence_over_ignore_whitelist() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join(".ignore"), "!ignored.txt\n");
+    write(&dir.path().join(".repignore"), "ignored.txt\n");
+    write(&dir.path().join("ignored.txt"), "foo");
+
+    let status = rep_command()
+        .args(["-W", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(read(&dir.path().join("ignored.txt")), "foo");
+}
+
+#[test]
+fn no_ignore_disables_repignore() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join(".repignore"), "ignored.txt\n");
+    write(&dir.path().join("ignored.txt"), "foo");
+
+    let status = rep_command()
+        .args(["-W", "--no-ignore", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(read(&dir.path().join("ignored.txt")), "bar");
+}
+
+#[test]
 fn smart_mode_replaces_all_seven_case_variants() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");
