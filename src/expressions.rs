@@ -11,6 +11,7 @@ use grep::regex::RegexMatcher;
 use grep::regex::RegexMatcherBuilder;
 use regex::RegexBuilder;
 use regex::bytes::RegexBuilder as BytesRegexBuilder;
+use regex_syntax::ast;
 
 use crate::Cli;
 
@@ -483,7 +484,7 @@ pub(crate) fn build_pattern_for(cli: &Cli, pattern: &str) -> String {
     };
 
     let inner = if cli.is_regex() && !cli.greedy {
-        format!("(?U){wrapped}")
+        make_quantifiers_lazy(&wrapped)
     } else {
         wrapped
     };
@@ -493,6 +494,81 @@ pub(crate) fn build_pattern_for(cli: &Cli, pattern: &str) -> String {
     } else {
         inner
     }
+}
+
+/// Make greedy quantifiers lazy by default without turning an explicitly lazy
+/// quantifier back into a greedy one. Rust regex's `U` flag swaps both forms,
+/// so `.*?` must first be normalized to `.*` wherever that flag is active.
+fn make_quantifiers_lazy(pattern: &str) -> String {
+    struct LazyMarkerCollector {
+        marker_offsets: Vec<usize>,
+        swap_greed: bool,
+    }
+
+    impl LazyMarkerCollector {
+        fn collect(&mut self, node: &ast::Ast) {
+            match node {
+                ast::Ast::Repetition(rep) => {
+                    if self.swap_greed && !rep.greedy {
+                        self.marker_offsets.push(rep.op.span.end.offset - 1);
+                    }
+                    self.collect(&rep.ast);
+                }
+                ast::Ast::Flags(set) => {
+                    if let Some(enabled) = set.flags.flag_state(ast::Flag::SwapGreed) {
+                        self.swap_greed = enabled;
+                    }
+                }
+                ast::Ast::Group(group) => {
+                    let previous = self.swap_greed;
+                    if let Some(flags) = group.flags()
+                        && let Some(enabled) = flags.flag_state(ast::Flag::SwapGreed)
+                    {
+                        self.swap_greed = enabled;
+                    }
+                    self.collect(&group.ast);
+                    self.swap_greed = previous;
+                }
+                ast::Ast::Alternation(alt) => {
+                    for child in &alt.asts {
+                        self.collect(child);
+                    }
+                }
+                ast::Ast::Concat(concat) => {
+                    for child in &concat.asts {
+                        self.collect(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let Ok(tree) = ast::parse::Parser::new().parse(pattern) else {
+        // Pattern compilation below will report the original syntax error.
+        return format!("(?U){pattern}");
+    };
+    let mut collector = LazyMarkerCollector {
+        marker_offsets: Vec::new(),
+        swap_greed: true,
+    };
+    collector.collect(&tree);
+    let mut marker_offsets = collector.marker_offsets;
+    marker_offsets.sort_unstable();
+
+    let mut normalized = String::with_capacity(pattern.len() + 4);
+    let mut copied_through = 0;
+    for offset in marker_offsets {
+        normalized.push_str(&pattern[copied_through..offset]);
+        debug_assert_eq!(
+            pattern.as_bytes()[offset],
+            b'?',
+            "lazy repetition span must end at its question-mark marker"
+        );
+        copied_through = offset + 1;
+    }
+    normalized.push_str(&pattern[copied_through..]);
+    format!("(?U){normalized}")
 }
 
 /// Extend a match pattern to consume the full line(s) it sits on, plus any
@@ -1364,6 +1440,36 @@ mod tests {
     fn test_build_pattern_regex_non_greedy_by_default() {
         let cli = parse_cli(&["rep", "-r", "a.*b", "x"]);
         assert_eq!(build_pattern(&cli), "(?U)a.*b");
+    }
+
+    #[test]
+    fn test_build_pattern_preserves_explicit_lazy_quantifiers() {
+        let cli = parse_cli(&["rep", "-r", "a.*?b.+?c.??d.{2,4}?e", "x"]);
+        assert_eq!(build_pattern(&cli), "(?U)a.*b.+c.?d.{2,4}e");
+    }
+
+    #[test]
+    fn test_build_pattern_preserves_lazy_quantifier_in_greedy_scope() {
+        let cli = parse_cli(&["rep", "-r", r"a(?-U:.*?).*?b", "x"]);
+        assert_eq!(build_pattern(&cli), r"(?U)a(?-U:.*?).*b");
+    }
+
+    #[test]
+    fn test_build_pattern_restores_greediness_after_flagged_group() {
+        let cli = parse_cli(&["rep", "-r", r"(x(?-U)y*?)z*?", "x"]);
+        assert_eq!(build_pattern(&cli), r"(?U)(x(?-U)y*?)z*");
+    }
+
+    #[test]
+    fn test_build_pattern_carries_inline_flags_across_alternatives() {
+        let cli = parse_cli(&["rep", "-r", r"a*?|(?-U)b*?|c*?", "x"]);
+        assert_eq!(build_pattern(&cli), r"(?U)a*|(?-U)b*?|c*?");
+    }
+
+    #[test]
+    fn test_build_pattern_defers_invalid_pattern_error_to_compiler() {
+        let cli = parse_cli(&["rep", "-r", "(", "x"]);
+        assert_eq!(build_pattern(&cli), "(?U)(");
     }
 
     #[test]

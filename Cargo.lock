@@ -796,6 +796,7 @@ dependencies = [
  "natord",
  "num-format",
  "regex",
+ "regex-syntax",
  "serde",
  "shlex 2.0.1",
  "similar",

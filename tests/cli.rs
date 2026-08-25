@@ -554,6 +554,39 @@ fn dry_run_pairs_multiline_replacements_by_line() {
 }
 
 #[test]
+fn explicit_lazy_quantifiers_stop_at_first_multiline_terminator() {
+    let input = "start {\n  a\n},\nother {\n  b\n},\ntail\n";
+    let cases: &[(&[&str], &str)] = &[
+        (&["-m", "--dotall"], r"start \{.*?\n\},\n"),
+        (&["-m", "--dotall"], r"start \{.+?\n\},\n"),
+        (&["-m"], r"start \{[\s\S]*?\n\},\n"),
+        (&["-m"], r"start \{[\s\S]+?\n\},\n"),
+        (&["-m", "--dotall", "-G"], r"start \{.*?\n\},\n"),
+    ];
+
+    for &(flags, pattern) in cases {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        write(&file, input);
+
+        let status = rep_command()
+            .args(["-W", "-r"])
+            .args(flags)
+            .args([pattern, "X", "."])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+
+        assert!(status.success(), "flags: {flags:?}, pattern: {pattern}");
+        assert_eq!(
+            read(&file),
+            "Xother {\n  b\n},\ntail\n",
+            "flags: {flags:?}, pattern: {pattern}"
+        );
+    }
+}
+
+#[test]
 fn dry_run_preserves_new_line_numbers_for_line_expansion() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");
