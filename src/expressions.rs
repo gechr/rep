@@ -1145,8 +1145,12 @@ pub(crate) fn byte_offsets_to_line_first_column(
             next_nl = newlines.next();
         }
         // Later offsets on an already-recorded line keep the first column.
+        // Editors count columns in characters, so count the UTF-8 sequence
+        // starts before the match rather than its bytes.
         if map.last().is_none_or(|&(l, _)| l != line) {
-            let col = off.saturating_sub(line_start) + 1;
+            let col = input.get(line_start..off).map_or(0, |prefix| {
+                prefix.iter().filter(|b| (*b & 0xC0) != 0x80).count()
+            }) + 1;
             map.push((line, col));
         }
     }
@@ -1185,6 +1189,18 @@ mod tests {
         let input = b"abc\ndefoo\nfoox";
         let map = byte_offsets_to_line_first_column(input, &[6, 10]);
         assert_eq!(map, vec![(2, 3), (3, 1)]);
+    }
+
+    #[test]
+    fn test_byte_offsets_to_line_first_column_counts_characters() {
+        // "héllo foo": `é` is 2 bytes, so `foo` starts at byte 7 but
+        // character column 7 (1-indexed), not 8.
+        let input = "héllo foo\n日本 foo".as_bytes();
+        let foo = input.windows(3).position(|w| w == b"foo").unwrap();
+        let second = input.windows(3).rposition(|w| w == b"foo").unwrap();
+        assert_eq!(foo, 7, "byte offset of the first match");
+        let map = byte_offsets_to_line_first_column(input, &[foo, second]);
+        assert_eq!(map, vec![(1, 7), (2, 4)]);
     }
 
     #[test]
