@@ -734,9 +734,12 @@ fn resolve_mutex_groups(
         resolve_list_files_vs_preview_tool(cli, matches, origin)?;
     }
 
-    let case = resolve_group(matches, origin, &["smart", "preserve"])?;
+    // `--smart` and `--preserve` match `<find>` literally, so they exclude
+    // `--regex` as well as each other.
+    let case = resolve_group(matches, origin, &["smart", "preserve", "regexp"])?;
     cli.smart = case == Some("smart");
     cli.preserve = case == Some("preserve");
+    cli.regexp = case == Some("regexp");
 
     let regex_anchor = resolve_group(matches, origin, &["word_regexp", "line_regexp"])?;
     cli.word_regexp = regex_anchor == Some("word_regexp");
@@ -2635,6 +2638,14 @@ mod tests {
         let dry_run = parse_and_resolve(&["rep", "--dry-run", "--count", "a", "b"]).unwrap();
         assert!(dry_run.dry_run);
         assert!(dry_run.count);
+    }
+
+    #[test]
+    fn test_regex_is_mutex_with_smart_and_preserve_on_cli() {
+        assert!(parse_and_resolve(&["rep", "--preserve", "--regex", "a", "b"]).is_err());
+        assert!(parse_and_resolve(&["rep", "--smart", "-r", "a", "b"]).is_err());
+        let cli = parse_and_resolve(&["rep", "-r", "a", "b"]).unwrap();
+        assert!(cli.regexp, "regex alone stays on");
     }
 
     #[test]
