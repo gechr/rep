@@ -10,7 +10,7 @@
 use std::fmt::Write as _;
 use std::io::Write as _;
 
-use diff::Result as DiffResult;
+use std::hash::Hash;
 
 use crate::expressions::Replacement;
 use crate::theme::{self, Side, StyleSpec};
@@ -746,41 +746,47 @@ fn lines_for_numbers<'a>(text: &'a str, line_numbers: &[usize]) -> Option<Vec<(u
     }
 }
 
-/// Line-level diff producing the `DiffResult` stream the renderers consume.
-/// Lines are split on `\n` (a newline-terminated input yields a final empty
-/// line, which the renderers skip) and compared with `similar`'s Myers
-/// algorithm, which stays near-linear in file size when edits are sparse.
-pub(crate) fn line_diffs<'a>(old: &'a str, new: &'a str) -> Vec<DiffResult<&'a str>> {
+/// One aligned element from a diff: present on the old side only, on both
+/// sides, or on the new side only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiffResult<T> {
+    Left(T),
+    Both(T, T),
+    Right(T),
+}
+
+/// Aligns `old` against `new` with `similar`'s Myers algorithm, which stays
+/// near-linear in input size when edits are sparse, and flattens the edit
+/// script into one `DiffResult` per element.
+fn diff_slices<T: Copy + Eq + Hash>(old: &[T], new: &[T]) -> Vec<DiffResult<T>> {
     use similar::{Algorithm, DiffOp, capture_diff_slices};
 
-    let old_lines: Vec<&str> = old.split('\n').collect();
-    let new_lines: Vec<&str> = new.split('\n').collect();
-    let mut out = Vec::with_capacity(old_lines.len().max(new_lines.len()));
-    for op in capture_diff_slices(Algorithm::Myers, &old_lines, &new_lines) {
+    let mut out = Vec::with_capacity(old.len().max(new.len()));
+    for op in capture_diff_slices(Algorithm::Myers, old, new) {
         match op {
             DiffOp::Equal {
                 old_index,
                 new_index,
                 len,
             } => out.extend(
-                old_lines[old_index..old_index + len]
+                old[old_index..old_index + len]
                     .iter()
-                    .zip(&new_lines[new_index..new_index + len])
+                    .zip(&new[new_index..new_index + len])
                     .map(|(o, n)| DiffResult::Both(*o, *n)),
             ),
             DiffOp::Delete {
                 old_index, old_len, ..
             } => out.extend(
-                old_lines[old_index..old_index + old_len]
+                old[old_index..old_index + old_len]
                     .iter()
-                    .map(|line| DiffResult::Left(*line)),
+                    .map(|item| DiffResult::Left(*item)),
             ),
             DiffOp::Insert {
                 new_index, new_len, ..
             } => out.extend(
-                new_lines[new_index..new_index + new_len]
+                new[new_index..new_index + new_len]
                     .iter()
-                    .map(|line| DiffResult::Right(*line)),
+                    .map(|item| DiffResult::Right(*item)),
             ),
             DiffOp::Replace {
                 old_index,
@@ -789,19 +795,28 @@ pub(crate) fn line_diffs<'a>(old: &'a str, new: &'a str) -> Vec<DiffResult<&'a s
                 new_len,
             } => {
                 out.extend(
-                    old_lines[old_index..old_index + old_len]
+                    old[old_index..old_index + old_len]
                         .iter()
-                        .map(|line| DiffResult::Left(*line)),
+                        .map(|item| DiffResult::Left(*item)),
                 );
                 out.extend(
-                    new_lines[new_index..new_index + new_len]
+                    new[new_index..new_index + new_len]
                         .iter()
-                        .map(|line| DiffResult::Right(*line)),
+                        .map(|item| DiffResult::Right(*item)),
                 );
             }
         }
     }
     out
+}
+
+/// Line-level diff producing the `DiffResult` stream the renderers consume.
+/// Lines are split on `\n` (a newline-terminated input yields a final empty
+/// line, which the renderers skip).
+pub(crate) fn line_diffs<'a>(old: &'a str, new: &'a str) -> Vec<DiffResult<&'a str>> {
+    let old_lines: Vec<&str> = old.split('\n').collect();
+    let new_lines: Vec<&str> = new.split('\n').collect();
+    diff_slices(&old_lines, &new_lines)
 }
 
 pub(crate) fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) {
@@ -1181,24 +1196,18 @@ enum InlineSide {
     New,
 }
 
-#[derive(Clone, Copy)]
-enum TokenDiff<'a> {
-    Both(&'a str, &'a str),
-    Left(&'a str),
-    Right(&'a str),
-}
+type TokenDiff<'a> = DiffResult<&'a str>;
 
 fn inline_token_diff<'a>(old_line: &'a str, new_line: &'a str) -> Vec<TokenDiff<'a>> {
-    let old_tokens = tokenize(old_line);
-    let new_tokens = tokenize(new_line);
-    diff::slice(&old_tokens, &new_tokens)
-        .into_iter()
-        .map(|item| match item {
-            DiffResult::Both(old, new) => TokenDiff::Both(old, new),
-            DiffResult::Left(old) => TokenDiff::Left(old),
-            DiffResult::Right(new) => TokenDiff::Right(new),
-        })
-        .collect()
+    diff_slices(&tokenize(old_line), &tokenize(new_line))
+}
+
+/// Character-level diff of two strings, computed once so the single-run
+/// check and the renderer share the same alignment.
+fn char_diff(old: &str, new: &str) -> Vec<DiffResult<char>> {
+    let old_chars: Vec<char> = old.chars().collect();
+    let new_chars: Vec<char> = new.chars().collect();
+    diff_slices(&old_chars, &new_chars)
 }
 
 fn write_inline_chars(out: &mut String, diffs: &[TokenDiff<'_>], side: InlineSide, styles: Styles) {
@@ -1250,8 +1259,8 @@ fn write_change_block(
 
     let old_text = lefts.concat();
     let new_text = rights.concat();
-    if should_block_char_diff(&old_text, &new_text) {
-        write_char_diff(out, &old_text, &new_text, side, styles);
+    if let Some(chars) = block_char_diff(&old_text, &new_text) {
+        write_char_diff(out, &chars, side, styles);
         return;
     }
 
@@ -1274,8 +1283,8 @@ fn write_balanced_change_block(
         InlineSide::New => (rights, Color::Green),
     };
     for (k, own_tok) in own_tokens.iter().enumerate() {
-        if should_intra_word_diff(lefts[k], rights[k]) {
-            write_char_diff(out, lefts[k], rights[k], side, styles);
+        if let Some(chars) = intra_word_char_diff(lefts[k], rights[k]) {
+            write_char_diff(out, &chars, side, styles);
         } else {
             let _ = write!(
                 out,
@@ -1298,14 +1307,14 @@ fn write_underlined_tokens(out: &mut String, tokens: &[&str], color: Color, styl
     }
 }
 
-fn write_char_diff(out: &mut String, old: &str, new: &str, side: InlineSide, styles: Styles) {
+fn write_char_diff(out: &mut String, chars: &[DiffResult<char>], side: InlineSide, styles: Styles) {
     let color = match side {
         InlineSide::Old => Color::Red,
         InlineSide::New => Color::Green,
     };
     let mut highlighting = false;
-    for item in diff::chars(old, new) {
-        match (side, item) {
+    for item in chars {
+        match (side, *item) {
             (InlineSide::Old, DiffResult::Both(ch, _))
             | (InlineSide::New, DiffResult::Both(_, ch)) => {
                 if highlighting {
@@ -1329,35 +1338,44 @@ fn write_char_diff(out: &mut String, old: &str, new: &str, side: InlineSide, sty
     }
 }
 
-fn should_block_char_diff(old: &str, new: &str) -> bool {
+/// Character diff for an unbalanced change block, when the block is small
+/// enough and each side forms a single changed run.
+fn block_char_diff(old: &str, new: &str) -> Option<Vec<DiffResult<char>>> {
     const MAX_BLOCK_CHAR_DIFF_LEN: usize = 1024;
     if old.len() > MAX_BLOCK_CHAR_DIFF_LEN || new.len() > MAX_BLOCK_CHAR_DIFF_LEN {
-        return false;
+        return None;
     }
-    has_single_changed_run_per_side(old, new)
+    single_run_char_diff(old, new)
 }
 
-pub(crate) fn should_intra_word_diff(old_tok: &str, new_tok: &str) -> bool {
+/// Character diff for a pair of word tokens, when both are words, short
+/// enough to diff, and each side forms a single changed run.
+fn intra_word_char_diff(old_tok: &str, new_tok: &str) -> Option<Vec<DiffResult<char>>> {
     // Cap diff work for pathological tokens (e.g. a multi-KB minified identifier).
     const MAX_INTRA_WORD_LEN: usize = 1024;
     if token_kind(old_tok) != TokenKind::Word || token_kind(new_tok) != TokenKind::Word {
-        return false;
+        return None;
     }
     if old_tok.len() > MAX_INTRA_WORD_LEN || new_tok.len() > MAX_INTRA_WORD_LEN {
-        return false;
+        return None;
     }
-    // Use char-diff only when each side forms at most one contiguous changed
-    // run, so colored characters are never interrupted by uncolored shared
-    // chars. Two-or-more runs on either side would speckle the output.
-    has_single_changed_run_per_side(old_tok, new_tok)
+    single_run_char_diff(old_tok, new_tok)
 }
 
-fn has_single_changed_run_per_side(old: &str, new: &str) -> bool {
+/// Char-diff only when each side forms at most one contiguous changed run,
+/// so colored characters are never interrupted by uncolored shared chars.
+/// Two-or-more runs on either side would speckle the output.
+fn single_run_char_diff(old: &str, new: &str) -> Option<Vec<DiffResult<char>>> {
+    let chars = char_diff(old, new);
+    has_single_changed_run_per_side(&chars).then_some(chars)
+}
+
+fn has_single_changed_run_per_side(chars: &[DiffResult<char>]) -> bool {
     let mut left_runs = 0usize;
     let mut right_runs = 0usize;
     let mut in_left = false;
     let mut in_right = false;
-    for item in diff::chars(old, new) {
+    for item in chars {
         match item {
             DiffResult::Left(_) => {
                 if !in_left {

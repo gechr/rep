@@ -20,12 +20,12 @@ use anyhow::Context as _;
 use anyhow::Error;
 use anyhow::bail;
 use anyhow::ensure;
-use diff::Result as DiffResult;
 use regex::Regex;
 use tempfile::NamedTempFile;
 
 mod terminal;
 
+use crate::diff::DiffResult;
 use crate::ui::Color;
 use crate::ui::Styles;
 
