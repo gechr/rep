@@ -98,10 +98,16 @@ fn prompt(
     std::io::stdout().flush()?;
 
     enable_raw_mode().context("Unable to enable raw mode")?;
+    // Every exit from this loop, including a read failure, must pass the
+    // `disable_raw_mode` below or the terminal is left without echo.
     let result = loop {
+        let event = match event::read() {
+            Ok(event) => event,
+            Err(err) => break Err(anyhow::Error::new(err).context("Unable to read key event")),
+        };
         if let Event::Key(KeyEvent {
             code, modifiers, ..
-        }) = event::read().context("Unable to read key event")?
+        }) = event
         {
             match code {
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
