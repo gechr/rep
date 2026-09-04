@@ -62,8 +62,8 @@ rep --regex '[13]\.2\.[13]' 4.5.6
 # Swap "foo.bar" with "bar.foo" in all files
 rep --regex '(foo)\.(bar)' '$2.$1'
 
-# Replace "f.oo" and "F.OO" with "bar"
-rep --ignore-case 'f.oo' bar
+# Replace "foo", "Foo" and "FOO" with "bar"
+rep --ignore-case foo bar
 
 # Smart-replace in all files:
 #  "foo_bar" with "hello_world"
