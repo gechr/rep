@@ -1796,6 +1796,8 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                 // `count > 0` guarantees `replace_all` produced an owned buffer,
                 // so `into_owned` never copies - it just releases the borrow so
                 // `scratch` can be taken (single) or `contents` moved (multi).
+                // A rewrite identical to the input (`-r '(foo)' '$1'`) is
+                // dropped like a non-match: nothing to write or show.
                 let (contents, updated, count, spans, columns, out_columns) = if single_expression
                 {
                     if !scan::read_text_file(path, &mut scratch) {
@@ -1808,7 +1810,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                             track_spans,
                             &line_ranges,
                         );
-                    if count == 0 {
+                    if count == 0 || *updated == *scratch {
                         return WalkState::Continue;
                     }
                     let columns =
@@ -1848,7 +1850,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                             track_spans,
                             &line_ranges,
                         );
-                    if count == 0 {
+                    if count == 0 || *updated == *contents {
                         return WalkState::Continue;
                     }
                     let columns = first_column_map_for_expressions(
@@ -2104,7 +2106,7 @@ fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
                 }
                 let (updated, count, _) =
                     apply_compiled_expressions(&scratch, &expressions, false, &line_ranges);
-                if count == 0 {
+                if count == 0 || *updated == *scratch {
                     return WalkState::Continue;
                 }
                 (updated.into_owned(), count)
@@ -2116,7 +2118,7 @@ fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
                 };
                 let (updated, count, _) =
                     apply_compiled_expressions(&contents, &expressions, false, &line_ranges);
-                if count == 0 {
+                if count == 0 || *updated == *contents {
                     return WalkState::Continue;
                 }
                 (updated.into_owned(), count)

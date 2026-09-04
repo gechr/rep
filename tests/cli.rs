@@ -213,6 +213,29 @@ fn no_op_expression_matches_nothing() {
 }
 
 #[test]
+fn identity_replacement_is_not_a_change() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("g.txt");
+    write(&file, "foo\n");
+
+    let output = rep_command()
+        .args(["-n", "-r", "(foo)", "$1"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+
+    let output = rep_command()
+        .args(["-c", "-W", "-r", "(foo)", "$1"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n");
+}
+
+#[test]
 fn line_range_rewrites_only_selected_lines() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");
