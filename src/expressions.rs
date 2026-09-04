@@ -77,7 +77,8 @@ enum CaseShape {
 }
 
 fn detect_case_shape(s: &str) -> CaseShape {
-    let mut letters = s.chars().filter(|c| c.is_alphabetic());
+    // Only cased letters vote; caseless scripts such as CJK carry no shape.
+    let mut letters = s.chars().filter(|c| c.is_uppercase() || c.is_lowercase());
     let Some(first) = letters.next() else {
         return CaseShape::Mixed;
     };
@@ -1493,6 +1494,16 @@ mod tests {
     fn test_build_pattern_line_regexp() {
         let cli = parse_cli(&["rep", "-x", "foo", "bar"]);
         assert_eq!(build_pattern(&cli), "(?U)^(?:foo)$");
+    }
+
+    #[test]
+    fn test_detect_case_shape_ignores_leading_caseless_letters() {
+        assert_eq!(detect_case_shape("日本FOO"), CaseShape::Upper);
+        assert_eq!(detect_case_shape("FOO日本"), CaseShape::Upper);
+        assert_eq!(detect_case_shape("日本foo"), CaseShape::Lower);
+        assert_eq!(detect_case_shape("日本Foo"), CaseShape::Title);
+        assert_eq!(detect_case_shape("日本"), CaseShape::Mixed);
+        assert_eq!(project_case("日本FOO", "日本bar"), "日本BAR");
     }
 
     #[test]
