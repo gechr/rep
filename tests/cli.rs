@@ -107,6 +107,60 @@ fn explicitly_named_tags_and_backup_files_are_searched() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn write_failure_reports_other_files_and_exits_non_zero() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempdir().unwrap();
+    let a = dir.path().join("a.txt");
+    let locked = dir.path().join("locked.txt");
+    let c = dir.path().join("c.txt");
+    for file in [&a, &locked, &c] {
+        write(file, "foo\n");
+    }
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o444)).unwrap();
+
+    let output = rep_command()
+        .args(["-W", "foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-foo\n+bar\n\
+         --- a/c.txt\n+++ b/c.txt\n@@ -1 +1 @@\n-foo\n+bar\n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: Unable to write to \"./locked.txt\"")
+            && stderr.ends_with("error: 1 file could not be written\n"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(read(&a), "bar\n");
+    assert_eq!(read(&locked), "foo\n");
+    assert_eq!(read(&c), "bar\n");
+
+    // `--count` prints the total for the files it could write, then fails.
+    write(&a, "foo\n");
+    let output = rep_command()
+        .args(["-c", "-W", "foo", "baz", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.ends_with("error: 1 file could not be written\n"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(read(&a), "baz\n");
+    assert_eq!(read(&locked), "foo\n");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
 #[test]
 fn line_range_rewrites_only_selected_lines() {
     let dir = tempdir().unwrap();

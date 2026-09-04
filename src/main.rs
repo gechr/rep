@@ -1907,9 +1907,15 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
         });
     });
 
+    // A failed write must not hide the files that were rewritten: keep
+    // draining, report every result, then fail with the errors.
     let mut ok_results = Vec::new();
-    while let Ok(result) = rx.recv() {
-        ok_results.push(result?);
+    let mut errors = Vec::new();
+    for result in rx {
+        match result {
+            Ok(result) => ok_results.push(result),
+            Err(err) => errors.push(err),
+        }
     }
 
     ok_results.sort_by(|a, b| natord::compare(&a.path, &b.path));
@@ -1923,7 +1929,24 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
         context_lines: cli.context,
     }
     .print(&ok_results);
-    Ok(())
+    report_write_errors(&errors)
+}
+
+/// Prints each failed write to stderr and returns a summary error so the
+/// process exits non-zero after the successful results have been shown.
+fn report_write_errors(errors: &[anyhow::Error]) -> Result<()> {
+    if errors.is_empty() {
+        return Ok(());
+    }
+    for err in errors {
+        print_error(err);
+    }
+    let files = if errors.len() == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{} files", errors.len())
+    };
+    bail!("{files} could not be written")
 }
 
 const fn should_skip_apply_for_quiet_dry_run(
@@ -2080,7 +2103,7 @@ fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
             if write && let Err(e) = std::fs::write(path, &updated) {
                 let error = anyhow::Error::new(e).context(format!("Unable to write to {path:?}"));
                 drop(error_tx.send(error));
-                return WalkState::Quit;
+                return WalkState::Continue;
             }
             total.fetch_add(count, Ordering::Relaxed);
             WalkState::Continue
@@ -2088,11 +2111,11 @@ fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
     });
 
     drop(error_tx);
-    if let Ok(error) = error_rx.try_recv() {
-        return Err(error);
-    }
+    // The total covers only files that were written; failed files are
+    // reported after it so the count stays parseable.
     println!("{}", total.load(Ordering::Relaxed));
-    Ok(())
+    let errors: Vec<_> = error_rx.try_iter().collect();
+    report_write_errors(&errors)
 }
 
 /// Render `n` using the system locale's thousands separator (e.g. `648098` -> `648,098`
