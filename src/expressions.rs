@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
+use anyhow::ensure;
 use grep::regex::RegexMatcher;
 use grep::regex::RegexMatcherBuilder;
 use regex::RegexBuilder;
@@ -875,6 +876,10 @@ pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> 
     };
 
     for expr in &mut expressions {
+        ensure!(
+            !expr.find.is_empty(),
+            "<find> must not be empty: an empty pattern matches at every position"
+        );
         expr.replace = expand_replacement_escapes(&expr.replace);
     }
 
@@ -1739,6 +1744,29 @@ mod tests {
         let (output, count) = apply_str("foo\nfoobar\nfoo", &expressions);
         assert_eq!(output, "bar\nfoobar\nbar");
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_empty_find_is_rejected() {
+        for args in [
+            &["rep", "", "x"][..],
+            &["rep", "-e", "", "x"],
+            &["rep", "-r", "", "x"],
+            &["rep", "-P", "", "x"],
+            &["rep", "-S", "", "x"],
+            &["rep", "-d", ""],
+        ] {
+            let cli = parse_cli(args);
+            let err = match compile_expressions(&cli) {
+                Ok(_) => panic!("{args:?} must be rejected"),
+                Err(err) => err,
+            };
+            assert_eq!(
+                err.to_string(),
+                "<find> must not be empty: an empty pattern matches at every position",
+                "{args:?}"
+            );
+        }
     }
 
     #[test]
