@@ -185,6 +185,34 @@ fn non_utf8_file_rewrite_is_reported_on_stderr() {
 }
 
 #[test]
+fn no_op_expression_matches_nothing() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("a.txt"), "foo\n");
+    write(&dir.path().join("b.txt"), "other\n");
+
+    for args in [
+        &["-l", "-e", "foo", "foo", "."][..],
+        &["-n", "-e", "foo", "foo", "."],
+        &["-n", "-e", "foo", "foo", "-e", "zzz", "zzz", "."],
+    ] {
+        let output = rep_command()
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "", "{args:?}");
+    }
+    let output = rep_command()
+        .args(["-c", "-n", "-e", "foo", "foo", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n");
+}
+
+#[test]
 fn line_range_rewrites_only_selected_lines() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");

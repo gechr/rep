@@ -1576,7 +1576,10 @@ fn run_list_files(cli: &Cli) -> Result<()> {
     let pre_filter = (!has_no_pattern)
         .then(|| build_pre_filter_matcher(cli, &expressions))
         .transpose()?;
-    let filter_by_change = cli.positional_replace().is_some();
+    // A `<replace>` was given, so list only files the rewrite would change.
+    // Expressions always carry one outside delete mode.
+    let filter_by_change =
+        cli.positional_replace().is_some() || (cli.uses_expressions() && !cli.delete);
     let line_ranges = cli.line_ranges.clone();
     // Match/no-match probes can stream line by line and stop at the first
     // hit when every pattern is confined to a single line. The change-filter
@@ -1686,6 +1689,10 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
     use ignore::WalkState;
 
     let expressions = Arc::new(compile_expressions(cli)?);
+    if expressions.is_empty() {
+        // Every expression was a no-op (`-e foo foo`); nothing can change.
+        return Ok(());
+    }
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
     let line_ranges = cli.line_ranges.clone();
     // A single expression's pre-filter matcher *is* its replacement regex, so
@@ -1970,6 +1977,9 @@ const fn should_skip_result_for_quiet_write(write: bool, quiet: bool) -> bool {
 
 fn run_preview(cli: &Cli) -> Result<()> {
     let expressions = compile_expressions(cli)?;
+    if expressions.is_empty() {
+        return Ok(());
+    }
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
     let expr_refs: Vec<interactive::PreviewExpr<'_>> = expressions
         .iter()
@@ -2038,6 +2048,10 @@ fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
         return Ok(());
     }
 
+    if expressions.is_empty() {
+        println!("0");
+        return Ok(());
+    }
     let pre_filter = build_pre_filter_matcher(cli, &expressions)?;
     // A single expression's pre-filter matcher is its own replacement regex, so
     // reading the file and letting the replacement pass double as the match
