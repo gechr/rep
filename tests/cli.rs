@@ -162,6 +162,29 @@ fn write_failure_reports_other_files_and_exits_non_zero() {
 }
 
 #[test]
+fn non_utf8_file_rewrite_is_reported_on_stderr() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("bad.txt");
+    fs::write(&file, b"foo \xff\xfe\n").unwrap();
+
+    let output = rep_command()
+        .args(["-W", "foo", "bar"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "Warning: {}: rewritten without showing a diff (not valid UTF-8)\n",
+            file.display()
+        )
+    );
+    assert_eq!(fs::read(&file).unwrap(), b"bar \xff\xfe\n");
+}
+
+#[test]
 fn line_range_rewrites_only_selected_lines() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");

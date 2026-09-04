@@ -1872,7 +1872,14 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                     match (String::from_utf8(contents), String::from_utf8(updated)) {
                         (Ok(old), Ok(new)) => Some((old, new)),
                         _ => {
-                            if !write {
+                            // The patch view has nothing to show for this
+                            // file, so say on stderr what happened to it.
+                            if write {
+                                eprintln!(
+                                    "Warning: {}: rewritten without showing a diff (not valid UTF-8)",
+                                    path.display()
+                                );
+                            } else {
                                 eprintln!(
                                     "Warning: {}: skipping diff (not valid UTF-8; use non-dry-run mode)",
                                     path.display()
