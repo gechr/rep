@@ -470,7 +470,10 @@ pub(crate) fn build_case_variants(
     (map, regex_pattern)
 }
 
-pub(crate) fn build_pattern_for(cli: &Cli, pattern: &str) -> String {
+/// Builds the `(text, bytes)` patterns for `<find>`. They differ only under
+/// `-d` without `-x`, where the bytes pattern widens the line class so the
+/// match engine can consume invalid UTF-8 on the same line.
+pub(crate) fn build_patterns_for(cli: &Cli, pattern: &str) -> (String, String) {
     let base = if cli.is_regex() {
         pattern.to_string()
     } else {
@@ -492,9 +495,9 @@ pub(crate) fn build_pattern_for(cli: &Cli, pattern: &str) -> String {
     };
 
     if cli.delete {
-        wrap_delete_pattern(&inner, cli.line_regexp)
+        wrap_delete_patterns(&inner, cli.line_regexp)
     } else {
-        inner
+        (inner.clone(), inner)
     }
 }
 
@@ -575,16 +578,26 @@ fn make_quantifiers_lazy(pattern: &str) -> String {
 
 /// Extend a match pattern to consume the full line(s) it sits on, plus any
 /// single trailing newline, so an empty replacement removes whole lines.
+/// Returns `(text, bytes)` patterns for the `str` and byte regex engines.
 ///
 /// The user's pattern is kept inside a non-capturing group so an embedded
 /// `(?U)` inverted-greediness flag stays scoped - otherwise the wrapper's
 /// `[^\n]*` runs would flip to non-greedy and leave a tail of the line.
-fn wrap_delete_pattern(inner: &str, line_regexp: bool) -> String {
+///
+/// The bytes pattern runs its line class with Unicode off, so it also
+/// consumes bytes that are not valid UTF-8 and the whole line still goes.
+/// The `str` engine rejects a class that can match invalid UTF-8, so the
+/// text pattern keeps the Unicode class.
+fn wrap_delete_patterns(inner: &str, line_regexp: bool) -> (String, String) {
     if line_regexp {
         // `inner` already anchors `^...$` for whole-line matches.
-        format!(r"(?:{inner})\n?")
+        let pattern = format!(r"(?:{inner})\n?");
+        (pattern.clone(), pattern)
     } else {
-        format!(r"^[^\n]*(?:{inner})[^\n]*\n?")
+        (
+            format!(r"^[^\n]*(?:{inner})[^\n]*\n?"),
+            format!(r"^(?-u:[^\n]*)(?:{inner})(?-u:[^\n]*)\n?"),
+        )
     }
 }
 
@@ -661,14 +674,14 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
         } else {
             escaped
         };
-        let pattern = if cli.delete {
-            wrap_delete_pattern(&wrapped, cli.line_regexp)
+        let (text_pattern, pattern) = if cli.delete {
+            wrap_delete_patterns(&wrapped, cli.line_regexp)
         } else {
-            wrapped
+            (wrapped.clone(), wrapped)
         };
         let regex = cli
             .preview
-            .then(|| RegexBuilder::new(&pattern).multi_line(true).build())
+            .then(|| RegexBuilder::new(&text_pattern).multi_line(true).build())
             .transpose()
             .with_context(|| format!("Invalid pattern: {}", expr.find))?;
         let bytes_regex = BytesRegexBuilder::new(&pattern)
@@ -719,14 +732,14 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
         };
         // With `-d --smart`, the case-variant alternation becomes the "inner" of
         // a line-deleting wrapper, and the replacement is always empty.
-        let pattern = if cli.delete {
-            wrap_delete_pattern(&wrapped, cli.line_regexp)
+        let (text_pattern, pattern) = if cli.delete {
+            wrap_delete_patterns(&wrapped, cli.line_regexp)
         } else {
-            wrapped
+            (wrapped.clone(), wrapped)
         };
         let regex = cli
             .preview
-            .then(|| RegexBuilder::new(&pattern).multi_line(true).build())
+            .then(|| RegexBuilder::new(&text_pattern).multi_line(true).build())
             .transpose()
             .with_context(|| format!("Invalid smart pattern: {}", expr.find))?;
         let bytes_regex = BytesRegexBuilder::new(&pattern)
@@ -769,13 +782,13 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
             preserves_line_boundaries: !expr.find.contains('\n') && !expr.replace.contains('\n'),
         })
     } else {
-        let pattern = build_pattern_for(cli, &expr.find);
+        let (text_pattern, pattern) = build_patterns_for(cli, &expr.find);
         let subst = build_subst_for(cli, &expr.replace);
         let dot_matches_new_line = cli.dotall || cli.multiline;
         let regex = cli
             .preview
             .then(|| {
-                RegexBuilder::new(&pattern)
+                RegexBuilder::new(&text_pattern)
                     .case_insensitive(cli.ignore_case)
                     .multi_line(true)
                     .dot_matches_new_line(dot_matches_new_line)
@@ -1155,7 +1168,7 @@ mod tests {
     }
 
     fn build_pattern(cli: &Cli) -> String {
-        build_pattern_for(cli, cli.pattern())
+        build_patterns_for(cli, cli.pattern()).0
     }
 
     fn build_subst(cli: &Cli) -> String {
@@ -1920,6 +1933,23 @@ mod tests {
         let (output, count) = apply_str("foo\nfoobar\nfoo\nbar\n", &expressions);
         assert_eq!(output, "foobar\nbar\n");
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_delete_mode_removes_lines_with_invalid_utf8() {
+        for args in [
+            &["rep", "-d", "foo"][..],
+            &["rep", "-d", "-P", "foo"],
+            &["rep", "-d", "-S", "foo"],
+            &["rep", "-d", "-r", "fo+"],
+        ] {
+            let cli = parse_cli(args);
+            let expressions = compile_expressions(&cli).unwrap();
+            let input = b"foo \xff bar\nkeep\n\xff foo\nlast\n";
+            let (output, count, _) = apply_compiled_expressions(input, &expressions, false, &[]);
+            assert_eq!(&*output, b"keep\nlast\n", "{args:?}");
+            assert_eq!(count, 2, "{args:?}");
+        }
     }
 
     #[test]
