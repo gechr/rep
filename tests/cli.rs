@@ -82,6 +82,32 @@ fn nul_past_first_buffer_marks_file_binary_in_every_mode() {
 }
 
 #[test]
+fn explicitly_named_tags_and_backup_files_are_searched() {
+    let dir = tempdir().unwrap();
+    let tags = dir.path().join("tags");
+    let backup = dir.path().join("notes.txt~");
+    write(&tags, "foo\n");
+    write(&backup, "foo\n");
+
+    let output = rep_command()
+        .args(["-c", "-n", "foo", "bar"])
+        .args([&tags, &backup])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "2\n");
+
+    // The same files are still skipped when reached by walking a directory.
+    let output = rep_command()
+        .args(["-c", "-n", "foo", "bar"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n");
+}
+
+#[test]
 fn line_range_rewrites_only_selected_lines() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");

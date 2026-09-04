@@ -184,6 +184,15 @@ pub(crate) fn file_matches(searcher: &mut Searcher, matcher: &RegexMatcher, path
     sink.did_match
 }
 
+/// A walked file is searched unless [`is_candidate_path`] excludes it. A
+/// path named on the command line is a walk root (depth 0) and is always
+/// searched: the user asked for that file, whatever it is called.
+pub(crate) fn is_walked_candidate(dirent: &ignore::DirEntry) -> bool {
+    dirent.depth() == 0 || is_candidate_path(dirent.path())
+}
+
+/// Skips editor backups (`name~`) and ctags indexes (`tags`, `TAGS`) found
+/// while walking a directory.
 pub(crate) fn is_candidate_path(path: &Path) -> bool {
     if path.as_os_str().as_encoded_bytes().ends_with(b"~") {
         return false;
@@ -250,7 +259,7 @@ pub(crate) fn matching_files_parallel(
                     return WalkState::Continue;
                 }
                 let path = dirent.path();
-                if !is_candidate_path(path) {
+                if !is_walked_candidate(&dirent) {
                     return WalkState::Continue;
                 }
                 if let Some(contents) =

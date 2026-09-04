@@ -1626,7 +1626,7 @@ fn run_list_files(cli: &Cli) -> Result<()> {
                     return WalkState::Continue;
                 }
                 let path = dirent.path();
-                if !scan::is_candidate_path(path) {
+                if !scan::is_walked_candidate(&dirent) {
                     return WalkState::Continue;
                 }
                 let listed = match &pre_filter {
@@ -1767,7 +1767,7 @@ fn run_walk_and_apply(cli: &Cli, write: bool) -> Result<()> {
                     return WalkState::Continue;
                 }
                 let path = dirent.path();
-                if !scan::is_candidate_path(path) {
+                if !scan::is_walked_candidate(&dirent) {
                     return WalkState::Continue;
                 }
                 // Quiet dry-run with suppressed output produces no results at
@@ -2051,7 +2051,7 @@ fn run_count(cli: &Cli, is_stdin: bool, write: bool) -> Result<()> {
                 return WalkState::Continue;
             }
             let path = dirent.path();
-            if !scan::is_candidate_path(path) {
+            if !scan::is_walked_candidate(&dirent) {
                 return WalkState::Continue;
             }
             let (updated, count) = if single_expression {
