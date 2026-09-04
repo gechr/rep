@@ -1722,6 +1722,39 @@ fn env_var_overrides_config_value() {
 }
 
 #[test]
+fn help_prints_despite_conflicting_config_keys() {
+    let dir = tempdir().unwrap();
+    let rc = dir.path().join("config.toml");
+    write(&rc, "dry-run = true\nwrite = true\n");
+
+    for flag in ["-h", "--help"] {
+        let output = rep_command()
+            .env("REP_CONFIG_PATH", &rc)
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("--ignore-case"),
+            "{flag} must print help"
+        );
+    }
+
+    // The conflict still surfaces for a real run.
+    let output = rep_command()
+        .env("REP_CONFIG_PATH", &rc)
+        .args(["foo", "bar", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
 fn cli_flag_wins_over_config_and_env() {
     // Probe an *observable* value: --context lines bracket each diff hunk,
     // so setting context to wildly different values in config / env / CLI

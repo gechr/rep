@@ -2501,10 +2501,6 @@ fn run() -> Result<()> {
     let cfg_origin = config::load_into_env();
     let matches = Cli::command().get_matches_from(preprocess_expression_args(argv));
     let mut cli = Cli::from_arg_matches(&matches).map_err(|e| anyhow::anyhow!(e))?;
-    resolve_mutex_groups(&mut cli, &matches, &cfg_origin)?;
-    // Clear config-synthesized env so spawned subprocesses (preview tools,
-    // hyperlink targets, etc.) inherit only the user's real shell env.
-    cfg_origin.unset_synthesized();
     ui::set_color_choice(cli.color);
     let theme = theme::Theme::from_overrides(theme::Overrides {
         style_added: cli.style_added.as_deref(),
@@ -2531,6 +2527,13 @@ fn run() -> Result<()> {
         print_help(&cli);
         std::process::exit(0);
     }
+
+    // Help and completions never need the mode flags reconciled, so a
+    // config that sets conflicting keys must not stop them from printing.
+    resolve_mutex_groups(&mut cli, &matches, &cfg_origin)?;
+    // Clear config-synthesized env so spawned subprocesses (preview tools,
+    // hyperlink targets, etc.) inherit only the user's real shell env.
+    cfg_origin.unset_synthesized();
 
     if !cli.uses_expressions() && cli.args.is_empty() && !cli.delete && !cli.list_files {
         print_help(&cli);
