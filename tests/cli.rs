@@ -1938,6 +1938,42 @@ fn color_always_multiline_span_fast_path_preserves_chained_utf8_context() {
     );
 }
 
+/// A later match on the same line with a shorter replacement must not push
+/// the hunk's new-side end past the line, which would render part of the
+/// unchanged following line as a spurious green line.
+#[test]
+fn color_always_multiline_span_hunk_ends_at_output_line() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("r1.txt");
+    write(&file, "abbb\nb bbb\nb\nzzz\n");
+
+    let output = rep_command()
+        .args([
+            "-n",
+            "--color=always",
+            "--hyperlink-format=none",
+            "bbb\nb",
+            "Q",
+            ".",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "\
+\x1b[35mr1.txt \x1b[38;5;248m(2)\x1b[m
+\x1b[31;2m1\x1b[m a\x1b[31;4mbbb\x1b[m
+\x1b[32;2m1\x1b[m a\x1b[32;4mQ\x1b[m \x1b[32;4mQ\x1b[m
+\x1b[31;2m2\x1b[m \x1b[31;4mb\x1b[m \x1b[31;4mbbb\x1b[m
+\x1b[31;2m3\x1b[m \x1b[31;4mb\x1b[m
+
+\x1b[1m\x1b[33mWould perform 2 replacements in 1 file\x1b[m \x1b[33m\x1b[2m(pass \x1b[m\x1b[32m\x1b[2m--write\x1b[m\x1b[33m\x1b[2m to apply)\x1b[m
+"
+    );
+}
+
 /// N-replacement symmetry: replacing `.` with `b` in `a.b.c.d.e.f` must
 /// produce five single-char highlights on each side. LCS-based highlighting
 /// would absorb a literal `b` into a "shared" run on the new side and mis-

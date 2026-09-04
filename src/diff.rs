@@ -595,10 +595,10 @@ fn multiline_span_hunks<'a>(
         let new_start = span
             .output_start
             .checked_sub(span.input_start.checked_sub(old_start)?)?;
-        let new_end = span.output_end().checked_add(old_end - span.input_end())?;
-        if new_end > new.len() {
-            return None;
-        }
+        // The line's tail in the output is not the old tail verbatim when a
+        // later span starts on the same line, so take the end from the output
+        // line index rather than from the old-side tail length.
+        let new_end = new_index.line_end_for_byte(span.output_end())?;
 
         match &mut current {
             Some(range) if old_start <= range.old_end.saturating_add(1) => {
