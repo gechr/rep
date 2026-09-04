@@ -351,7 +351,7 @@ impl InteractivePatcher {
                         &new_contents,
                         offset + mat_start + replacement.len() + usize::from(is_zero_length),
                     );
-                    contents = read_to_string(path)?;
+                    contents = new_contents;
                 }
                 PatchAction::Reject => {
                     history.push(PatchHistory {
@@ -403,7 +403,7 @@ impl InteractivePatcher {
                         &new_contents,
                         offset + mat_start + replacement.len() + usize::from(is_zero_length),
                     );
-                    contents = read_to_string(path)?;
+                    contents = new_contents;
                 }
                 PatchAction::Back => {
                     if let Some(previous) = history.pop() {
@@ -438,6 +438,11 @@ impl InteractivePatcher {
         if diffs.is_empty() {
             return Ok(PatchAction::Skip);
         }
+        // Once every remaining match is accepted there is nobody to show the
+        // diff to, so skip the render and any preview tool spawn.
+        if self.yes_to_all {
+            return Ok(PatchAction::Accept);
+        }
 
         // Hide cursor during rendering to prevent it flashing at
         // intermediate positions while the diff is being painted.
@@ -464,9 +469,6 @@ impl InteractivePatcher {
         terminal::show_cursor();
         diff_result?;
 
-        if self.yes_to_all {
-            return Ok(PatchAction::Accept);
-        }
         let is_last = match_index >= match_total;
         let user_input = prompt(
             &format!(
