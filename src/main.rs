@@ -1209,10 +1209,16 @@ pub(crate) fn preprocess_expression_args(args: Vec<String>) -> Vec<String> {
     let delete_mode = args
         .iter()
         .take_while(|a| a.as_str() != "--")
-        .any(|a| a == "-d" || a == "--delete");
+        .any(|a| a == "--delete" || short_cluster_has_delete(a));
     let mut out = Vec::with_capacity(args.len());
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
+        if arg == "--" {
+            // Everything after `--` is positional; clap must see it verbatim.
+            out.push(arg);
+            out.extend(iter);
+            break;
+        }
         if arg == "-e" || arg == "--expression" {
             out.push(arg);
             let Some(find) = iter.next() else { continue };
@@ -1242,6 +1248,32 @@ pub(crate) fn preprocess_expression_args(args: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+/// Short flags that take no value and so can share one `-` cluster with
+/// `-d`, as in `-nd` or `-Wd`. A value-taking short flag (`-e`, `-f`, `-L`,
+/// `-C`) ends the cluster: the rest of the token is its value, so a `d` there
+/// is data rather than `--delete`.
+const BOOL_SHORT_FLAGS: &[char] = &[
+    'H', 'S', 'P', 'G', 'i', 'm', 'r', 'w', 'x', 'n', 'W', 'y', 'p', 'l', 'c', 'q', 'h',
+];
+
+fn short_cluster_has_delete(arg: &str) -> bool {
+    let Some(cluster) = arg.strip_prefix('-') else {
+        return false;
+    };
+    if cluster.starts_with('-') {
+        return false;
+    }
+    for c in cluster.chars() {
+        if c == 'd' {
+            return true;
+        }
+        if !BOOL_SHORT_FLAGS.contains(&c) {
+            return false;
+        }
+    }
+    false
 }
 
 fn display_path(path: &std::path::Path) -> String {
@@ -3062,6 +3094,43 @@ mod tests {
             cli.paths(),
             vec![PathBuf::from("src"), PathBuf::from("tests")]
         );
+    }
+
+    #[test]
+    fn test_delete_in_short_cluster_keeps_expression_paths() {
+        // `-nd` carries `-d`, so `-e` takes only `<find>` and the trailing
+        // positional stays a path.
+        let cli = parse_cli(&["rep", "-nd", "-e", "foo", "sub/a.txt"]);
+        assert!(cli.delete, "cluster must enable delete");
+        assert_eq!(cli.expressions, vec!["foo"]);
+        assert_eq!(cli.paths(), vec![PathBuf::from("sub/a.txt")]);
+    }
+
+    #[test]
+    fn test_short_cluster_has_delete_stops_at_value_flags() {
+        assert!(short_cluster_has_delete("-d"));
+        assert!(short_cluster_has_delete("-nd"));
+        assert!(short_cluster_has_delete("-Wdn"));
+        assert!(!short_cluster_has_delete("--delete"));
+        assert!(!short_cluster_has_delete("-fd"));
+        assert!(!short_cluster_has_delete("-ed"));
+        assert!(!short_cluster_has_delete("-nfd"));
+        assert!(!short_cluster_has_delete("d"));
+        assert!(!short_cluster_has_delete("-"));
+    }
+
+    #[test]
+    fn test_positionals_after_double_dash_are_not_rewritten() {
+        let cli = parse_cli(&["rep", "-n", "--", "-enable", "enable", "b.txt"]);
+        assert!(cli.expressions.is_empty(), "no `-e` given");
+        assert_eq!(cli.pattern(), "-enable");
+        assert_eq!(cli.replacement(), "enable");
+        assert_eq!(cli.paths(), vec![PathBuf::from("b.txt")]);
+
+        let cli = parse_cli(&["rep", "-n", "--", "-e", "x", "b.txt"]);
+        assert!(cli.expressions.is_empty(), "no `-e` given");
+        assert_eq!(cli.pattern(), "-e");
+        assert_eq!(cli.replacement(), "x");
     }
 
     #[test]
