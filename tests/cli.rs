@@ -58,6 +58,30 @@ fn basic_replace_rewrites_file_contents() {
 }
 
 #[test]
+fn nul_past_first_buffer_marks_file_binary_in_every_mode() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("big.txt");
+    let mut contents = b"foo\n".to_vec();
+    contents.extend(std::iter::repeat_n(b'x', 70_000));
+    contents.extend_from_slice(b"\n\0\n");
+    fs::write(&file, &contents).unwrap();
+
+    for args in [
+        &["-c", "-n", "foo", "bar"][..],
+        &["-c", "-n", "-e", "foo", "bar", "-e", "zzz", "qqq"],
+    ] {
+        let output = rep_command().args(args).arg(&file).output().unwrap();
+        assert!(output.status.success(), "{args:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n", "{args:?}");
+    }
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        contents,
+        "binary file must be untouched"
+    );
+}
+
+#[test]
 fn line_range_rewrites_only_selected_lines() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");

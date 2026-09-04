@@ -130,7 +130,7 @@ pub(crate) fn file_contents_if_matches(
     path: &Path,
     scratch: &mut Vec<u8>,
 ) -> Option<Vec<u8>> {
-    if !read_into(path, scratch) {
+    if !read_into(path, scratch) || !is_text(scratch) {
         return None;
     }
     let mut sink = MatchSink::new();
@@ -160,12 +160,20 @@ fn read_into(path: &Path, scratch: &mut Vec<u8>) -> bool {
 }
 
 /// Reads `path` into `scratch` and reports whether it is searchable text.
-/// Returns `false` when the file cannot be read or contains a NUL byte - the
-/// same binary heuristic as the grep searchers' `BinaryDetection::quit`.
+/// Returns `false` when the file cannot be read or fails [`is_text`].
 /// Single-expression runs use this to skip the pre-filter scan entirely and
 /// let the replacement regex itself answer match/no-match in one pass.
 pub(crate) fn read_text_file(path: &Path, scratch: &mut Vec<u8>) -> bool {
-    read_into(path, scratch) && memchr::memchr(b'\x00', scratch).is_none()
+    read_into(path, scratch) && is_text(scratch)
+}
+
+/// The binary heuristic shared by every path that rewrites or counts: a NUL
+/// byte anywhere marks the file binary. The grep searchers' own
+/// `BinaryDetection::quit` only inspects the first buffer of a slice, so a
+/// NUL deep in a large file would otherwise pass the multi-expression
+/// pre-filter but fail the single-expression read.
+fn is_text(contents: &[u8]) -> bool {
+    memchr::memchr(b'\x00', contents).is_none()
 }
 
 pub(crate) fn file_matches(searcher: &mut Searcher, matcher: &RegexMatcher, path: &Path) -> bool {
