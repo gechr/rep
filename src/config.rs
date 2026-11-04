@@ -1,56 +1,76 @@
-//! TOML configuration loader for `~/.config/rep/config.toml`.
-//!
-//! Each `Some` field is projected onto a matching `REP_*` env var (only when
-//! the env var is not already set, so a user's shell env always beats the
-//! config file). Clap reads those env vars natively via `#[arg(env = ...)]`.
-//!
-//! `load_into_env` returns an [`Origin`] recording which `REP_*` keys were
-//! synthesized from config (vs already provided by the user's shell). The
-//! resolver in `main` uses that record to enforce the full
-//! `config < env < CLI` precedence: `ValueSource::EnvVariable` alone cannot
-//! tell config-derived values apart from real shell env.
-//!
-//! Read and parse failures print to stderr and continue; they never abort.
+//! Configuration sources are captured and resolved without changing process state.
 
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-const PATH_ENV: &str = "REP_CONFIG_PATH";
-
-/// Records which `REP_*` env var names were synthesized by the config loader.
-/// An entry being present means "this env var carries a config-derived value";
-/// absent means "anything in the env for this key came from outside rep" (the
-/// user's shell, a parent process, a wrapper script).
-#[derive(Default)]
-pub struct Origin {
-    keys: HashSet<&'static str>,
+#[derive(Clone, Default)]
+pub(crate) struct Environment {
+    values: HashMap<OsString, OsString>,
+    home: Option<PathBuf>,
 }
 
-impl Origin {
-    pub fn is_config_derived(&self, env_name: &str) -> bool {
-        self.keys.contains(env_name)
-    }
-
-    /// Remove every `REP_*` env var that this loader synthesized, so spawned
-    /// subprocesses inherit only the user's shell env. Startup-only:
-    /// must be called before any worker threads spawn.
-    pub fn unset_synthesized(&self) {
-        for key in &self.keys {
-            // Single-threaded startup path.
-            unsafe {
-                std::env::remove_var(key);
-            }
+impl Environment {
+    pub(crate) fn capture() -> Self {
+        Self {
+            values: std::env::vars_os()
+                .filter(|(key, _)| {
+                    key.to_string_lossy().starts_with("REP_")
+                        || matches!(
+                            key.to_str(),
+                            Some("HOME" | "USERPROFILE" | "XDG_CONFIG_HOME" | "NO_COLOR")
+                        )
+                })
+                .collect(),
+            // Preserve the standard library's passwd/profile fallback without
+            // consulting the user's environment again while resolving config.
+            home: std::env::home_dir(),
         }
     }
 
-    /// Mark `env_name` as config-derived without actually setting the env
-    /// var. Intended for tests that simulate config projection by setting
-    /// env vars directly.
-    #[cfg(test)]
-    pub fn mark_as_config_derived(&mut self, env_name: &'static str) {
-        self.keys.insert(env_name);
+    pub(crate) fn no_color(&self) -> bool {
+        self.get("NO_COLOR").is_some_and(|value| !value.is_empty())
     }
+
+    pub(crate) fn get(&self, key: &str) -> Option<&OsStr> {
+        self.values.get(OsStr::new(key)).map(OsString::as_os_str)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_pairs(values: &[(&str, &str)]) -> Self {
+        Self::from_pairs_with_home(values, None)
+    }
+
+    #[cfg(test)]
+    fn from_pairs_with_home(values: &[(&str, &str)], fallback: Option<PathBuf>) -> Self {
+        // Injected snapshots must never fall back to the real user's home.
+        let mut snapshot = Self {
+            values: values
+                .iter()
+                .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+                .collect(),
+            home: None,
+        };
+        let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        snapshot.home = snapshot
+            .get(key)
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from)
+            .or(fallback);
+        snapshot
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Source {
+    Config,
+    Environment,
+}
+
+#[derive(Default)]
+pub(crate) struct Origin {
+    pub(crate) sources: HashMap<String, Source>,
 }
 
 #[derive(Default, Deserialize)]
@@ -85,132 +105,180 @@ pub struct Config {
     pub marker_removed: Option<String>,
 }
 
-/// Resolve the config path, parse it if present, project each set field
-/// onto the matching `REP_*` env var, and return an [`Origin`] recording
-/// which env vars were synthesized. The env layer is set-once via
-/// `set_if_unset`: any value already in the environment (from the user's
-/// shell) wins over the config file, and only the keys we successfully
-/// set get recorded in `Origin`.
-pub fn load_into_env() -> Origin {
-    let mut origin = Origin::default();
-    let Some(path) = resolve_path() else {
-        return origin;
-    };
-    if !path.exists() {
-        return origin;
-    }
-    let body = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(err) => {
-            eprintln!("rep: failed to read {}: {err}", path.display());
-            return origin;
+impl Config {
+    pub(crate) fn load(env: &Environment) -> Self {
+        let Some(path) = resolve_path(env) else {
+            return Self::default();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(body) => match toml::from_str(&body) {
+                Ok(config) => config,
+                Err(err) => {
+                    eprintln!("rep: {}: {err}", path.display());
+                    Self::default()
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(err) => {
+                eprintln!("rep: failed to read {}: {err}", path.display());
+                Self::default()
+            }
         }
-    };
-    let cfg: Config = match toml::from_str(&body) {
-        Ok(c) => c,
-        Err(err) => {
-            eprintln!("rep: {}: {err}", path.display());
-            return origin;
-        }
-    };
-    apply_to_env(&cfg, &mut origin);
-    origin
+    }
+
+    pub(crate) fn values(&self) -> HashMap<&'static str, OsString> {
+        let cfg = self;
+        let mut values = HashMap::new();
+        set_bool(cfg.hidden, "REP_HIDDEN", &mut values);
+        set_bool(cfg.no_ignore, "REP_NO_IGNORE", &mut values);
+        set_bool(cfg.ignore_case, "REP_IGNORE_CASE", &mut values);
+        set_bool(cfg.regex, "REP_REGEX", &mut values);
+        set_bool(cfg.multiline, "REP_MULTILINE", &mut values);
+        set_bool(cfg.dotall, "REP_DOTALL", &mut values);
+        set_bool(cfg.greedy, "REP_GREEDY", &mut values);
+        set_bool(cfg.word_regexp, "REP_WORD_REGEXP", &mut values);
+        set_bool(cfg.line_regexp, "REP_LINE_REGEXP", &mut values);
+        set_bool(cfg.smart, "REP_SMART", &mut values);
+        set_bool(cfg.preserve, "REP_PRESERVE", &mut values);
+        set_bool(cfg.dry_run, "REP_DRY_RUN", &mut values);
+        set_bool(cfg.write, "REP_WRITE", &mut values);
+        set_bool(cfg.preview, "REP_PREVIEW", &mut values);
+        set_str(cfg.preview_tool.as_deref(), "REP_PREVIEW_TOOL", &mut values);
+        set_num(cfg.context, "REP_CONTEXT", &mut values);
+        set_str(cfg.color.as_deref(), "REP_COLOR", &mut values);
+        set_str(
+            cfg.hyperlink_format.as_deref(),
+            "REP_HYPERLINK_FORMAT",
+            &mut values,
+        );
+        set_num(cfg.hyperlink_limit, "REP_HYPERLINK_LIMIT", &mut values);
+        set_bool(cfg.quiet, "REP_QUIET", &mut values);
+        set_bool(cfg.hints, "REP_HINTS", &mut values);
+        set_str(cfg.style_added.as_deref(), "REP_STYLE_ADDED", &mut values);
+        set_str(
+            cfg.style_removed.as_deref(),
+            "REP_STYLE_REMOVED",
+            &mut values,
+        );
+        set_str(
+            cfg.style_line_added.as_deref(),
+            "REP_STYLE_LINE_ADDED",
+            &mut values,
+        );
+        set_str(
+            cfg.style_line_removed.as_deref(),
+            "REP_STYLE_LINE_REMOVED",
+            &mut values,
+        );
+        set_str(cfg.marker_added.as_deref(), "REP_MARKER_ADDED", &mut values);
+        set_str(
+            cfg.marker_removed.as_deref(),
+            "REP_MARKER_REMOVED",
+            &mut values,
+        );
+        values
+    }
 }
 
-fn apply_to_env(cfg: &Config, origin: &mut Origin) {
-    set_bool(cfg.hidden, "REP_HIDDEN", origin);
-    set_bool(cfg.no_ignore, "REP_NO_IGNORE", origin);
-    set_bool(cfg.ignore_case, "REP_IGNORE_CASE", origin);
-    set_bool(cfg.regex, "REP_REGEX", origin);
-    set_bool(cfg.multiline, "REP_MULTILINE", origin);
-    set_bool(cfg.dotall, "REP_DOTALL", origin);
-    set_bool(cfg.greedy, "REP_GREEDY", origin);
-    set_bool(cfg.word_regexp, "REP_WORD_REGEXP", origin);
-    set_bool(cfg.line_regexp, "REP_LINE_REGEXP", origin);
-    set_bool(cfg.smart, "REP_SMART", origin);
-    set_bool(cfg.preserve, "REP_PRESERVE", origin);
-    set_bool(cfg.dry_run, "REP_DRY_RUN", origin);
-    set_bool(cfg.write, "REP_WRITE", origin);
-    set_bool(cfg.preview, "REP_PREVIEW", origin);
-    set_str(cfg.preview_tool.as_deref(), "REP_PREVIEW_TOOL", origin);
-    set_num(cfg.context, "REP_CONTEXT", origin);
-    set_str(cfg.color.as_deref(), "REP_COLOR", origin);
-    set_str(
-        cfg.hyperlink_format.as_deref(),
-        "REP_HYPERLINK_FORMAT",
-        origin,
-    );
-    set_num(cfg.hyperlink_limit, "REP_HYPERLINK_LIMIT", origin);
-    set_bool(cfg.quiet, "REP_QUIET", origin);
-    set_bool(cfg.hints, "REP_HINTS", origin);
-    set_str(cfg.style_added.as_deref(), "REP_STYLE_ADDED", origin);
-    set_str(cfg.style_removed.as_deref(), "REP_STYLE_REMOVED", origin);
-    set_str(
-        cfg.style_line_added.as_deref(),
-        "REP_STYLE_LINE_ADDED",
-        origin,
-    );
-    set_str(
-        cfg.style_line_removed.as_deref(),
-        "REP_STYLE_LINE_REMOVED",
-        origin,
-    );
-    set_str(cfg.marker_added.as_deref(), "REP_MARKER_ADDED", origin);
-    set_str(cfg.marker_removed.as_deref(), "REP_MARKER_REMOVED", origin);
-}
-
-fn set_bool(value: Option<bool>, key: &'static str, origin: &mut Origin) {
+fn set_bool(value: Option<bool>, key: &'static str, values: &mut HashMap<&'static str, OsString>) {
     if let Some(v) = value {
-        set_if_unset(key, if v { "true" } else { "false" }, origin);
+        values.insert(key, OsString::from(if v { "true" } else { "false" }));
     }
 }
-
-fn set_str(value: Option<&str>, key: &'static str, origin: &mut Origin) {
+fn set_str(value: Option<&str>, key: &'static str, values: &mut HashMap<&'static str, OsString>) {
     if let Some(v) = value {
-        set_if_unset(key, v, origin);
+        values.insert(key, OsString::from(v));
     }
 }
-
-fn set_num(value: Option<u64>, key: &'static str, origin: &mut Origin) {
+fn set_num(value: Option<u64>, key: &'static str, values: &mut HashMap<&'static str, OsString>) {
     if let Some(v) = value {
-        set_if_unset(key, &v.to_string(), origin);
+        values.insert(key, OsString::from(v.to_string()));
     }
 }
 
-fn set_if_unset(key: &'static str, value: &str, origin: &mut Origin) {
-    if std::env::var_os(key).is_some() {
-        return;
+fn resolve_path(env: &Environment) -> Option<PathBuf> {
+    if let Some(path) = env.get("REP_CONFIG_PATH") {
+        return (!path.is_empty()).then(|| PathBuf::from(path));
     }
-    // Single-threaded startup path.
-    unsafe {
-        std::env::set_var(key, value);
+    if let Some(path) = env.get("XDG_CONFIG_HOME").filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(path).join("rep/config.toml"));
     }
-    origin.keys.insert(key);
-}
-
-fn resolve_path() -> Option<PathBuf> {
-    // An explicitly-set `REP_CONFIG_PATH` always wins, even if it points
-    // somewhere that doesn't exist - that's how the user disables the
-    // default lookup. An empty value means "no config".
-    if let Some(value) = std::env::var_os(PATH_ENV) {
-        if value.is_empty() {
-            return None;
-        }
-        return Some(PathBuf::from(value));
-    }
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
-        && !xdg.is_empty()
-    {
-        return Some(PathBuf::from(xdg).join("rep/config.toml"));
-    }
-    #[allow(deprecated)]
-    let home = std::env::home_dir()?;
-    Some(home.join(".config/rep/config.toml"))
+    env.home
+        .as_ref()
+        .map(|home| home.join(".config/rep/config.toml"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, Environment, resolve_path};
+    use std::path::PathBuf;
+
+    #[test]
+    fn injected_environment_does_not_consult_real_home() {
+        assert!(resolve_path(&Environment::default()).is_none());
+        assert!(resolve_path(&Environment::from_pairs(&[])).is_none());
+    }
+
+    #[test]
+    fn missing_or_empty_home_uses_captured_fallback() {
+        let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let fallback = PathBuf::from("fallback-home");
+        for pairs in [&[][..], &[(home_key, "")][..]] {
+            let env = Environment::from_pairs_with_home(pairs, Some(fallback.clone()));
+            assert_eq!(
+                resolve_path(&env),
+                Some(fallback.join(".config/rep/config.toml"))
+            );
+        }
+    }
+
+    #[test]
+    fn platform_home_precedes_captured_fallback() {
+        let env = Environment::from_pairs_with_home(
+            &[("HOME", "unix-home"), ("USERPROFILE", "windows-home")],
+            Some(PathBuf::from("fallback-home")),
+        );
+        let expected = if cfg!(windows) {
+            "windows-home"
+        } else {
+            "unix-home"
+        };
+        assert_eq!(
+            resolve_path(&env),
+            Some(PathBuf::from(expected).join(".config/rep/config.toml"))
+        );
+    }
+
+    #[test]
+    fn explicit_config_and_xdg_override_home_fallback() {
+        let home = Some(PathBuf::from("fallback-home"));
+        let env = Environment::from_pairs_with_home(&[("XDG_CONFIG_HOME", "xdg")], home.clone());
+        assert_eq!(
+            resolve_path(&env),
+            Some(PathBuf::from("xdg/rep/config.toml"))
+        );
+        let env = Environment::from_pairs_with_home(
+            &[
+                ("REP_CONFIG_PATH", "chosen.toml"),
+                ("XDG_CONFIG_HOME", "xdg"),
+            ],
+            home.clone(),
+        );
+        assert_eq!(resolve_path(&env), Some(PathBuf::from("chosen.toml")));
+        let env = Environment::from_pairs_with_home(
+            &[("REP_CONFIG_PATH", ""), ("XDG_CONFIG_HOME", "xdg")],
+            home,
+        );
+        assert!(resolve_path(&env).is_none());
+    }
+
+    #[test]
+    fn no_color_uses_snapshot_presence_and_nonempty_value() {
+        assert!(!Environment::default().no_color());
+        assert!(!Environment::from_pairs(&[("NO_COLOR", "")]).no_color());
+        assert!(Environment::from_pairs(&[("NO_COLOR", "1")]).no_color());
+        assert!(Environment::from_pairs(&[("NO_COLOR", "0")]).no_color());
+    }
 
     fn parse(input: &str) -> Config {
         toml::from_str(input).expect("valid config")

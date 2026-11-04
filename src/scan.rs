@@ -4,14 +4,10 @@
 // used under the Apache License, Version 2.0. See LICENSE and NOTICE
 // at the repo root for details.
 
-use std::cmp::min;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::sync::mpsc::channel;
-use std::thread;
 
 use anyhow::Context as _;
 use anyhow::Error;
@@ -26,6 +22,8 @@ use ignore::WalkBuilder;
 use ignore::WalkState;
 use ignore::overrides::OverrideBuilder;
 
+use crate::engine::Candidate;
+
 type Result<T> = ::std::result::Result<T, Error>;
 
 #[derive(Clone)]
@@ -35,11 +33,11 @@ pub(crate) struct FileSet {
 }
 
 pub(crate) fn walk_builder_with_file_set(
-    dirs: &[&str],
+    dirs: &[PathBuf],
     file_set: Option<FileSet>,
 ) -> Result<WalkBuilder> {
     ensure!(!dirs.is_empty(), "must provide at least one path to walk!");
-    let mut builder = WalkBuilder::new(dirs[0]);
+    let mut builder = WalkBuilder::new(&dirs[0]);
     for dir in &dirs[1..] {
         builder.add(dir);
     }
@@ -129,20 +127,19 @@ pub(crate) fn file_contents_if_matches(
     matcher: &RegexMatcher,
     path: &Path,
     scratch: &mut Vec<u8>,
-) -> Option<Vec<u8>> {
-    if !read_into(path, scratch) || !is_text(scratch) {
-        return None;
+) -> Result<Option<Vec<u8>>> {
+    if !read_text_file(path, scratch)? {
+        return Ok(None);
     }
     let mut sink = MatchSink::new();
-    if let Err(e) = searcher.search_slice(matcher, scratch, &mut sink) {
-        eprintln!("Warning: {}: {e}", path.display());
-    }
-    sink.did_match.then(|| std::mem::take(scratch))
+    searcher
+        .search_slice(matcher, scratch, &mut sink)
+        .with_context(|| format!("Unable to search {path:?}"))?;
+    Ok(sink.did_match.then(|| std::mem::take(scratch)))
 }
 
-/// Reads `path` into `scratch` (reusing its capacity), warning and returning
-/// `false` on I/O errors.
-fn read_into(path: &Path, scratch: &mut Vec<u8>) -> bool {
+/// Reads `path` into `scratch`, reusing its capacity and returning I/O errors.
+fn read_into(path: &Path, scratch: &mut Vec<u8>) -> Result<()> {
     use std::io::Read as _;
 
     scratch.clear();
@@ -152,19 +149,17 @@ fn read_into(path: &Path, scratch: &mut Vec<u8>) -> bool {
         }
         file.read_to_end(scratch)
     });
-    if let Err(e) = read {
-        eprintln!("Warning: {}: {e}", path.display());
-        return false;
-    }
-    true
+    read.with_context(|| format!("Unable to read {path:?}"))?;
+    Ok(())
 }
 
 /// Reads `path` into `scratch` and reports whether it is searchable text.
-/// Returns `false` when the file cannot be read or fails [`is_text`].
+/// Returns `false` for binary content and propagates read failures.
 /// Single-expression runs use this to skip the pre-filter scan entirely and
 /// let the replacement regex itself answer match/no-match in one pass.
-pub(crate) fn read_text_file(path: &Path, scratch: &mut Vec<u8>) -> bool {
-    read_into(path, scratch) && is_text(scratch)
+pub(crate) fn read_text_file(path: &Path, scratch: &mut Vec<u8>) -> Result<bool> {
+    read_into(path, scratch)?;
+    Ok(is_text(scratch))
 }
 
 /// The binary heuristic shared by every path that rewrites or counts: a NUL
@@ -176,12 +171,16 @@ fn is_text(contents: &[u8]) -> bool {
     memchr::memchr(b'\x00', contents).is_none()
 }
 
-pub(crate) fn file_matches(searcher: &mut Searcher, matcher: &RegexMatcher, path: &Path) -> bool {
+pub(crate) fn file_matches(
+    searcher: &mut Searcher,
+    matcher: &RegexMatcher,
+    path: &Path,
+) -> Result<bool> {
     let mut sink = MatchSink::new();
-    if let Err(e) = searcher.search_path(matcher, path, &mut sink) {
-        eprintln!("Warning: {}: {e}", path.display());
-    }
-    sink.did_match
+    searcher
+        .search_path(matcher, path, &mut sink)
+        .with_context(|| format!("Unable to search {path:?}"))?;
+    Ok(sink.did_match)
 }
 
 /// A walked file is searched unless [`is_candidate_path`] excludes it. A
@@ -219,60 +218,82 @@ fn is_vcs_dir_name(name: &OsStr) -> bool {
     )
 }
 
-/// Walk `dirs` in parallel, keep files that pass `is_candidate_path` and
-/// match `pre_filter`, and stream `(path, contents)` pairs back on the
-/// current thread. The walk runs on a background thread; the returned
-/// iterator yields results as they arrive and terminates when the walk
-/// finishes.
-pub(crate) fn matching_files_parallel(
-    dirs: &[&str],
+/// Discover paths without retaining file contents. Canonical destinations are
+/// deduplicated after natural sorting, so overlapping roots never rewrite twice.
+pub(crate) fn discover(
+    dirs: &[PathBuf],
     file_set: Option<FileSet>,
     hidden: bool,
     no_ignore: bool,
-    pre_filter: &RegexMatcher,
-) -> Result<mpsc::IntoIter<(PathBuf, Vec<u8>)>> {
+) -> Result<(Vec<Candidate>, Vec<Error>)> {
     let mut builder = walk_builder_with_file_set(dirs, file_set)?;
     apply_walk_flags(&mut builder, hidden, no_ignore);
-    let walk = builder
-        .threads(min(
-            12,
-            thread::available_parallelism().map_or(1, std::num::NonZero::get),
-        ))
-        .build_parallel();
-    let (tx, rx) = channel();
-    let thread_matcher = pre_filter.clone();
-    thread::spawn(move || {
-        walk.run(|| {
-            let mut searcher = make_searcher();
-            let mut scratch = Vec::new();
-            let tx = tx.clone();
-            let matcher = thread_matcher.clone();
-            Box::new(move |result| {
-                let dirent = match result {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!("Warning: {e}");
-                        return WalkState::Continue;
+    let found = std::sync::Mutex::new((Vec::new(), Vec::new()));
+    builder
+        .threads(crate::engine::thread_count())
+        .build_parallel()
+        .run(|| {
+            Box::new(|entry| {
+                match entry {
+                    Err(error) => found
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .1
+                        .push(Error::new(error)),
+                    Ok(entry) => {
+                        // Ignore-file diagnostics do not prevent traversal or processing.
+                        if let Some(error) = entry.error() {
+                            eprintln!("Warning: {error}");
+                        }
+                        if is_walked_candidate(&entry)
+                            && (entry.file_type().is_some_and(|ft| ft.is_file())
+                                || (entry.depth() == 0 && entry.path().is_file()))
+                        {
+                            // Metadata lookup must remain outside the collection lock.
+                            // This estimate bounds admission without a later serial stat pass.
+                            let size = entry
+                                .path()
+                                .metadata()
+                                .map_or(1, |metadata| metadata.len().max(1));
+                            let candidate = Candidate {
+                                path: entry.into_path(),
+                                size,
+                            };
+                            found
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .0
+                                .push(candidate);
+                        }
                     }
-                };
-                if dirent.file_type().is_none_or(|ft| !ft.is_file()) {
-                    return WalkState::Continue;
-                }
-                let path = dirent.path();
-                if !is_walked_candidate(&dirent) {
-                    return WalkState::Continue;
-                }
-                if let Some(contents) =
-                    file_contents_if_matches(&mut searcher, &matcher, path, &mut scratch)
-                    && tx.send((path.to_path_buf(), contents)).is_err()
-                {
-                    return WalkState::Quit;
                 }
                 WalkState::Continue
             })
         });
+    let (paths, mut errors) = found
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut keyed: Vec<_> = paths
+        .into_iter()
+        .map(|candidate| (crate::hyperlink::display_path(&candidate.path), candidate))
+        .collect();
+    keyed.sort_by(|(a, ap), (b, bp)| natord::compare(a, b).then_with(|| ap.path.cmp(&bp.path)));
+    let mut paths: Vec<_> = keyed.into_iter().map(|(_, path)| path).collect();
+    // A single root cannot alias itself: the walker does not follow nested symlinks.
+    // Canonicalization is only needed to reconcile overlapping explicit roots.
+    if dirs.len() == 1 {
+        return Ok((paths, errors));
+    }
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|candidate| match candidate.path.canonicalize() {
+        Ok(destination) => seen.insert(destination),
+        Err(error) => {
+            errors
+                .push(Error::new(error).context(format!("Unable to resolve {:?}", candidate.path)));
+            false
+        }
     });
-    Ok(rx.into_iter())
+    Ok((paths, errors))
 }
 
 struct MatchSink {

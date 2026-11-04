@@ -6,7 +6,6 @@
 //! `default` skips a color slot, e.g. `default red` is "background-only".
 
 use std::fmt::Write as _;
-use std::sync::OnceLock;
 
 use crossterm::style::Color;
 
@@ -27,6 +26,18 @@ pub(crate) struct StyleSpec {
 }
 
 impl StyleSpec {
+    const EMPTY: Self = Self {
+        fg: None,
+        bg: None,
+        bold: false,
+        dim: false,
+        italic: false,
+        underline: false,
+        blink: false,
+        reverse: false,
+        hidden: false,
+        strike: false,
+    };
     /// SGR opening sequence for this spec. Empty when `styles` is plain so the
     /// uncolored output path stays untouched.
     pub fn open(self, styles: Styles) -> String {
@@ -172,31 +183,35 @@ pub(crate) struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self {
-            style_added: StyleSpec {
-                fg: Some(Color::DarkGreen),
-                underline: true,
-                ..Default::default()
-            },
-            style_removed: StyleSpec {
-                fg: Some(Color::DarkRed),
-                underline: true,
-                ..Default::default()
-            },
-            style_line_added: StyleSpec {
-                fg: Some(Color::DarkGreen),
-                dim: true,
-                ..Default::default()
-            },
-            style_line_removed: StyleSpec {
-                fg: Some(Color::DarkRed),
-                dim: true,
-                ..Default::default()
-            },
-            marker_added: None,
-            marker_removed: None,
-        }
+        Self::DEFAULT
     }
+}
+
+impl Theme {
+    pub(crate) const DEFAULT: Self = Self {
+        style_added: StyleSpec {
+            fg: Some(Color::DarkGreen),
+            underline: true,
+            ..StyleSpec::EMPTY
+        },
+        style_removed: StyleSpec {
+            fg: Some(Color::DarkRed),
+            underline: true,
+            ..StyleSpec::EMPTY
+        },
+        style_line_added: StyleSpec {
+            fg: Some(Color::DarkGreen),
+            dim: true,
+            ..StyleSpec::EMPTY
+        },
+        style_line_removed: StyleSpec {
+            fg: Some(Color::DarkRed),
+            dim: true,
+            ..StyleSpec::EMPTY
+        },
+        marker_added: None,
+        marker_removed: None,
+    };
 }
 
 /// Bundle of CLI-derived overrides; any `None` keeps the default for that slot.
@@ -259,19 +274,6 @@ impl Theme {
 pub(crate) enum Side {
     Added,
     Removed,
-}
-
-static THEME: OnceLock<Theme> = OnceLock::new();
-
-/// Lock in the resolved theme; first write wins. Subsequent calls are silent
-/// no-ops, so in-process integration tests cannot install per-test themes once
-/// any prior test has triggered initialization.
-pub(crate) fn set_theme(theme: Theme) {
-    drop(THEME.set(theme));
-}
-
-pub(crate) fn theme() -> &'static Theme {
-    THEME.get_or_init(Theme::default)
 }
 
 /// Parse a git-style style string into a [`StyleSpec`].

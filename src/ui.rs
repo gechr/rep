@@ -33,47 +33,43 @@ pub(crate) enum ColorChoice {
     Never,
 }
 
-static COLOR_CHOICE: std::sync::OnceLock<ColorChoice> = std::sync::OnceLock::new();
-
-/// Lock in the user's `--color` selection. First write wins; subsequent calls
-/// are silently ignored, which keeps tests and the rc-args path safe.
-pub(crate) fn set_color_choice(choice: ColorChoice) {
-    let _ = COLOR_CHOICE.set(choice);
-}
-
-pub(crate) fn color_choice() -> ColorChoice {
-    COLOR_CHOICE.get().copied().unwrap_or_default()
-}
-
-/// <https://no-color.org>
-pub(crate) fn no_color() -> bool {
-    static NO_COLOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()))
-}
-
 #[derive(Clone, Copy)]
-pub(crate) struct Styles {
+pub(crate) struct Styles<'a> {
     enabled: bool,
+    pub(crate) theme: &'a crate::theme::Theme,
 }
 
-impl Styles {
-    pub(crate) const PLAIN: Self = Self { enabled: false };
+impl Styles<'_> {
+    pub(crate) const PLAIN: Self = Self {
+        enabled: false,
+        theme: &crate::theme::Theme::DEFAULT,
+    };
 
     pub(crate) const fn ansi() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            theme: &crate::theme::Theme::DEFAULT,
+        }
     }
 
-    pub(crate) fn when(enabled: bool) -> Self {
-        match color_choice() {
+    pub(crate) const fn resolve(choice: ColorChoice, terminal: bool, no_color: bool) -> Self {
+        match choice {
             ColorChoice::Always => Self::ansi(),
             ColorChoice::Never => Self::PLAIN,
             ColorChoice::Auto => {
-                if enabled && !no_color() {
+                if terminal && !no_color {
                     Self::ansi()
                 } else {
                     Self::PLAIN
                 }
             }
+        }
+    }
+
+    pub(crate) const fn with_theme(self, theme: &crate::theme::Theme) -> Styles<'_> {
+        Styles {
+            enabled: self.enabled,
+            theme,
         }
     }
 

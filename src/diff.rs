@@ -13,12 +13,12 @@ use std::io::Write as _;
 use std::hash::Hash;
 
 use crate::expressions::Replacement;
-use crate::theme::{self, Side, StyleSpec};
+use crate::theme::{Side, StyleSpec};
 use crate::ui::Color;
 use crate::ui::Styles;
 
-fn side_diff_style(color: Color) -> StyleSpec {
-    let t = theme::theme();
+fn side_diff_style(color: Color, styles: Styles) -> StyleSpec {
+    let t = styles.theme;
     match color {
         Color::Red => t.style_removed,
         Color::Green => t.style_added,
@@ -26,8 +26,8 @@ fn side_diff_style(color: Color) -> StyleSpec {
     }
 }
 
-fn side_line_style(color: Color) -> StyleSpec {
-    let t = theme::theme();
+fn side_line_style(color: Color, styles: Styles) -> StyleSpec {
+    let t = styles.theme;
     match color {
         Color::Red => t.style_line_removed,
         Color::Green => t.style_line_added,
@@ -44,7 +44,7 @@ pub(crate) struct DiffHints<'a> {
 
 #[derive(Clone, Copy)]
 struct Hyperlinks<'a> {
-    template: Option<&'a crate::HyperlinkTemplate<'a>>,
+    template: Option<&'a crate::hyperlink::HyperlinkTemplate<'a>>,
     /// Pre-encoded path used by `{path}`. Empty when the template doesn't
     /// reference `{path}` (caller skips the encoding work in that case).
     encoded_path: &'a str,
@@ -71,14 +71,15 @@ struct Hyperlinks<'a> {
 
 impl<'a> Hyperlinks<'a> {
     fn new(
-        template: Option<&'a crate::HyperlinkTemplate<'a>>,
+        template: Option<&'a crate::hyperlink::HyperlinkTemplate<'a>>,
         encoded_path: &'a str,
         columns: Option<&'a [(usize, usize)]>,
         out_columns: Option<&'a [(usize, usize)]>,
         plain: bool,
         link_side: Color,
     ) -> Self {
-        let link_lines = !plain && template.is_some_and(crate::HyperlinkTemplate::links_lines);
+        let link_lines =
+            !plain && template.is_some_and(crate::hyperlink::HyperlinkTemplate::links_lines);
         Self {
             template,
             encoded_path,
@@ -123,8 +124,8 @@ pub(crate) fn print_file_line_diff(
     old: &str,
     new: &str,
     hints: DiffHints<'_>,
-    styles: Styles,
-    hyperlink_template: Option<&crate::HyperlinkTemplate<'_>>,
+    styles: Styles<'_>,
+    hyperlink_template: Option<&crate::hyperlink::HyperlinkTemplate<'_>>,
     encoded_path: &str,
     columns: Option<&[(usize, usize)]>,
     out_columns: Option<&[(usize, usize)]>,
@@ -410,7 +411,7 @@ fn replacements_preserve_line_boundaries(old: &str, new: &str, spans: &[Replacem
 fn print_same_line_span_diff(
     old: &str,
     new: &str,
-    styles: Styles,
+    styles: Styles<'_>,
     hyperlinks: Hyperlinks<'_>,
     old_line_spans: &LineSpans,
     new_line_spans: &LineSpans,
@@ -463,7 +464,7 @@ fn print_same_line_span_diff(
 fn print_linewise_diff(
     old: &str,
     new: &str,
-    styles: Styles,
+    styles: Styles<'_>,
     hyperlinks: Hyperlinks<'_>,
     span_highlighting: bool,
     old_line_spans: &LineSpans,
@@ -525,7 +526,7 @@ fn print_multiline_span_diff(
     old: &str,
     new: &str,
     spans: &[Replacement],
-    styles: Styles,
+    styles: Styles<'_>,
     hyperlinks: Hyperlinks<'_>,
     old_line_spans: &LineSpans,
     new_line_spans: &LineSpans,
@@ -819,7 +820,8 @@ pub(crate) fn line_diffs<'a>(old: &'a str, new: &'a str) -> Vec<DiffResult<&'a s
     diff_slices(&old_lines, &new_lines)
 }
 
-pub(crate) fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) {
+pub(crate) fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) -> std::io::Result<()> {
+    let mut out = String::new();
     let mut i = 0;
     while i < diffs.len() {
         match &diffs[i] {
@@ -827,50 +829,58 @@ pub(crate) fn print_diff(diffs: &[DiffResult<&str>], styles: Styles) {
                 if l.is_empty() && i + 1 == diffs.len() {
                     break;
                 }
-                println!("  {l}");
+                let _ = writeln!(out, "  {l}");
                 i += 1;
             }
             DiffResult::Left(old_line) => {
                 if i + 1 < diffs.len()
                     && let DiffResult::Right(new_line) = &diffs[i + 1]
                 {
-                    print_inline_diff(old_line, new_line, styles);
+                    print_inline_diff(old_line, new_line, styles, &mut out);
                     i += 2;
                     continue;
                 }
-                let style = side_diff_style(Color::Red).without_underline().open(styles);
-                let theme = theme::theme();
+                let style = side_diff_style(Color::Red, styles)
+                    .without_underline()
+                    .open(styles);
+                let theme = styles.theme;
                 let marker = theme.marker_for(Side::Removed, true);
                 let separator = if theme.has_explicit_marker(Side::Removed) {
                     ""
                 } else {
                     " "
                 };
-                println!("{style}{marker}{separator}{old_line}{}", styles.reset());
+                let _ = writeln!(
+                    out,
+                    "{style}{marker}{separator}{old_line}{}",
+                    styles.reset()
+                );
                 i += 1;
             }
             DiffResult::Right(r) => {
-                let style = side_diff_style(Color::Green)
+                let style = side_diff_style(Color::Green, styles)
                     .without_underline()
                     .open(styles);
-                let theme = theme::theme();
+                let theme = styles.theme;
                 let marker = theme.marker_for(Side::Added, true);
                 let separator = if theme.has_explicit_marker(Side::Added) {
                     ""
                 } else {
                     " "
                 };
-                println!("{style}{marker}{separator}{r}{}", styles.reset());
+                let _ = writeln!(out, "{style}{marker}{separator}{r}{}", styles.reset());
                 i += 1;
             }
         }
     }
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(out.as_bytes())?;
+    stdout.flush()
 }
 
-fn print_inline_diff(old_line: &str, new_line: &str, styles: Styles) {
-    let mut out = String::new();
+fn print_inline_diff(old_line: &str, new_line: &str, styles: Styles, out: &mut String) {
     let inline = inline_token_diff(old_line, new_line);
-    let t = theme::theme();
+    let t = styles.theme;
     let removed_separator = if t.has_explicit_marker(Side::Removed) {
         ""
     } else {
@@ -879,12 +889,14 @@ fn print_inline_diff(old_line: &str, new_line: &str, styles: Styles) {
     let _ = write!(
         out,
         "{}{}{}{}",
-        side_diff_style(Color::Red).without_underline().open(styles),
+        side_diff_style(Color::Red, styles)
+            .without_underline()
+            .open(styles),
         t.marker_for(Side::Removed, true),
         removed_separator,
         styles.reset(),
     );
-    write_inline_chars(&mut out, &inline, InlineSide::Old, styles);
+    write_inline_chars(out, &inline, InlineSide::Old, styles);
     out.push('\n');
 
     let added_separator = if t.has_explicit_marker(Side::Added) {
@@ -895,21 +907,15 @@ fn print_inline_diff(old_line: &str, new_line: &str, styles: Styles) {
     let _ = write!(
         out,
         "{}{}{}{}",
-        side_diff_style(Color::Green)
+        side_diff_style(Color::Green, styles)
             .without_underline()
             .open(styles),
         t.marker_for(Side::Added, true),
         added_separator,
         styles.reset(),
     );
-    write_inline_chars(&mut out, &inline, InlineSide::New, styles);
+    write_inline_chars(out, &inline, InlineSide::New, styles);
     out.push('\n');
-    write_stdout(&out);
-}
-
-fn write_stdout(out: &str) {
-    let mut stdout = std::io::stdout().lock();
-    if stdout.write_all(out.as_bytes()).is_err() {}
 }
 
 /// Decimal digit count of `n`. `usize::ilog10` for non-zero, falling back to 1
@@ -952,7 +958,7 @@ fn format_usize(buf: &mut [u8; 20], mut n: usize) -> &str {
 struct NumberedDiffWriter<'a, 'b> {
     out: &'a mut String,
     width: usize,
-    styles: Styles,
+    styles: Styles<'b>,
     hyperlinks: Hyperlinks<'b>,
     /// True when replacements were tracked for this file. Lines without a
     /// visible span on this side are rendered plainly instead of whole-line
@@ -1000,20 +1006,20 @@ impl Openers {
         let mut diff_green_no_ul = String::new();
         let mut diff_red = String::new();
         let mut diff_green = String::new();
-        side_line_style(Color::Red)
+        side_line_style(Color::Red, styles)
             .without_underline()
             .open_into(&mut line_red, styles);
-        side_line_style(Color::Green)
+        side_line_style(Color::Green, styles)
             .without_underline()
             .open_into(&mut line_green, styles);
-        side_diff_style(Color::Red)
+        side_diff_style(Color::Red, styles)
             .without_underline()
             .open_into(&mut diff_red_no_ul, styles);
-        side_diff_style(Color::Green)
+        side_diff_style(Color::Green, styles)
             .without_underline()
             .open_into(&mut diff_green_no_ul, styles);
-        side_diff_style(Color::Red).open_into(&mut diff_red, styles);
-        side_diff_style(Color::Green).open_into(&mut diff_green, styles);
+        side_diff_style(Color::Red, styles).open_into(&mut diff_red, styles);
+        side_diff_style(Color::Green, styles).open_into(&mut diff_green, styles);
         Self {
             line_red,
             line_green,
@@ -1062,7 +1068,7 @@ impl Openers {
 /// Text between a line number and its content: an explicit marker verbatim,
 /// otherwise the marker (if any) padded with the single-space separator.
 fn marker_suffix(side: Side, styles: Styles) -> String {
-    let theme = theme::theme();
+    let theme = styles.theme;
     let marker = theme.marker_for(side, styles.is_plain());
     if theme.has_explicit_marker(side) || styles.is_plain() {
         marker.to_string()
@@ -1168,7 +1174,7 @@ impl NumberedDiffWriter<'_, '_> {
             self.hyperlinks
                 .write(self.out, line_no, line_no_text, line_color);
         } else {
-            crate::push_decimal(self.out, line_no);
+            crate::hyperlink::push_decimal(self.out, line_no);
         }
         self.out.push_str(self.styles.reset());
         self.out
@@ -1249,7 +1255,7 @@ fn write_change_block(
     lefts: &[&str],
     rights: &[&str],
     side: InlineSide,
-    styles: Styles,
+    styles: Styles<'_>,
 ) {
     let balanced = lefts.len() == rights.len();
     if balanced {
@@ -1276,7 +1282,7 @@ fn write_balanced_change_block(
     lefts: &[&str],
     rights: &[&str],
     side: InlineSide,
-    styles: Styles,
+    styles: Styles<'_>,
 ) {
     let (own_tokens, own_color) = match side {
         InlineSide::Old => (lefts, Color::Red),
@@ -1289,7 +1295,7 @@ fn write_balanced_change_block(
             let _ = write!(
                 out,
                 "{}{own_tok}{}",
-                side_diff_style(own_color).open(styles),
+                side_diff_style(own_color, styles).open(styles),
                 styles.reset(),
             );
         }
@@ -1301,7 +1307,7 @@ fn write_underlined_tokens(out: &mut String, tokens: &[&str], color: Color, styl
         let _ = write!(
             out,
             "{}{token}{}",
-            side_diff_style(color).open(styles),
+            side_diff_style(color, styles).open(styles),
             styles.reset(),
         );
     }
@@ -1325,7 +1331,7 @@ fn write_char_diff(out: &mut String, chars: &[DiffResult<char>], side: InlineSid
             }
             (InlineSide::Old, DiffResult::Left(ch)) | (InlineSide::New, DiffResult::Right(ch)) => {
                 if !highlighting {
-                    let _ = write!(out, "{}", side_diff_style(color).open(styles));
+                    let _ = write!(out, "{}", side_diff_style(color, styles).open(styles));
                     highlighting = true;
                 }
                 out.push(ch);
@@ -1545,7 +1551,7 @@ impl LineSpans {
     }
 
     #[cfg(test)]
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 }
@@ -1926,7 +1932,10 @@ mod tests {
 
     #[test]
     fn lines_for_numbers_crosses_many_newlines_via_cursor() {
-        let text: String = (1..=200).map(|n| format!("L{n}\n")).collect();
+        let text = (1..=200).fold(String::new(), |mut text, n| {
+            writeln!(text, "L{n}").unwrap();
+            text
+        });
         let got = lines_for_numbers(&text, &[1, 50, 100, 200]);
         assert_eq!(
             got,
@@ -2162,7 +2171,7 @@ mod tests {
     fn dry_run_shifting_diff_links_only_old_side() {
         // Inserting a line diverges the gutter numbering. In dry-run the file on
         // disk is the original, so only the old/red side is a valid target.
-        let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
+        let template = crate::hyperlink::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
         let mut out = String::new();
         print_file_line_diff(
             "a\nb\nc\n",
@@ -2195,7 +2204,7 @@ mod tests {
     fn write_shifting_diff_links_only_new_side() {
         // After --write the file on disk is the rewritten version, so only the
         // new/green side is a valid target; the deleted old line stays plain.
-        let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
+        let template = crate::hyperlink::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
         let mut out = String::new();
         print_file_line_diff(
             "a\nb\nDEL\nc\n",
@@ -2228,7 +2237,7 @@ mod tests {
     fn write_shifting_diff_resolves_new_column_from_output_map() {
         // The new side renumbers its lines, so its `{column}` must come from the
         // output-keyed map, never the input `columns` map keyed by old lines.
-        let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
+        let template = crate::hyperlink::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
         let columns = vec![(2, 99)];
         let out_columns = vec![(2, 7), (3, 4)];
         let mut out = String::new();
@@ -2266,7 +2275,7 @@ mod tests {
     fn line_preserving_diff_links_only_the_on_disk_side() {
         // Both sides of a paired line share the same gutter number and would
         // link to the same target, so only the on-disk side carries the link.
-        let template = crate::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
+        let template = crate::hyperlink::HyperlinkTemplate::parse("app://{path}:{line}:{column}");
         let mut out = String::new();
         print_file_line_diff(
             "a\nb\nc\n",

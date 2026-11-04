@@ -7,14 +7,13 @@
 use std::cmp::max;
 use std::cmp::min;
 use std::env;
-use std::fs;
+
 use std::fs::read_to_string;
 use std::io::Write as _;
 use std::iter;
 use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
-use std::process::exit;
 
 use anyhow::Context as _;
 use anyhow::Error;
@@ -34,6 +33,7 @@ type Result<T> = ::std::result::Result<T, Error>;
 #[derive(Copy, Clone)]
 pub(crate) struct PreviewExpr<'a> {
     pub(crate) regex: &'a Regex,
+    pub(crate) bytes_regex: &'a regex::bytes::Regex,
     pub(crate) replacer: &'a dyn Fn(&regex::Captures) -> String,
 }
 
@@ -83,6 +83,7 @@ fn run_editor(path: &Path, start_line: usize) -> Result<()> {
 /// Sentinel chars for arrow key navigation in interactive mode.
 const NAV_BACK: char = '\x01';
 const NAV_FORWARD: char = '\x02';
+const INTERRUPTED: char = '\x03';
 
 fn prompt(
     prompt_text: &str,
@@ -90,12 +91,14 @@ fn prompt(
     default: Option<char>,
     is_first: bool,
     is_last: bool,
+    styles: Styles<'_>,
 ) -> Result<char> {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
-    print!("{prompt_text}");
-    std::io::stdout().flush()?;
+    let mut out = std::io::stdout().lock();
+    write!(out, "{prompt_text}")?;
+    out.flush()?;
 
     enable_raw_mode().context("Unable to enable raw mode")?;
     // Every exit from this loop, including a read failure, must pass the
@@ -111,8 +114,7 @@ fn prompt(
         {
             match code {
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    disable_raw_mode().ok();
-                    std::process::exit(130);
+                    break Ok(INTERRUPTED);
                 }
                 KeyCode::Enter => {
                     if let Some(default) = default {
@@ -134,15 +136,16 @@ fn prompt(
     };
     disable_raw_mode().ok();
     if let Ok(c) = result {
-        let styles = Styles::when(true);
         match c {
-            NAV_BACK => print!("{}\r", styles.paint(Color::Yellow, "←")),
-            NAV_FORWARD => print!("{}\r", styles.paint(Color::Yellow, "->")),
-            'y' | 'A' => println!("{}", styles.paint(Color::Green, c.to_string())),
-            'n' | 'q' => println!("{}", styles.paint(Color::Red, c.to_string())),
-            'e' => println!("{}", styles.paint(Color::Blue, c.to_string())),
-            _ => println!("{c}"),
+            NAV_BACK => write!(out, "{}\r", styles.paint(Color::Yellow, "←"))?,
+            NAV_FORWARD => write!(out, "{}\r", styles.paint(Color::Yellow, "->"))?,
+            'y' | 'A' => writeln!(out, "{}", styles.paint(Color::Green, c.to_string()))?,
+            'n' | 'q' => writeln!(out, "{}", styles.paint(Color::Red, c.to_string()))?,
+            'e' => writeln!(out, "{}", styles.paint(Color::Blue, c.to_string()))?,
+            INTERRUPTED => {}
+            _ => writeln!(out, "{c}")?,
         }
+        out.flush()?;
     }
     result
 }
@@ -173,6 +176,8 @@ enum PatchAction {
     AcceptAll,
     Back,
     Skip,
+    Quit,
+    Interrupted,
 }
 
 struct PatchPrompt<'a> {
@@ -186,14 +191,166 @@ struct PatchPrompt<'a> {
     has_history: bool,
 }
 
-struct PatchHistory {
+#[derive(Clone)]
+struct PreviewState {
     contents: String,
-    offset: usize,
     windows: Vec<(usize, usize)>,
-    window_index: usize,
     expression_index: usize,
-    match_index: usize,
-    match_total: usize,
+    edits: std::sync::Arc<[PlannedEdit]>,
+    cursor: usize,
+    removed: usize,
+    inserted: usize,
+}
+
+#[derive(Clone)]
+struct PlannedEdit {
+    start: usize,
+    end: usize,
+    replacement: String,
+    window_index: usize,
+}
+
+/// Match positions are planned once per expression against its input. Applying
+/// an edit shifts later positions but never searches newly generated text.
+struct PreviewSession<'a> {
+    expressions: &'a [PreviewExpr<'a>],
+    state: PreviewState,
+    history: Vec<PreviewState>,
+    record_history: bool,
+}
+
+impl<'a> PreviewSession<'a> {
+    fn new(
+        expressions: &'a [PreviewExpr<'a>],
+        contents: String,
+        windows: Vec<(usize, usize)>,
+    ) -> Result<Self> {
+        let mut session = Self {
+            expressions,
+            state: PreviewState {
+                contents,
+                windows,
+                expression_index: 0,
+                edits: Vec::new().into(),
+                cursor: 0,
+                removed: 0,
+                inserted: 0,
+            },
+            history: Vec::new(),
+            record_history: true,
+        };
+        session.plan(0)?;
+        Ok(session)
+    }
+
+    fn plan(&mut self, resume: usize) -> Result<()> {
+        let mut edits = Vec::new();
+        self.state.edits = Vec::new().into();
+        self.state.cursor = 0;
+        self.state.removed = 0;
+        self.state.inserted = 0;
+        let Some(expr) = self.expressions.get(self.state.expression_index) else {
+            return Ok(());
+        };
+        for (window_index, &(start, end)) in self.state.windows.iter().enumerate() {
+            let window = &self.state.contents[start..end];
+            for mat in expr.bytes_regex.find_iter(window.as_bytes()) {
+                ensure!(
+                    window.is_char_boundary(mat.start()) && window.is_char_boundary(mat.end()),
+                    "preview cannot display a match splitting a UTF-8 character - use non-preview mode"
+                );
+            }
+            for caps in expr.regex.captures_iter(&self.state.contents[start..end]) {
+                let mat = caps.get(0).expect("full regex match is always present");
+                if start + mat.start() < resume {
+                    continue;
+                }
+                let replacement = (expr.replacer)(&caps);
+                if replacement == mat.as_str() {
+                    continue;
+                }
+                edits.push(PlannedEdit {
+                    start: start + mat.start(),
+                    end: start + mat.end(),
+                    replacement,
+                    window_index,
+                });
+            }
+        }
+        self.state.edits = edits.into();
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<Option<PlannedEdit>> {
+        loop {
+            if let Some(edit) = self.state.edits.get(self.state.cursor) {
+                let mut edit = edit.clone();
+                edit.start = edit.start - self.state.removed + self.state.inserted;
+                edit.end = edit.end - self.state.removed + self.state.inserted;
+                return Ok(Some(edit));
+            }
+            self.state.expression_index += 1;
+            if self.state.expression_index >= self.expressions.len() {
+                return Ok(None);
+            }
+            self.plan(0)?;
+        }
+    }
+
+    fn proposed(&self, edit: &PlannedEdit) -> String {
+        let mut contents = self.state.contents.clone();
+        contents.replace_range(edit.start..edit.end, &edit.replacement);
+        contents
+    }
+
+    fn accept(&mut self, edit: &PlannedEdit, contents: String) {
+        if self.record_history {
+            self.history.push(self.state.clone());
+        } else {
+            self.history.clear();
+        }
+        let old_len = edit.end - edit.start;
+        let new_len = edit.replacement.len();
+        resize_window(&mut self.state.windows, edit.window_index, old_len, new_len);
+        self.state.cursor += 1;
+        self.state.removed += old_len;
+        self.state.inserted += new_len;
+        self.state.contents = contents;
+    }
+
+    fn reject(&mut self) {
+        self.history.push(self.state.clone());
+        self.state.cursor += 1;
+    }
+
+    fn undo(&mut self) -> Option<String> {
+        let previous = self.history.pop()?;
+        self.state = previous;
+        Some(self.state.contents.clone())
+    }
+
+    fn edited(&mut self, contents: String, window_index: usize, resume: usize) -> Result<()> {
+        resize_window(
+            &mut self.state.windows,
+            window_index,
+            self.state.contents.len(),
+            contents.len(),
+        );
+        for window in &mut self.state.windows {
+            window.0 = to_char_boundary(&contents, window.0.min(contents.len()));
+            window.1 = to_char_boundary(&contents, window.1.clamp(window.0, contents.len()));
+        }
+        let resume = to_char_boundary(&contents, resume.min(contents.len()));
+        self.state.contents = contents;
+        self.plan(resume)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreviewOutcome {
+    Continue,
+    Quit,
+    Interrupted,
 }
 
 fn resize_window(windows: &mut [(usize, usize)], index: usize, old_len: usize, new_len: usize) {
@@ -214,222 +371,99 @@ fn resize_window(windows: &mut [(usize, usize)], index: usize, old_len: usize, n
     }
 }
 
-pub(crate) struct InteractivePatcher {
+pub(crate) struct InteractivePatcher<'a> {
+    styles: Styles<'a>,
     yes_to_all: bool,
     preview_tool: Option<String>,
     context_lines: usize,
 }
 
-impl InteractivePatcher {
+impl<'theme> InteractivePatcher<'theme> {
     pub(crate) const fn new(
         accept_all: bool,
         preview_tool: Option<String>,
         context_lines: usize,
+        styles: Styles<'theme>,
     ) -> Self {
         Self {
+            styles,
             yes_to_all: accept_all,
             preview_tool,
             context_lines,
         }
     }
 
-    fn save(path: &Path, text: &str) -> Result<()> {
-        fs::write(path, text).with_context(|| format!("Unable to write to {path:?}"))?;
-        Ok(())
-    }
-
-    /// Like `present_and_apply_patches_with_replacer`, but processes multiple
-    /// expressions in sequence with a unified undo history. Pressing left arrow
-    /// can undo back across expression boundaries.
+    /// Present expression matches in their original coordinate space. Each
+    /// accepted decision is persisted before the next prompt.
     pub(crate) fn present_and_apply_patches_multi(
         &mut self,
         expressions: &[PreviewExpr<'_>],
         path: &Path,
         contents: String,
         windows: Vec<(usize, usize)>,
-    ) -> Result<()> {
-        let mut history: Vec<PatchHistory> = Vec::new();
-        let mut contents = contents;
-        let mut windows = windows;
-        let mut window_index = 0;
-        let mut expr_idx = 0;
-        let mut offset = windows[0].0;
-        let mut match_index = 0;
-        let mut match_total = 0;
-        let mut active_expr = usize::MAX; // sentinel to force initial computation
-
-        while expr_idx < expressions.len() {
-            if offset >= windows[window_index].1 {
-                window_index += 1;
-                if window_index == windows.len() {
-                    expr_idx += 1;
-                    window_index = 0;
-                    match_index = 0;
-                    active_expr = usize::MAX;
-                }
-                offset = windows[window_index].0;
-                continue;
-            }
-
-            let PreviewExpr { regex, replacer } = expressions[expr_idx];
-
-            if expr_idx != active_expr {
-                match_total = windows
-                    .iter()
-                    .map(|&(start, end)| regex.find_iter(&contents[start..end]).count())
-                    .sum();
-                active_expr = expr_idx;
-            }
-
-            let (
-                mat_start,
-                mat_end,
-                replacement,
-                new_contents,
-                is_zero_length,
-                start_line,
-                end_line,
-            ) = {
-                let end = windows[window_index].1;
-                let Some(caps) = regex.captures(&contents[offset..end]) else {
-                    offset = end;
-                    continue;
-                };
-                let mat = caps.get(0).expect("full regex match is always present");
-                let repl = replacer(&caps);
-                let absolute_start = offset + mat.start();
-                let mut new_contents = contents[..absolute_start].to_string();
-                new_contents.push_str(&repl);
-                new_contents.push_str(&contents[offset + mat.end()..]);
-                let is_zero_length = mat.end() == mat.start();
-                let (start_line, _) = index_to_row_col(&contents, absolute_start);
-                let (end_line, _) = index_to_row_col(
-                    &contents,
-                    backward_to_char_boundary(
-                        &contents,
-                        mat.end() + offset - usize::from(!is_zero_length),
-                    ),
-                );
-                (
-                    mat.start(),
-                    mat.end(),
-                    repl,
-                    new_contents,
-                    is_zero_length,
-                    start_line,
-                    end_line,
-                )
-            };
-
-            match_index += 1;
-            match self.ask_about_patch(&PatchPrompt {
+    ) -> Result<PreviewOutcome> {
+        let mut session = PreviewSession::new(expressions, contents, windows)?;
+        while let Some(edit) = session.next()? {
+            let new_contents = session.proposed(&edit);
+            let start_line = index_to_row_col(&session.state.contents, edit.start).0;
+            let end_line = index_to_row_col(
+                &session.state.contents,
+                backward_to_char_boundary(
+                    &session.state.contents,
+                    edit.end.saturating_sub(usize::from(edit.end > edit.start)),
+                ),
+            )
+            .0;
+            let action = self.ask_about_patch(&PatchPrompt {
                 path,
-                old: &contents,
+                old: &session.state.contents,
                 new: &new_contents,
                 start_line: start_line + 1,
                 end_line: end_line + 1,
-                match_index,
-                match_total,
-                has_history: !history.is_empty(),
-            })? {
-                PatchAction::Skip => {
-                    offset =
-                        to_char_boundary(&contents, offset + mat_end + usize::from(is_zero_length));
-                }
-                PatchAction::Accept => {
-                    history.push(PatchHistory {
-                        contents: contents.clone(),
-                        offset,
-                        windows: windows.clone(),
-                        window_index,
-                        expression_index: expr_idx,
-                        match_index: match_index - 1,
-                        match_total,
-                    });
-                    Self::save(path, &new_contents)?;
-                    resize_window(
-                        &mut windows,
-                        window_index,
-                        mat_end - mat_start,
-                        replacement.len(),
-                    );
-                    offset = to_char_boundary(
-                        &new_contents,
-                        offset + mat_start + replacement.len() + usize::from(is_zero_length),
-                    );
-                    contents = new_contents;
-                }
-                PatchAction::Reject => {
-                    history.push(PatchHistory {
-                        contents: contents.clone(),
-                        offset,
-                        windows: windows.clone(),
-                        window_index,
-                        expression_index: expr_idx,
-                        match_index: match_index - 1,
-                        match_total,
-                    });
-                    offset =
-                        to_char_boundary(&contents, offset + mat_end + usize::from(is_zero_length));
-                }
-                PatchAction::Edit => {
-                    history.push(PatchHistory {
-                        contents: contents.clone(),
-                        offset,
-                        windows: windows.clone(),
-                        window_index,
-                        expression_index: expr_idx,
-                        match_index: match_index - 1,
-                        match_total,
-                    });
-                    Self::save(path, &new_contents)?;
-                    run_editor(path, start_line + 1)?;
-                    let old_len = contents.len();
-                    contents = read_to_string(path)?;
-                    resize_window(&mut windows, window_index, old_len, contents.len());
-                    for window in &mut windows {
-                        window.0 = window.0.min(contents.len());
-                        window.1 = window.1.clamp(window.0, contents.len());
+                match_index: session.state.cursor + 1,
+                match_total: session.state.edits.len(),
+                has_history: !session.history.is_empty(),
+            })?;
+            match action {
+                PatchAction::Accept | PatchAction::AcceptAll | PatchAction::Edit => {
+                    crate::write::commit(
+                        path,
+                        session.state.contents.as_bytes(),
+                        new_contents.as_bytes(),
+                    )?;
+                    if matches!(action, PatchAction::AcceptAll) {
+                        self.yes_to_all = true;
                     }
-                    offset = to_char_boundary(
-                        &contents,
-                        offset + mat_start + replacement.len() + usize::from(is_zero_length),
-                    );
+                    session.record_history = !self.yes_to_all;
+                    session.accept(&edit, new_contents);
+                    if matches!(action, PatchAction::Edit) {
+                        run_editor(path, start_line + 1)?;
+                        let contents = read_to_string(path)?;
+                        session.edited(
+                            contents,
+                            edit.window_index,
+                            edit.start + edit.replacement.len(),
+                        )?;
+                    }
                 }
-                PatchAction::AcceptAll => {
-                    self.yes_to_all = true;
-                    Self::save(path, &new_contents)?;
-                    resize_window(
-                        &mut windows,
-                        window_index,
-                        mat_end - mat_start,
-                        replacement.len(),
-                    );
-                    offset = to_char_boundary(
-                        &new_contents,
-                        offset + mat_start + replacement.len() + usize::from(is_zero_length),
-                    );
-                    contents = new_contents;
-                }
+                PatchAction::Skip | PatchAction::Reject => session.reject(),
                 PatchAction::Back => {
-                    if let Some(previous) = history.pop() {
-                        fs::write(path, &previous.contents)?;
-                        contents = previous.contents;
-                        offset = previous.offset;
-                        windows = previous.windows;
-                        window_index = previous.window_index;
-                        expr_idx = previous.expression_index;
-                        match_index = previous.match_index;
-                        match_total = previous.match_total;
-                        active_expr = expr_idx;
+                    let expected = session.state.contents.clone();
+                    if let Some(previous) = session.undo() {
+                        crate::write::commit(path, expected.as_bytes(), previous.as_bytes())?;
                     }
                 }
+                PatchAction::Quit => return Ok(PreviewOutcome::Quit),
+                PatchAction::Interrupted => return Ok(PreviewOutcome::Interrupted),
             }
         }
-        Ok(())
+        Ok(PreviewOutcome::Continue)
     }
 
     fn ask_about_patch(&self, patch: &PatchPrompt<'_>) -> Result<PatchAction> {
+        if self.yes_to_all {
+            return Ok(PatchAction::Accept);
+        }
         let PatchPrompt {
             path,
             old,
@@ -444,72 +478,86 @@ impl InteractivePatcher {
         if diffs.is_empty() {
             return Ok(PatchAction::Skip);
         }
-        // Once every remaining match is accepted there is nobody to show the
-        // diff to, so skip the render and any preview tool spawn.
-        if self.yes_to_all {
-            return Ok(PatchAction::Accept);
-        }
-
         // Hide cursor during rendering to prevent it flashing at
         // intermediate positions while the diff is being painted.
-        terminal::hide_cursor();
+        let cursor = terminal::HiddenCursor::new();
 
         // Clear after computing the diff so there's no visible gap
         terminal::clear();
 
         let display_path = path.to_string_lossy();
         let display_path = display_path.strip_prefix("./").unwrap_or(&display_path);
-        if start_line == end_line {
-            println!("\x1b[1m\x1b[34m{display_path}\x1b[22m:{start_line}\x1b[m");
+        let unbold = if self.styles.is_plain() {
+            ""
         } else {
-            println!("\x1b[1m\x1b[34m{display_path}\x1b[22m:{start_line}-{end_line}\x1b[m");
+            "\x1b[22m"
+        };
+        if start_line == end_line {
+            writeln!(
+                std::io::stdout(),
+                "{}{}{display_path}{}:{start_line}{}",
+                self.styles.bold(),
+                self.styles.fg(Color::Blue),
+                unbold,
+                self.styles.reset()
+            )?;
+        } else {
+            writeln!(
+                std::io::stdout(),
+                "{}{}{display_path}{}:{start_line}-{end_line}{}",
+                self.styles.bold(),
+                self.styles.fg(Color::Blue),
+                unbold,
+                self.styles.reset()
+            )?;
         }
 
         let diff_result = if let Some(ref preview_tool) = self.preview_tool {
             Self::run_external_diff(old, new, preview_tool)
         } else {
-            crate::diff::print_diff(&diffs, Styles::when(true));
-            Ok(())
+            crate::diff::print_diff(&diffs, self.styles).map_err(Into::into)
         };
 
-        terminal::show_cursor();
+        drop(cursor);
         diff_result?;
 
         let is_last = match_index >= match_total;
         let user_input = prompt(
             &format!(
                 "\n{} {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
-                Styles::when(true).bold_paint(
+                self.styles.bold_paint(
                     Color::Yellow,
                     format!("Accept [{match_index}/{match_total}]?")
                 ),
-                Styles::when(true).bold_paint(Color::Green, "y"),
-                Styles::when(true).paint(Color::White, "es "),
-                Styles::when(true).paint(Color::Dim, "· "),
-                Styles::when(true).paint(Color::Red, "n"),
-                Styles::when(true).paint(Color::White, "o "),
-                Styles::when(true).paint(Color::Dim, "· "),
-                Styles::when(true).paint(Color::Blue, "e"),
-                Styles::when(true).paint(Color::White, "dit "),
-                Styles::when(true).paint(Color::Dim, "· "),
-                Styles::when(true).paint(Color::Green, "A"),
-                Styles::when(true).paint(Color::White, "ll "),
-                Styles::when(true).paint(Color::Dim, "· "),
-                Styles::when(true).paint(Color::Red, "q"),
-                Styles::when(true).paint(Color::White, "uit\n"),
-                Styles::when(true).paint(Color::Yellow, "❯ "),
+                self.styles.bold_paint(Color::Green, "y"),
+                self.styles.paint(Color::White, "es "),
+                self.styles.paint(Color::Dim, "· "),
+                self.styles.paint(Color::Red, "n"),
+                self.styles.paint(Color::White, "o "),
+                self.styles.paint(Color::Dim, "· "),
+                self.styles.paint(Color::Blue, "e"),
+                self.styles.paint(Color::White, "dit "),
+                self.styles.paint(Color::Dim, "· "),
+                self.styles.paint(Color::Green, "A"),
+                self.styles.paint(Color::White, "ll "),
+                self.styles.paint(Color::Dim, "· "),
+                self.styles.paint(Color::Red, "q"),
+                self.styles.paint(Color::White, "uit\n"),
+                self.styles.paint(Color::Yellow, "❯ "),
             ),
             "yneAq",
             Some('y'),
             !has_history,
             is_last,
+            self.styles,
         )?;
         match user_input {
             'y' => Ok(PatchAction::Accept),
             'n' => Ok(PatchAction::Reject),
             'e' => Ok(PatchAction::Edit),
             'A' => Ok(PatchAction::AcceptAll),
-            'q' => exit(0),
+            'q' => Ok(PatchAction::Quit),
+            INTERRUPTED => Ok(PatchAction::Interrupted),
             NAV_BACK => Ok(PatchAction::Back),
             NAV_FORWARD => Ok(PatchAction::Reject),
             _ => unreachable!(),
@@ -612,7 +660,121 @@ impl InteractivePatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{backward_to_char_boundary, resize_window, to_char_boundary};
+    use super::{PreviewSession, backward_to_char_boundary, resize_window, to_char_boundary};
+    use crate::expressions::{
+        CompiledExpression, Expression, apply_compiled_expressions, compile_expressions,
+    };
+    use crate::options::MatchOptions;
+
+    fn compiled(find: &str, replace: &str) -> Vec<CompiledExpression> {
+        let options = MatchOptions {
+            preview: true,
+            regexp: true,
+            greedy: true,
+            expressions: vec![Expression {
+                find: find.to_string(),
+                replace: replace.to_string(),
+            }],
+            ..MatchOptions::default()
+        };
+        compile_expressions(&options).unwrap()
+    }
+
+    fn accepted_output(
+        input: &str,
+        expressions: &[CompiledExpression],
+        windows: Vec<(usize, usize)>,
+    ) -> String {
+        let refs: Vec<_> = expressions
+            .iter()
+            .map(CompiledExpression::preview_expr)
+            .collect();
+        let mut session = PreviewSession::new(&refs, input.to_string(), windows).unwrap();
+        while let Some(edit) = session.next().unwrap() {
+            let proposal = session.proposed(&edit);
+            session.accept(&edit, proposal);
+        }
+        session.state.contents
+    }
+
+    #[test]
+    fn preview_accept_all_matches_bulk_boundaries_and_zero_width() {
+        for (input, find, replace) in [
+            ("", r"\z", "tail"),
+            (
+                "aa
+", "^a", "b",
+            ),
+            ("aa", r"\ba", " "),
+            ("ab", r"\z", "tail"),
+            ("ab", r"(?:)", "_"),
+            ("aba", "a*", "x"),
+            ("foo.foo", "(foo)", "[$1]"),
+            ("α α", "α", "αλφα"),
+            ("aa", "a", "aa"),
+        ] {
+            let expressions = compiled(find, replace);
+            let bulk = apply_compiled_expressions(input.as_bytes(), &expressions, false, &[]);
+            assert_eq!(
+                accepted_output(input, &expressions, vec![(0, input.len())]).as_bytes(),
+                bulk.output.as_ref(),
+                "pattern {find:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_rejects_matches_splitting_utf8_without_changing_bulk_semantics() {
+        let expressions = compiled("(?:)", "_");
+        let refs: Vec<_> = expressions
+            .iter()
+            .map(CompiledExpression::preview_expr)
+            .collect();
+        let Err(error) = PreviewSession::new(&refs, "é".to_string(), vec![(0, 2)]) else {
+            panic!("preview must reject byte boundaries inside a character");
+        };
+        assert_eq!(
+            error.to_string(),
+            "preview cannot display a match splitting a UTF-8 character - use non-preview mode"
+        );
+        let bulk = apply_compiled_expressions("é".as_bytes(), &expressions, false, &[]);
+        assert_eq!(bulk.output.as_ref(), b"_\xc3_\xa9_");
+    }
+
+    #[test]
+    fn preview_chains_expressions_and_respects_windows() {
+        let mut expressions = compiled("a", "bb");
+        expressions.extend(compiled("b", "c"));
+        assert_eq!(
+            accepted_output("a\na\na\n", &expressions, vec![(2, 4)]),
+            "a\ncc\na\n"
+        );
+    }
+
+    #[test]
+    fn preview_reject_undo_and_editor_replan_restore_matching_state() {
+        let expressions = compiled("a", "bb");
+        let refs: Vec<_> = expressions
+            .iter()
+            .map(CompiledExpression::preview_expr)
+            .collect();
+        let mut session = PreviewSession::new(&refs, "a a".to_string(), vec![(0, 3)]).unwrap();
+        let first = session.next().unwrap().unwrap();
+        session.reject();
+        assert_eq!(session.next().unwrap().unwrap().start, 2);
+        assert_eq!(session.undo().unwrap(), "a a");
+        assert_eq!(session.next().unwrap().unwrap().start, 0);
+        let proposal = session.proposed(&first);
+        session.accept(&first, proposal);
+        assert_eq!(session.next().unwrap().unwrap().start, 3);
+        session.edited("bb a a".to_string(), 0, 2).unwrap();
+        assert_eq!(session.next().unwrap().unwrap().start, 3);
+        while let Some(edit) = session.next().unwrap() {
+            let proposal = session.proposed(&edit);
+            session.accept(&edit, proposal);
+        }
+        assert_eq!(session.state.contents, "bb bb bb");
+    }
 
     #[test]
     fn test_resize_window_shifts_following_windows() {

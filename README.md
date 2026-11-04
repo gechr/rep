@@ -148,3 +148,15 @@ Set `REP_CONFIG_PATH` to use a different file (e.g. for project-local config), o
 ```sh
 REP_CONFIG_PATH=./rep.toml rep foo bar
 ```
+
+## File writes
+
+Writes use a temporary file in the destination directory followed by atomic replacement. Failures before replacement leave the original contents intact. The destination directory must allow creating and replacing files. Permissions and Unix ownership are preserved, or the write fails; platform-specific ACLs and extended attributes are not guaranteed to be preserved.
+
+An explicitly supplied symlink updates its target and keeps the symlink. Replacing a file with multiple hard links updates the named file only; other links keep the original contents. Overlapping search paths and symlink aliases are deduplicated so each destination is processed once.
+
+If a file changes after it is read, `rep` reports a conflict when it detects the change before committing. Independent files continue processing after an error, and the command exits unsuccessfully if any file could not be processed. Writes are atomic per file, not a transaction across the whole run, and do not guarantee durability after power loss.
+
+File listings and diffs use natural path order. Processing retains a bounded number of files at a time; a finite global hyperlink limit can use temporary disk space to select the final output after counting all replacements.
+
+Interactive preview requires valid UTF-8 text and matches at character boundaries. A byte regex that splits a UTF-8 character is rejected in preview; bulk replacement continues to support byte-oriented matching.

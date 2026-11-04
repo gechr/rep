@@ -14,7 +14,7 @@ use regex::RegexBuilder;
 use regex::bytes::RegexBuilder as BytesRegexBuilder;
 use regex_syntax::ast;
 
-use crate::Cli;
+use crate::options::MatchOptions;
 
 /// Internal separator used by `preprocess_expression_args` to join the two
 /// space-separated `-e <find> <replace>` args into a single clap value.
@@ -22,7 +22,7 @@ use crate::Cli;
 /// and can never contain one.
 pub(crate) const EXPR_SEP: char = '\x00';
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Expression {
     pub(crate) find: String,
     pub(crate) replace: String,
@@ -50,6 +50,7 @@ pub(crate) struct CompiledExpression {
 impl CompiledExpression {
     pub(crate) fn preview_expr(&self) -> crate::interactive::PreviewExpr<'_> {
         crate::interactive::PreviewExpr {
+            bytes_regex: &self.bytes_regex,
             regex: self
                 .regex
                 .as_ref()
@@ -473,7 +474,7 @@ pub(crate) fn build_case_variants(
 /// Builds the `(text, bytes)` patterns for `<find>`. They differ only under
 /// `-d` without `-x`, where the bytes pattern widens the line class so the
 /// match engine can consume invalid UTF-8 on the same line.
-pub(crate) fn build_patterns_for(cli: &Cli, pattern: &str) -> (String, String) {
+pub(crate) fn build_patterns_for(cli: &MatchOptions, pattern: &str) -> (String, String) {
     let base = if cli.is_regex() {
         pattern.to_string()
     } else {
@@ -601,7 +602,7 @@ fn wrap_delete_patterns(inner: &str, line_regexp: bool) -> (String, String) {
     }
 }
 
-pub(crate) fn build_subst_for(cli: &Cli, replacement: &str) -> String {
+pub(crate) fn build_subst_for(cli: &MatchOptions, replacement: &str) -> String {
     if cli.is_regex() {
         replacement.to_string()
     } else {
@@ -609,7 +610,7 @@ pub(crate) fn build_subst_for(cli: &Cli, replacement: &str) -> String {
     }
 }
 
-fn parse_expression(input: &str) -> Result<Expression> {
+pub(crate) fn parse_expression(input: &str) -> Result<Expression> {
     let Some((find, replace)) = input.split_once(EXPR_SEP) else {
         bail!("Invalid expression: expected `-e <find> <replace>`");
     };
@@ -617,13 +618,6 @@ fn parse_expression(input: &str) -> Result<Expression> {
         find: find.to_string(),
         replace: replace.to_string(),
     })
-}
-
-fn parse_expressions(cli: &Cli) -> Result<Vec<Expression>> {
-    cli.expressions
-        .iter()
-        .map(|expr| parse_expression(expr))
-        .collect()
 }
 
 /// Expand visible control-character escapes in replacement arguments.
@@ -661,7 +655,7 @@ fn expand_replacement_escapes(replacement: &str) -> String {
     expanded
 }
 
-fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression> {
+fn compile_expression(cli: &MatchOptions, expr: &Expression) -> Result<CompiledExpression> {
     if cli.preserve {
         // Literal pattern, case-insensitive via embedded `(?i:...)` so the
         // case-folding stays scoped when this pattern is later joined into
@@ -833,7 +827,7 @@ fn compile_expression(cli: &Cli, expr: &Expression) -> Result<CompiledExpression
 }
 
 pub(crate) fn build_pre_filter_matcher(
-    cli: &Cli,
+    cli: &MatchOptions,
     expressions: &[CompiledExpression],
 ) -> Result<RegexMatcher> {
     if expressions.len() == 1 {
@@ -856,38 +850,8 @@ pub(crate) fn build_pre_filter_matcher(
         .with_context(|| format!("Invalid union pre-filter pattern: {union}"))
 }
 
-pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> {
-    let mut expressions = if cli.uses_expressions() {
-        if cli.delete {
-            // In delete mode the replace half of `-e <find> <replace>` is
-            // ignored. Extract only the find part (before the \x00 separator).
-            cli.expressions
-                .iter()
-                .map(|raw| Expression {
-                    find: raw
-                        .split_once(EXPR_SEP)
-                        .map_or(raw.as_str(), |(f, _)| f)
-                        .to_string(),
-                    replace: String::new(),
-                })
-                .collect()
-        } else {
-            parse_expressions(cli)?
-        }
-    } else if cli.args.is_empty() {
-        // Reachable only under `-l` with no positional `<find>` (the main
-        // entry guard requires args otherwise). An empty expression set means
-        // "no content filter" - the walker output is the listing as-is.
-        Vec::new()
-    } else {
-        vec![Expression {
-            find: cli.pattern().to_string(),
-            replace: cli
-                .positional_replace()
-                .map(str::to_string)
-                .unwrap_or_default(),
-        }]
-    };
+pub(crate) fn compile_expressions(cli: &MatchOptions) -> Result<Vec<CompiledExpression>> {
+    let mut expressions = cli.expressions.clone();
 
     for expr in &mut expressions {
         ensure!(
@@ -923,7 +887,42 @@ pub(crate) fn compile_expressions(cli: &Cli) -> Result<Vec<CompiledExpression>> 
 /// merged byte window covering those lines of the original input. Unselected
 /// bytes are stitched back untouched and span offsets use full-buffer
 /// coordinates.
+pub(crate) struct TransformResult<'a> {
+    pub(crate) output: Cow<'a, [u8]>,
+    pub(crate) count: usize,
+    pub(crate) spans: Vec<Replacement>,
+}
+
+#[cfg(test)]
+impl<'a> TransformResult<'a> {
+    fn into_parts(self) -> (Cow<'a, [u8]>, usize, Vec<Replacement>) {
+        (self.output, self.count, self.spans)
+    }
+}
+
 pub(crate) fn apply_compiled_expressions<'a>(
+    contents: &'a [u8],
+    expressions: &[CompiledExpression],
+    track_spans: bool,
+    ranges: &[LineRange],
+) -> TransformResult<'a> {
+    let (output, count, spans) = apply_expressions(contents, expressions, track_spans, ranges);
+    if output.as_ref() == contents {
+        TransformResult {
+            output: Cow::Borrowed(contents),
+            count: 0,
+            spans: Vec::new(),
+        }
+    } else {
+        TransformResult {
+            output,
+            count,
+            spans,
+        }
+    }
+}
+
+fn apply_expressions<'a>(
     contents: &'a [u8],
     expressions: &[CompiledExpression],
     track_spans: bool,
@@ -1163,20 +1162,44 @@ mod tests {
 
     use super::*;
 
-    fn parse_cli(args: &[&str]) -> Cli {
-        let _lock = crate::test_env::lock_for_parse();
-        let processed = crate::preprocess_expression_args(
+    fn apply_parts<'a>(
+        contents: &'a [u8],
+        expressions: &[CompiledExpression],
+        spans: bool,
+        ranges: &[LineRange],
+    ) -> (Cow<'a, [u8]>, usize, Vec<Replacement>) {
+        apply_compiled_expressions(contents, expressions, spans, ranges).into_parts()
+    }
+
+    #[test]
+    fn unchanged_final_output_has_no_count_or_spans() {
+        for args in [
+            &["rep", "-r", "(foo)", "$1"][..],
+            &["rep", "-e", "foo", "bar", "-e", "bar", "foo"],
+        ] {
+            let expressions = compile_expressions(&parse_cli(args)).unwrap();
+            let result = apply_compiled_expressions(b"foo\n", &expressions, true, &[]);
+            assert_eq!(result.count, 0);
+            assert!(result.spans.is_empty());
+            assert!(matches!(result.output, Cow::Borrowed(_)));
+        }
+    }
+
+    fn parse_cli(args: &[&str]) -> MatchOptions {
+        let processed = crate::cli::preprocess_expression_args(
             args.iter().map(std::string::ToString::to_string).collect(),
         );
-        Cli::parse_from(processed)
+        crate::cli::Cli::parse_from(processed)
+            .match_options()
+            .unwrap()
     }
 
-    fn build_pattern(cli: &Cli) -> String {
-        build_patterns_for(cli, cli.pattern()).0
+    fn build_pattern(cli: &MatchOptions) -> String {
+        build_patterns_for(cli, &cli.expressions[0].find).0
     }
 
-    fn build_subst(cli: &Cli) -> String {
-        build_subst_for(cli, cli.replacement())
+    fn build_subst(cli: &MatchOptions) -> String {
+        build_subst_for(cli, &cli.expressions[0].replace)
     }
 
     #[test]
@@ -1285,8 +1308,7 @@ mod tests {
         // "foo" appears at byte offsets 0 and 8 in "foo bar\nfoo baz\n".
         // Each match is 3 bytes ("foo") and produces 3 bytes ("bar"), so
         // input/output offsets line up.
-        let (_out, count, spans) =
-            apply_compiled_expressions(b"foo bar\nfoo baz\n", &expressions, true, &[]);
+        let (_out, count, spans) = apply_parts(b"foo bar\nfoo baz\n", &expressions, true, &[]);
         assert_eq!(count, 2);
         assert_eq!(
             spans,
@@ -1311,8 +1333,7 @@ mod tests {
     fn test_apply_compiled_expressions_skips_spans_when_tracking_disabled() {
         let cli = parse_cli(&["rep", "foo", "bar"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (_out, count, spans) =
-            apply_compiled_expressions(b"foo bar\nfoo baz\n", &expressions, false, &[]);
+        let (_out, count, spans) = apply_parts(b"foo bar\nfoo baz\n", &expressions, false, &[]);
         assert_eq!(count, 2);
         assert!(spans.is_empty());
     }
@@ -1323,7 +1344,7 @@ mod tests {
         // the second match relative to input offsets.
         let cli = parse_cli(&["rep", "ab", "xyz"]);
         let expressions = compile_expressions(&cli).unwrap();
-        let (_out, count, spans) = apply_compiled_expressions(b"ab cd ab", &expressions, true, &[]);
+        let (_out, count, spans) = apply_parts(b"ab cd ab", &expressions, true, &[]);
         assert_eq!(count, 2);
         assert_eq!(
             spans,
@@ -1348,7 +1369,7 @@ mod tests {
         contents: &'a str,
         expressions: &[CompiledExpression],
     ) -> (Cow<'a, str>, usize) {
-        let (out, n, _) = apply_compiled_expressions(contents.as_bytes(), expressions, false, &[]);
+        let (out, n, _) = apply_parts(contents.as_bytes(), expressions, false, &[]);
         let cow = match out {
             Cow::Borrowed(b) => Cow::Borrowed(std::str::from_utf8(b).unwrap()),
             Cow::Owned(o) => Cow::Owned(String::from_utf8(o).unwrap()),
@@ -1797,9 +1818,8 @@ mod tests {
             &["rep", "-d", ""],
         ] {
             let cli = parse_cli(args);
-            let err = match compile_expressions(&cli) {
-                Ok(_) => panic!("{args:?} must be rejected"),
-                Err(err) => err,
+            let Err(err) = compile_expressions(&cli) else {
+                panic!("{args:?} must be rejected");
             };
             assert_eq!(
                 err.to_string(),
@@ -1962,7 +1982,7 @@ mod tests {
             let cli = parse_cli(args);
             let expressions = compile_expressions(&cli).unwrap();
             let input = b"foo \xff bar\nkeep\n\xff foo\nlast\n";
-            let (output, count, _) = apply_compiled_expressions(input, &expressions, false, &[]);
+            let (output, count, _) = apply_parts(input, &expressions, false, &[]);
             assert_eq!(&*output, b"keep\nlast\n", "{args:?}");
             assert_eq!(count, 2, "{args:?}");
         }
@@ -2217,7 +2237,7 @@ mod tests {
             start: 2,
             end: Some(3),
         }];
-        let (output, count, _) = apply_compiled_expressions(
+        let (output, count, _) = apply_parts(
             b"foo 1\nfoo 2\nfoo 3\nfoo 4\n",
             &expressions,
             false,
@@ -2238,7 +2258,7 @@ mod tests {
         // Line 2 starts at byte 6; its "foo" sits at bytes 6..9 in both the
         // input and (prefix is untouched) the output.
         let (output, count, spans) =
-            apply_compiled_expressions(b"foo 1\nfoo 2\nfoo 3\n", &expressions, true, &ranges);
+            apply_parts(b"foo 1\nfoo 2\nfoo 3\n", &expressions, true, &ranges);
         assert_eq!(output.as_ref(), b"foo 1\nbarbar 2\nfoo 3\n");
         assert_eq!(count, 1);
         assert_eq!(
@@ -2260,8 +2280,7 @@ mod tests {
             start: 2,
             end: Some(2),
         }];
-        let (output, count, _) =
-            apply_compiled_expressions(b"foo\nxxx\nfoo\n", &expressions, false, &ranges);
+        let (output, count, _) = apply_parts(b"foo\nxxx\nfoo\n", &expressions, false, &ranges);
         assert!(matches!(output, Cow::Borrowed(_)));
         assert_eq!(count, 0);
     }
@@ -2274,8 +2293,7 @@ mod tests {
             start: 99,
             end: Some(100),
         }];
-        let (output, count, _) =
-            apply_compiled_expressions(b"one\ntwo\n", &expressions, false, &ranges);
+        let (output, count, _) = apply_parts(b"one\ntwo\n", &expressions, false, &ranges);
         assert_eq!(output.as_ref(), b"one\ntwo\n");
         assert_eq!(count, 0);
     }
@@ -2288,12 +2306,8 @@ mod tests {
             start: 2,
             end: Some(3),
         }];
-        let (output, count, _) = apply_compiled_expressions(
-            b"foo a\nfoo b\nkeep\nfoo c\n",
-            &expressions,
-            false,
-            &ranges,
-        );
+        let (output, count, _) =
+            apply_parts(b"foo a\nfoo b\nkeep\nfoo c\n", &expressions, false, &ranges);
         assert_eq!(output.as_ref(), b"foo a\nkeep\nfoo c\n");
         assert_eq!(count, 1);
     }
@@ -2306,8 +2320,7 @@ mod tests {
             start: 2,
             end: Some(2),
         }];
-        let (output, count, _) =
-            apply_compiled_expressions(b"a b\na b\na b\n", &expressions, false, &ranges);
+        let (output, count, _) = apply_parts(b"a b\na b\na b\n", &expressions, false, &ranges);
         // Both expressions apply inside the window only: a -> b -> c.
         assert_eq!(output.as_ref(), b"a b\nc c\na b\n");
         assert_eq!(count, 3);
@@ -2331,7 +2344,7 @@ mod tests {
                 end: Some(6),
             },
         ];
-        let (output, count, spans) = apply_compiled_expressions(
+        let (output, count, spans) = apply_parts(
             b"foo1\nfoo2\nfoo3\nfoo4\nfoo5\nfoo6\n",
             &expressions,
             true,

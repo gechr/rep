@@ -18,12 +18,19 @@ pub(super) fn clear() {
     drop(stdout.execute(crossterm::cursor::MoveTo(0, 0)));
 }
 
-pub(super) fn hide_cursor() {
-    drop(io::stdout().execute(crossterm::cursor::Hide));
+pub(super) struct HiddenCursor;
+
+impl HiddenCursor {
+    pub(super) fn new() -> Self {
+        drop(io::stdout().execute(crossterm::cursor::Hide));
+        Self
+    }
 }
 
-pub(super) fn show_cursor() {
-    drop(io::stdout().execute(crossterm::cursor::Show));
+impl Drop for HiddenCursor {
+    fn drop(&mut self) {
+        drop(io::stdout().execute(crossterm::cursor::Show));
+    }
 }
 
 pub(super) fn size() -> Option<(usize, usize)> {

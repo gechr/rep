@@ -11,10 +11,10 @@ use clap::Parser as _;
 use test::Bencher;
 use test::black_box;
 
-use crate::Cli;
+use crate::cli::Cli;
 use crate::diff::{self, DiffHints};
 use crate::expressions::{
-    CompiledExpression, LineRange, apply_compiled_expressions, compile_expressions,
+    CompiledExpression, LineRange, TransformResult, apply_compiled_expressions, compile_expressions,
 };
 use crate::theme::StyleSpec;
 use crate::ui::Styles;
@@ -36,9 +36,9 @@ fn corpus() -> String {
 /// Compile expressions the way the run path does, straight from argv.
 fn compile(args: &[&str]) -> Vec<CompiledExpression> {
     let processed =
-        crate::preprocess_expression_args(args.iter().map(|s| (*s).to_string()).collect());
+        crate::cli::preprocess_expression_args(args.iter().map(|s| (*s).to_string()).collect());
     let cli = Cli::parse_from(processed);
-    compile_expressions(&cli).expect("benchmark expressions compile")
+    compile_expressions(&cli.match_options().unwrap()).expect("benchmark expressions compile")
 }
 
 #[bench]
@@ -46,8 +46,9 @@ fn apply_single_expression(b: &mut Bencher) {
     let text = corpus();
     let exprs = compile(&["rep", "needle", "replaced"]);
     b.iter(|| {
-        let (out, count, _) =
-            apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false, &[]);
+        let TransformResult {
+            output: out, count, ..
+        } = apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false, &[]);
         black_box((out, count));
     });
 }
@@ -57,8 +58,11 @@ fn apply_single_expression_with_spans(b: &mut Bencher) {
     let text = corpus();
     let exprs = compile(&["rep", "needle", "replaced"]);
     b.iter(|| {
-        let (out, count, spans) =
-            apply_compiled_expressions(black_box(text.as_bytes()), &exprs, true, &[]);
+        let TransformResult {
+            output: out,
+            count,
+            spans,
+        } = apply_compiled_expressions(black_box(text.as_bytes()), &exprs, true, &[]);
         black_box((out, count, spans));
     });
 }
@@ -82,8 +86,9 @@ fn apply_single_expression_line_ranges(b: &mut Bencher) {
         },
     ];
     b.iter(|| {
-        let (out, count, _) =
-            apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false, &ranges);
+        let TransformResult {
+            output: out, count, ..
+        } = apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false, &ranges);
         black_box((out, count));
     });
 }
@@ -93,8 +98,9 @@ fn apply_multi_expression(b: &mut Bencher) {
     let text = corpus();
     let exprs = compile(&["rep", "-e", "needle", "replaced", "-e", "compute", "derive"]);
     b.iter(|| {
-        let (out, count, _) =
-            apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false, &[]);
+        let TransformResult {
+            output: out, count, ..
+        } = apply_compiled_expressions(black_box(text.as_bytes()), &exprs, false, &[]);
         black_box((out, count));
     });
 }
@@ -103,7 +109,9 @@ fn apply_multi_expression(b: &mut Bencher) {
 fn render_colored_diff(b: &mut Bencher) {
     let text = corpus();
     let exprs = compile(&["rep", "needle", "replaced"]);
-    let (out, _, spans) = apply_compiled_expressions(text.as_bytes(), &exprs, true, &[]);
+    let TransformResult {
+        output: out, spans, ..
+    } = apply_compiled_expressions(text.as_bytes(), &exprs, true, &[]);
     let new = String::from_utf8(out.into_owned()).expect("utf8 output");
     let hints = DiffHints {
         spans: &spans,
