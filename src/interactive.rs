@@ -216,7 +216,6 @@ struct PreviewSession<'a> {
     expressions: &'a [PreviewExpr<'a>],
     state: PreviewState,
     history: Vec<PreviewState>,
-    record_history: bool,
 }
 
 impl<'a> PreviewSession<'a> {
@@ -237,7 +236,6 @@ impl<'a> PreviewSession<'a> {
                 inserted: 0,
             },
             history: Vec::new(),
-            record_history: true,
         };
         session.plan(0)?;
         Ok(session)
@@ -304,11 +302,7 @@ impl<'a> PreviewSession<'a> {
     }
 
     fn accept(&mut self, edit: &PlannedEdit, contents: String) {
-        if self.record_history {
-            self.history.push(self.state.clone());
-        } else {
-            self.history.clear();
-        }
+        self.history.push(self.state.clone());
         let old_len = edit.end - edit.start;
         let new_len = edit.replacement.len();
         resize_window(&mut self.state.windows, edit.window_index, old_len, new_len);
@@ -316,6 +310,44 @@ impl<'a> PreviewSession<'a> {
         self.state.removed += old_len;
         self.state.inserted += new_len;
         self.state.contents = contents;
+    }
+
+    /// Finish each expression in one pass and persist the final file once.
+    /// Already accepted or rejected decisions stay outside the remaining plan.
+    fn accept_remaining(mut self, path: &Path) -> Result<()> {
+        let expected = self.state.contents.clone();
+        self.history.clear();
+        while self.state.expression_index < self.expressions.len() {
+            if self.state.cursor < self.state.edits.len() {
+                let mut contents = String::with_capacity(self.state.contents.len());
+                let mut copied = 0;
+                let mut changes = vec![(0, 0); self.state.windows.len()];
+                for edit in &self.state.edits[self.state.cursor..] {
+                    let start = edit.start - self.state.removed + self.state.inserted;
+                    let end = edit.end - self.state.removed + self.state.inserted;
+                    contents.push_str(&self.state.contents[copied..start]);
+                    contents.push_str(&edit.replacement);
+                    copied = end;
+                    changes[edit.window_index].0 += end - start;
+                    changes[edit.window_index].1 += edit.replacement.len();
+                }
+                contents.push_str(&self.state.contents[copied..]);
+                let (mut removed, mut inserted) = (0, 0);
+                for ((start, end), (old, new)) in self.state.windows.iter_mut().zip(changes) {
+                    *start = *start - removed + inserted;
+                    removed += old;
+                    inserted += new;
+                    *end = *end - removed + inserted;
+                }
+                self.state.contents = contents;
+            }
+            self.state.expression_index += 1;
+            self.plan(0)?;
+        }
+        if self.state.contents != expected {
+            crate::write::commit(path, expected.as_bytes(), self.state.contents.as_bytes())?;
+        }
+        Ok(())
     }
 
     fn reject(&mut self) {
@@ -403,6 +435,10 @@ impl<'theme> InteractivePatcher<'theme> {
         windows: Vec<(usize, usize)>,
     ) -> Result<PreviewOutcome> {
         let mut session = PreviewSession::new(expressions, contents, windows)?;
+        if self.yes_to_all {
+            session.accept_remaining(path)?;
+            return Ok(PreviewOutcome::Continue);
+        }
         while let Some(edit) = session.next()? {
             let new_contents = session.proposed(&edit);
             let start_line = index_to_row_col(&session.state.contents, edit.start).0;
@@ -425,16 +461,17 @@ impl<'theme> InteractivePatcher<'theme> {
                 has_history: !session.history.is_empty(),
             })?;
             match action {
-                PatchAction::Accept | PatchAction::AcceptAll | PatchAction::Edit => {
+                PatchAction::AcceptAll => {
+                    self.yes_to_all = true;
+                    session.accept_remaining(path)?;
+                    return Ok(PreviewOutcome::Continue);
+                }
+                PatchAction::Accept | PatchAction::Edit => {
                     crate::write::commit(
                         path,
                         session.state.contents.as_bytes(),
                         new_contents.as_bytes(),
                     )?;
-                    if matches!(action, PatchAction::AcceptAll) {
-                        self.yes_to_all = true;
-                    }
-                    session.record_history = !self.yes_to_all;
                     session.accept(&edit, new_contents);
                     if matches!(action, PatchAction::Edit) {
                         run_editor(path, start_line + 1)?;
@@ -461,9 +498,6 @@ impl<'theme> InteractivePatcher<'theme> {
     }
 
     fn ask_about_patch(&self, patch: &PatchPrompt<'_>) -> Result<PatchAction> {
-        if self.yes_to_all {
-            return Ok(PatchAction::Accept);
-        }
         let PatchPrompt {
             path,
             old,
@@ -660,11 +694,17 @@ impl<'theme> InteractivePatcher<'theme> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PreviewSession, backward_to_char_boundary, resize_window, to_char_boundary};
+    use super::{
+        InteractivePatcher, PreviewSession, backward_to_char_boundary, resize_window,
+        to_char_boundary,
+    };
     use crate::expressions::{
         CompiledExpression, Expression, apply_compiled_expressions, compile_expressions,
     };
     use crate::options::MatchOptions;
+    use crate::ui::Styles;
+    use std::fs::read_to_string;
+    use tempfile::NamedTempFile;
 
     fn compiled(find: &str, replace: &str) -> Vec<CompiledExpression> {
         let options = MatchOptions {
@@ -697,6 +737,24 @@ mod tests {
         session.state.contents
     }
 
+    fn batched_output(
+        input: &str,
+        expressions: &[CompiledExpression],
+        windows: Vec<(usize, usize)>,
+    ) -> String {
+        let refs: Vec<_> = expressions
+            .iter()
+            .map(CompiledExpression::preview_expr)
+            .collect();
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), input).unwrap();
+        let mut patcher = InteractivePatcher::new(true, None, 3, Styles::PLAIN);
+        patcher
+            .present_and_apply_patches_multi(&refs, file.path(), input.to_owned(), windows)
+            .unwrap();
+        read_to_string(file.path()).unwrap()
+    }
+
     #[test]
     fn preview_accept_all_matches_bulk_boundaries_and_zero_width() {
         for (input, find, replace) in [
@@ -719,6 +777,11 @@ mod tests {
                 accepted_output(input, &expressions, vec![(0, input.len())]).as_bytes(),
                 bulk.output.as_ref(),
                 "pattern {find:?}"
+            );
+            assert_eq!(
+                batched_output(input, &expressions, vec![(0, input.len())]).as_bytes(),
+                bulk.output.as_ref(),
+                "batched pattern {find:?}"
             );
         }
     }
@@ -749,6 +812,89 @@ mod tests {
             accepted_output("a\na\na\n", &expressions, vec![(2, 4)]),
             "a\ncc\na\n"
         );
+        assert_eq!(
+            batched_output("a\na\na\n", &expressions, vec![(0, 2), (4, 6)]),
+            "cc\na\ncc\n"
+        );
+    }
+
+    #[test]
+    fn accept_remaining_preserves_prior_decisions_and_shifts() {
+        for replacement in ["", "bb", "αλφα"] {
+            let expressions = compiled("a", replacement);
+            let refs: Vec<_> = expressions
+                .iter()
+                .map(CompiledExpression::preview_expr)
+                .collect();
+            let mut session =
+                PreviewSession::new(&refs, "a a a a".to_owned(), vec![(0, 3), (4, 7)]).unwrap();
+            session.reject();
+            let edit = session.next().unwrap().unwrap();
+            let contents = session.proposed(&edit);
+            session.accept(&edit, contents);
+            let file = NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), &session.state.contents).unwrap();
+            session.accept_remaining(file.path()).unwrap();
+            assert_eq!(
+                read_to_string(file.path()).unwrap(),
+                format!("a {replacement} {replacement} {replacement}")
+            );
+        }
+    }
+
+    #[test]
+    fn accept_remaining_keeps_range_end_after_shrinking_and_rejecting() {
+        use crate::expressions::{LineRange, line_range_windows};
+
+        let input = "b\n\nababb\nab";
+        let mut expressions = compiled("a", "");
+        expressions.extend(compiled("\n", "Z"));
+        let refs: Vec<_> = expressions
+            .iter()
+            .map(CompiledExpression::preview_expr)
+            .collect();
+        let windows = line_range_windows(
+            input.as_bytes(),
+            &[LineRange {
+                start: 1,
+                end: Some(3),
+            }],
+        );
+        let mut session = PreviewSession::new(&refs, input.to_owned(), windows).unwrap();
+        session.reject();
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), input).unwrap();
+        session.accept_remaining(file.path()).unwrap();
+        assert_eq!(read_to_string(file.path()).unwrap(), "bZZabbbZab");
+    }
+
+    #[test]
+    fn accept_remaining_does_not_persist_partial_expression_results() {
+        let mut expressions = compiled("a", "é");
+        expressions.extend(compiled("(?:)", "_"));
+        let refs: Vec<_> = expressions
+            .iter()
+            .map(CompiledExpression::preview_expr)
+            .collect();
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "a").unwrap();
+        let session = PreviewSession::new(&refs, "a".to_owned(), vec![(0, 1)]).unwrap();
+        assert!(session.accept_remaining(file.path()).is_err());
+        assert_eq!(read_to_string(file.path()).unwrap(), "a");
+    }
+
+    #[test]
+    fn accept_remaining_preserves_concurrent_changes() {
+        let expressions = compiled("a", "b");
+        let refs: Vec<_> = expressions
+            .iter()
+            .map(CompiledExpression::preview_expr)
+            .collect();
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "concurrent edit").unwrap();
+        let session = PreviewSession::new(&refs, "a a".to_owned(), vec![(0, 3)]).unwrap();
+        assert!(session.accept_remaining(file.path()).is_err());
+        assert_eq!(read_to_string(file.path()).unwrap(), "concurrent edit");
     }
 
     #[test]

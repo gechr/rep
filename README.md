@@ -160,3 +160,5 @@ If a file changes after it is read, `rep` reports a conflict when it detects the
 File listings and diffs use natural path order. Processing retains a bounded number of files at a time; a finite global hyperlink limit can use temporary disk space to select the final output after counting all replacements.
 
 Interactive preview requires valid UTF-8 text and matches at character boundaries. A byte regex that splits a UTF-8 character is rejected in preview; bulk replacement continues to support byte-oriented matching.
+
+Preview saves each individually accepted change before the next prompt. Accepting all remaining changes batches them into one atomic write per file, including any later expressions.
