@@ -26,6 +26,40 @@ use crate::engine::Candidate;
 
 type Result<T> = ::std::result::Result<T, Error>;
 
+/// Each walker keeps its results locally and merges once when it finishes.
+/// Candidate metadata is read without holding the shared collection lock.
+struct Discovery<'a> {
+    shared: &'a std::sync::Mutex<(Vec<Candidate>, Vec<Error>)>,
+    paths: Vec<Candidate>,
+    errors: Vec<Error>,
+}
+
+impl Drop for Discovery<'_> {
+    fn drop(&mut self) {
+        let mut shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shared.0.append(&mut self.paths);
+        shared.1.append(&mut self.errors);
+    }
+}
+
+fn compare_path_text(a_text: &str, b_text: &str) -> std::cmp::Ordering {
+    // Identical directory components cannot affect natural ordering. Stop at
+    // a separator so a shared numeric prefix is never split within a number.
+    let mut start = 0;
+    for (index, (left, right)) in a_text.bytes().zip(b_text.bytes()).enumerate() {
+        if left != right {
+            break;
+        }
+        if left == b'/' || (cfg!(windows) && left == b'\\') {
+            start = index + 1;
+        }
+    }
+    natord::compare(&a_text[start..], &b_text[start..])
+}
+
 #[derive(Clone)]
 pub(crate) struct FileSet {
     pub(crate) matches: Vec<String>,
@@ -233,13 +267,14 @@ pub(crate) fn discover(
         .threads(crate::engine::thread_count())
         .build_parallel()
         .run(|| {
-            Box::new(|entry| {
+            let mut local = Discovery {
+                shared: &found,
+                paths: Vec::new(),
+                errors: Vec::new(),
+            };
+            Box::new(move |entry| {
                 match entry {
-                    Err(error) => found
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .1
-                        .push(Error::new(error)),
+                    Err(error) => local.errors.push(Error::new(error)),
                     Ok(entry) => {
                         // Ignore-file diagnostics do not prevent traversal or processing.
                         if let Some(error) = entry.error() {
@@ -259,11 +294,7 @@ pub(crate) fn discover(
                                 path: entry.into_path(),
                                 size,
                             };
-                            found
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .0
-                                .push(candidate);
+                            local.paths.push(candidate);
                         }
                     }
                 }
@@ -277,7 +308,9 @@ pub(crate) fn discover(
         .into_iter()
         .map(|candidate| (crate::hyperlink::display_path(&candidate.path), candidate))
         .collect();
-    keyed.sort_by(|(a, ap), (b, bp)| natord::compare(a, b).then_with(|| ap.path.cmp(&bp.path)));
+    keyed.sort_unstable_by(|(a, ap), (b, bp)| {
+        compare_path_text(a, b).then_with(|| ap.path.cmp(&bp.path))
+    });
     let mut paths: Vec<_> = keyed.into_iter().map(|(_, path)| path).collect();
     // A single root cannot alias itself: the walker does not follow nested symlinks.
     // Canonicalization is only needed to reconcile overlapping explicit roots.
@@ -324,6 +357,53 @@ mod tests {
     use std::path::Path;
 
     use super::{is_candidate_path, is_vcs_path};
+
+    fn compare_paths(a: &Path, b: &Path) -> std::cmp::Ordering {
+        super::compare_path_text(
+            &crate::hyperlink::display_path(a),
+            &crate::hyperlink::display_path(b),
+        )
+        .then_with(|| a.cmp(b))
+    }
+
+    #[test]
+    fn path_comparison_preserves_full_natural_order() {
+        let names = [
+            "./dir2/file01",
+            "dir2/file1",
+            "dir2/file10",
+            "dir02/file2",
+            "dir2/file 2",
+            "dir2/file2",
+            "dir10/file1",
+            "dir2/nested/file3",
+            "dir2/é2",
+            "dir2/é10",
+            "other/file2",
+            "dir2/file1/child",
+        ];
+        for left in names {
+            for right in names {
+                let a = Path::new(left);
+                let b = Path::new(right);
+                let expected = natord::compare(
+                    &crate::hyperlink::display_path(a),
+                    &crate::hyperlink::display_path(b),
+                )
+                .then_with(|| a.cmp(b));
+                assert_eq!(compare_paths(a, b), expected, "{left:?} / {right:?}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_keep_their_raw_tiebreak_order() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let a = Path::new(std::ffi::OsStr::from_bytes(b"dir/file\xff2"));
+        let b = Path::new(std::ffi::OsStr::from_bytes(b"dir/file\xfe2"));
+        assert_eq!(compare_paths(a, b), a.cmp(b));
+    }
 
     #[test]
     fn test_is_candidate_path_accepts_regular_source_file() {
