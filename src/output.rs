@@ -286,6 +286,64 @@ mod failure_tests {
     }
 
     #[test]
+    fn either_spool_creation_failure_streams_unlinked_output() {
+        for fail_at in [1, 2] {
+            let printer = ResultPrinter {
+                styles: Styles::ansi(),
+                hyperlink_format: Some("vscode"),
+                hyperlink_limit: 1,
+                ..printer()
+            };
+            let mut out = Vec::new();
+            let mut calls = 0;
+            let mut sink = Sink::with_spool_factory(&printer, &mut out, true, || {
+                calls += 1;
+                if calls == fail_at {
+                    Err(io::Error::other("spool unavailable"))
+                } else {
+                    tempfile::tempfile()
+                }
+            });
+            for _ in 0..2 {
+                assert!(sink.push(&Rendered {
+                    count: 1,
+                    plain: b"plain block\n".to_vec(),
+                    linked: Some(b"linked block\n".to_vec()),
+                }));
+            }
+            sink.finish().unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.starts_with("plain block\n\nplain block\n"));
+            assert!(!text.contains("linked block"));
+            assert!(text.contains("Would perform 2 replacements in 2 files"));
+        }
+    }
+
+    #[test]
+    fn spool_fallback_still_reports_output_failures() {
+        let printer = ResultPrinter {
+            styles: Styles::ansi(),
+            hyperlink_format: Some("vscode"),
+            hyperlink_limit: 1,
+            ..printer()
+        };
+        let mut sink = Sink::with_spool_factory(
+            &printer,
+            FailingWriter {
+                fail_on_flush: false,
+            },
+            true,
+            || Err(io::Error::other("spool unavailable")),
+        );
+        assert!(!sink.push(&Rendered {
+            count: 1,
+            plain: b"patch".to_vec(),
+            linked: None,
+        }));
+        assert_eq!(sink.finish().unwrap_err().to_string(), "write failed");
+    }
+
+    #[test]
     fn output_write_failure_is_returned_by_finish() {
         let printer = printer();
         let mut sink = Sink::new(
@@ -347,6 +405,15 @@ pub(crate) struct Sink<'a, W> {
 
 impl<'a, W: io::Write> Sink<'a, W> {
     pub(crate) fn new(printer: &'a ResultPrinter<'a>, out: W, colored: bool) -> Self {
+        Self::with_spool_factory(printer, out, colored, tempfile::tempfile)
+    }
+
+    fn with_spool_factory(
+        printer: &'a ResultPrinter<'a>,
+        out: W,
+        colored: bool,
+        mut create: impl FnMut() -> io::Result<std::fs::File>,
+    ) -> Self {
         let spools = if colored
             && !printer.styles.is_plain()
             && printer.hyperlink_format.is_some()
@@ -354,16 +421,19 @@ impl<'a, W: io::Write> Sink<'a, W> {
         {
             Some((|| -> io::Result<Spools> {
                 Ok(Spools {
-                    plain: tempfile::tempfile()?,
-                    linked: Some(tempfile::tempfile()?),
+                    plain: create()?,
+                    linked: Some(create()?),
                 })
             })())
         } else {
             None
         };
-        let (spools, error) = match spools.transpose() {
-            Ok(spools) => (spools, None),
-            Err(error) => (None, Some(error)),
+        let spools = match spools.transpose() {
+            Ok(spools) => spools,
+            Err(error) => {
+                eprintln!("Warning: unable to create output spool - hyperlinks disabled ({error})");
+                None
+            }
         };
         Self {
             printer,
@@ -372,7 +442,7 @@ impl<'a, W: io::Write> Sink<'a, W> {
             files: 0,
             matches: 0,
             spools,
-            error,
+            error: None,
         }
     }
 
@@ -403,10 +473,9 @@ impl<'a, W: io::Write> Sink<'a, W> {
                 Ok(())
             })
         } else {
-            write_block(
-                &mut self.out,
-                result.linked.as_deref().unwrap_or(&result.plain),
-            )
+            // Unlimited links are already in `plain`. A finite limit without
+            // spools must stay unlinked because the final total is unknown.
+            write_block(&mut self.out, &result.plain)
         };
         if let Err(error) = written {
             self.error = Some(error);

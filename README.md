@@ -157,7 +157,7 @@ An explicitly supplied symlink updates its target and keeps the symlink. Replaci
 
 If a file changes after it is read, `rep` reports a conflict when it detects the change before committing. Independent files continue processing after an error, and the command exits unsuccessfully if any file could not be processed. Writes are atomic per file, not a transaction across the whole run, and do not guarantee durability after power loss.
 
-File listings and diffs use natural path order. Processing retains a bounded number of files at a time; a finite global hyperlink limit can use temporary disk space to select the final output after counting all replacements.
+File listings and diffs use natural path order. Processing retains a bounded number of files at a time; a finite global hyperlink limit can use temporary disk space to select the final output after counting all replacements. If the output spool cannot be created, `rep` warns and streams output with hyperlinks disabled. Errors while writing or reading an existing spool still fail the command.
 
 Interactive preview requires valid UTF-8 text and matches at character boundaries. A byte regex that splits a UTF-8 character is rejected in preview; bulk replacement continues to support byte-oriented matching.
 

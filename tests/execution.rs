@@ -173,3 +173,50 @@ fn non_utf8_paths_survive_argument_parsing_and_replacement() {
     assert_eq!(output.stdout, b"1\n");
     assert_eq!(fs::read(path).unwrap(), b"bar\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn missing_spool_directory_keeps_diffs_and_file_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    for mode in ["--dry-run", "--write"] {
+        for name in ["a.txt", "b.txt"] {
+            fs::write(dir.path().join(name), "foo\n").unwrap();
+        }
+        let output = command()
+            .args([
+                mode,
+                "--color=always",
+                "--hyperlink-format=vscode",
+                "--hyperlink-limit=1",
+                "foo",
+                "bar",
+                ".",
+            ])
+            .env("TMPDIR", dir.path().join("missing"))
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(!text.contains("\x1b]8;"));
+        assert!(text.contains("\x1b["));
+        assert!(text.find("a.txt").unwrap() < text.find("b.txt").unwrap());
+        assert!(text.contains("foo"));
+        assert!(text.contains("bar"));
+        let verb = if mode == "--write" {
+            "Performed"
+        } else {
+            "Would perform"
+        };
+        assert!(text.contains(&format!("{verb} 2 replacements in 2 files")));
+        let warning = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(warning.lines().count(), 1);
+        assert!(
+            warning.starts_with("Warning: unable to create output spool - hyperlinks disabled (")
+        );
+        for name in ["a.txt", "b.txt"] {
+            let expected = if mode == "--write" { "bar\n" } else { "foo\n" };
+            assert_eq!(fs::read_to_string(dir.path().join(name)).unwrap(), expected);
+        }
+    }
+}
